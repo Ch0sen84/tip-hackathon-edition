@@ -341,11 +341,118 @@ const TRANSITION_RULE_GLOSS = {
   no_rule_matched_state_unchanged: "No transition rule matched; state left unchanged.",
 };
 
+// --- Candlestick chart + evidence markers (Priority 1/2) --------------------
+//
+// Uses the vendored TradingView Lightweight Charts v4.2.0 (Apache 2.0,
+// license header preserved in lightweight-charts.js) loaded as a global
+// `LightweightCharts` before this file. Candle/marker data is ALWAYS
+// supplied by the caller (app.live.js's /api/ticker/{t}/ohlc fetch, or
+// app.static.js's data/ohlc/{t}.json load) -- this function renders
+// whatever it is given and never fetches anything itself, consistent
+// with the rest of this file's "no fetch() here" rule.
+
+function dateOnly(ts) {
+  return String(ts).slice(0, 10);
+}
+
+// Finds the latest candle date <= the marker's date (markers can land on
+// a non-trading day -- e.g. an alert timestamped intraday maps onto that
+// trading day's daily bar). Falls back to the first candle if the marker
+// predates the whole series, rather than silently dropping it.
+function nearestBarTime(markerDate, sortedCandleDates) {
+  let best = null;
+  for (const t of sortedCandleDates) {
+    if (t <= markerDate) best = t;
+    else break;
+  }
+  return best || sortedCandleDates[0] || null;
+}
+
+function renderChartUnavailable(reason) {
+  const detail = reason && reason.message ? reason.message
+    : reason && reason.status ? `UW status: ${reason.status}`
+    : "No OHLC data available for this ticker in the current mode.";
+  return `<div class="chart-unavailable">Chart data unavailable &mdash; ${esc(detail)}</div>`;
+}
+
+// Mounts (or re-renders, if called again) a candlestick chart with
+// evidence markers into the DOM node with id `containerId`. `ohlc` is the
+// exact shape returned by /api/ticker/{t}/ohlc (live) or
+// data/ohlc/{t}.json (static demo) -- see backend/app/core/candles.py.
+function mountCandlestickChart(containerId, ohlc) {
+  const root = document.getElementById(containerId);
+  if (!root) return;
+
+  if (!ohlc || ohlc.unavailable || !ohlc.candles || !ohlc.candles.length) {
+    root.innerHTML = renderChartUnavailable(ohlc ? ohlc.reason : null);
+    return;
+  }
+  if (typeof LightweightCharts === "undefined") {
+    root.innerHTML = `<div class="chart-unavailable">Chart library failed to load (lightweight-charts.js missing or blocked).</div>`;
+    return;
+  }
+
+  root.innerHTML = "";
+  const chart = LightweightCharts.createChart(root, {
+    height: 320,
+    layout: { background: { color: "transparent" }, textColor: "#9aa4b2" },
+    grid: {
+      vertLines: { color: "rgba(255,255,255,0.06)" },
+      horzLines: { color: "rgba(255,255,255,0.06)" },
+    },
+    timeScale: { borderColor: "rgba(255,255,255,0.12)" },
+    rightPriceScale: { borderColor: "rgba(255,255,255,0.12)" },
+  });
+  const series = chart.addCandlestickSeries({
+    upColor: "#22d3a8", downColor: "#ef4444", borderVisible: false,
+    wickUpColor: "#22d3a8", wickDownColor: "#ef4444",
+  });
+
+  const bars = ohlc.candles.map((c) => ({
+    time: dateOnly(c.t), open: c.o, high: c.h, low: c.l, close: c.c,
+  }));
+  series.setData(bars);
+  const candleDates = bars.map((b) => b.time);
+
+  const markers = (ohlc.markers || []).map((m) => {
+    const barTime = nearestBarTime(dateOnly(m.time), candleDates);
+    if (!barTime) return null;
+    const text = m.price != null
+      ? `${m.label} @ ${Number(m.price).toFixed(2)}`
+      : `${m.label} (time only -- no price field in source data)`;
+    return {
+      time: barTime,
+      position: m.kind === "darkpool_trade" ? "belowBar" : "aboveBar",
+      color: m.kind === "darkpool_trade" ? "#60a5fa" : "#f59e0b",
+      shape: "circle",
+      text,
+    };
+  }).filter(Boolean);
+  series.setMarkers(markers);
+  chart.timeScale().fitContent();
+
+  root._tipChart = chart;
+  if (!root._tipResizeObserverAttached && typeof ResizeObserver !== "undefined") {
+    const ro = new ResizeObserver(() => {
+      if (root._tipChart && root.clientWidth > 0) {
+        root._tipChart.applyOptions({ width: root.clientWidth });
+      }
+    });
+    ro.observe(root);
+    root._tipResizeObserverAttached = true;
+  }
+}
+
 function renderTickerDetail(d) {
   const gatesHtml = renderGateGroups(d.gates);
   const stateGloss = STATE_GLOSS[d.state] || "";
   const ruleGloss = TRANSITION_RULE_GLOSS[d.transition_rule] || "internal rule identifier";
   return `
+    <div class="card chart-card">
+      <div class="card-head"><strong>Price Chart &mdash; ${esc(d.ticker)}</strong>
+        <span class="muted">evidence markers from the same flow_alerts/darkpool_trades the gates use</span></div>
+      <div id="ohlcChartContainer" class="chart-container"><div class="empty">Loading chart...</div></div>
+    </div>
     <div class="detail-grid">
       <div class="card">
         <div class="card-head"><span class="tk">${esc(d.ticker)}</span>

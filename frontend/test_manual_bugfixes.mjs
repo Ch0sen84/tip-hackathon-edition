@@ -52,6 +52,27 @@ global.document = {
 };
 global.history = { replaceState: () => {} };
 global.location = { pathname: "/", search: "", hash: "" };
+global.ResizeObserver = class { observe() {} };
+// Minimal fake of the vendored LightweightCharts global so
+// mountCandlestickChart() (app.core.js) runs its real logic end to end
+// (data mapping, marker time-matching, unavailable-state branch) without
+// needing an actual browser canvas. Captures what the real function
+// would have handed to the real library, for the chart checks below.
+let lastChartCall = null;
+global.LightweightCharts = {
+  createChart: () => {
+    const call = { bars: null, markers: null, width: null };
+    lastChartCall = call;
+    return {
+      addCandlestickSeries: () => ({
+        setData: (d) => { call.bars = d; },
+        setMarkers: (m) => { call.markers = m; },
+      }),
+      timeScale: () => ({ fitContent: () => {} }),
+      applyOptions: (opts) => { if (opts && opts.width) call.width = opts.width; },
+    };
+  },
+};
 // Real fetch against the real running backend (Node's built-in global
 // fetch, Node >=18) -- no response mocking whatsoever.
 
@@ -110,6 +131,7 @@ async function main() {
     [
       "setMode", "loadRadar", "loadTickerDetail", "setCurrentTicker", "TIP_STATE",
       "loadSettings", "testUwKey", "saveUwKey", "disconnectUwKey", "apiPost", "apiGet",
+      "mountCandlestickChart",
     ],
   );
 
@@ -161,6 +183,44 @@ async function main() {
     });
     check(`${t}: investigate section rendered (no crash)`, () => {
       assert.ok(el("investigateSection").innerHTML.includes("Investigate with AI"));
+    });
+  }
+
+  console.log(`\n=== Priority 1/2: candlestick chart + evidence markers (real backend data) ===`);
+  lastChartCall = null;
+  await liveB.loadTickerDetail("FLUX");
+  check("FLUX: chart mounted with real OHLC bars from the backend", () => {
+    assert.ok(lastChartCall, "LightweightCharts.createChart was never called");
+    assert.ok(Array.isArray(lastChartCall.bars) && lastChartCall.bars.length > 0, "no bars passed to setData");
+    for (const b of lastChartCall.bars) {
+      assert.ok(typeof b.time === "string" && typeof b.open === "number" && typeof b.close === "number");
+    }
+  });
+  check("FLUX: markers include at least one priced marker (real price field present)", () => {
+    const priced = (lastChartCall.markers || []).filter((m) => m.text && m.text.includes("@"));
+    assert.ok(priced.length > 0, `no priced marker found: ${JSON.stringify(lastChartCall.markers)}`);
+  });
+  check("FLUX: no marker is placed off the rendered bar range (every marker.time is one of the bars)", () => {
+    const barTimes = new Set(lastChartCall.bars.map((b) => b.time));
+    for (const m of lastChartCall.markers || []) {
+      assert.ok(barTimes.has(m.time), `marker time ${m.time} not among rendered bar times`);
+    }
+  });
+
+  console.log(`\n=== Priority 1/2: chart degrades to an explicit message, never blank/silent, on unavailable data ===`);
+  check("mountCandlestickChart renders an explicit unavailable message, not a blank container", () => {
+    el("ohlcChartContainer").innerHTML = "<div>stale</div>";
+    liveB.mountCandlestickChart("ohlcChartContainer", { unavailable: true, reason: { message: "test-forced unavailable" } });
+    const html = el("ohlcChartContainer").innerHTML;
+    assert.ok(html.toLowerCase().includes("unavailable"), html);
+    assert.ok(html.includes("test-forced unavailable"), html);
+  });
+
+  console.log(`\n=== Priority 4: every scenario ticker's Ticker Analysis loads without crashing ===`);
+  for (const t of ["FLUX", "QRVX", "ZYNC", "DRFT", "NADA"]) {
+    await liveB.loadTickerDetail(t);
+    check(`${t}: selectable and loadable via Ticker Analysis`, () => {
+      assert.ok(el("tickerDetail").innerHTML.includes(t));
     });
   }
 

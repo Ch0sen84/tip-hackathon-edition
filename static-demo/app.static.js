@@ -70,6 +70,12 @@ async function loadTickerDetail(ticker) {
   try {
     const d = await loadJson(`data/ticker/${encodeURIComponent(ticker)}.json`);
     el.innerHTML = renderTickerDetail(d);
+    try {
+      const ohlc = await loadJson(`data/ohlc/${encodeURIComponent(ticker)}.json`);
+      mountCandlestickChart("ohlcChartContainer", ohlc);
+    } catch (chartErr) {
+      mountCandlestickChart("ohlcChartContainer", { unavailable: true, reason: { message: chartErr.message } });
+    }
     await loadInvestigateSection(ticker);
   } catch (err) {
     el.innerHTML = `<div class="empty">Error loading ${esc(ticker)}: ${esc(err.message)}</div>`;

@@ -35,5 +35,16 @@ class UWDataAdapter(ABC):
         structure if the adapter couldn't get one."""
         raise NotImplementedError
 
+    @abstractmethod
+    def get_ohlc(self, ticker: str, timeframe: str = "1d", limit: int = 180) -> dict:
+        """Candlestick bars for `ticker`. Returns
+        {"candles": [{"t","o","h","l","c","v"[,"v_raw"]}], "source": str,
+        "negative_volume_bars_clamped": int, "unavailable": bool,
+        "reason": Optional[dict]}. `unavailable` is True (never an
+        exception) when the adapter genuinely has no OHLC data -- an
+        unentitled live key, or a synthetic scenario with no captured
+        series -- so callers degrade gracefully instead of guessing."""
+        raise NotImplementedError
+
     def health(self) -> dict:
         return {"mode": getattr(self, "mode", "unknown")}

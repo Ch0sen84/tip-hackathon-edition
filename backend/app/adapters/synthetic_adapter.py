@@ -58,6 +58,27 @@ class SyntheticDataAdapter(UWDataAdapter):
         scenario = self._scenarios.get(ticker.upper())
         return dict(scenario["stock_state"]) if scenario and scenario.get("stock_state") else None
 
+    def get_ohlc(self, ticker: str, timeframe: str = "1d", limit: int = 180) -> dict:
+        """Returns the scenario's pre-authored `ohlc` series, if the fixture
+        has one. No synthesis happens here -- a scenario fixture with no
+        `ohlc` key (or an unknown ticker) honestly reports `unavailable`
+        rather than fabricating bars on the fly."""
+        scenario = self._scenarios.get(ticker.upper())
+        series = scenario.get("ohlc") if scenario else None
+        if not series:
+            return {
+                "candles": [], "source": "synthetic_fixture",
+                "negative_volume_bars_clamped": 0, "unavailable": True,
+                "reason": {"message": f"No captured OHLC fixture for {ticker.upper()}"},
+            }
+        from ..core.candles import build_candles
+        candles, _neg = build_candles(series, dedupe_daily=(timeframe == "1d"))
+        candles = candles[-int(limit or 180):]
+        return {
+            "candles": candles, "source": "synthetic_fixture",
+            "negative_volume_bars_clamped": 0, "unavailable": False, "reason": None,
+        }
+
     def health(self) -> dict:
         return {"mode": self.mode, "scenarios_loaded": len(self._scenarios),
                 "fixtures_dir": str(self.fixtures_dir)}

@@ -52,12 +52,31 @@ class QualifyingDaysStore:
 
     def __init__(self, db_path: str = "./data/tip_hackathon.db"):
         self.db_path = db_path
+        # sqlite3's ':memory:' creates a BRAND NEW empty database on every
+        # connect() call -- a fresh connection per method call (as the file
+        # case correctly does, for safe multi-process file locking) would
+        # silently lose the schema/data after __init__'s own connection
+        # closes. Keep one persistent connection alive for the lifetime of
+        # this store when using ':memory:' (test/ephemeral use only); file
+        # paths keep the original open-close-per-call pattern.
+        # check_same_thread=False: FastAPI's TestClient (and sync routes in
+        # general) run request handlers in a worker threadpool, so this one
+        # persistent in-memory connection is legitimately used from more
+        # than one thread across the store's lifetime. SQLite itself is
+        # fine with that as long as access isn't concurrent, which it
+        # isn't here (one request at a time through this store).
+        self._persistent_conn = (
+            sqlite3.connect(db_path, check_same_thread=False) if db_path == ":memory:" else None
+        )
         if db_path != ":memory:":
             Path(db_path).parent.mkdir(parents=True, exist_ok=True)
         self._init_schema()
 
     @contextmanager
     def _conn(self):
+        if self._persistent_conn is not None:
+            yield self._persistent_conn
+            return
         conn = sqlite3.connect(self.db_path)
         try:
             yield conn

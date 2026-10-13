@@ -35,6 +35,7 @@ from .ai.simulated import get_simulated_transcript
 from .ai.validation import ValidationError as AiValidationError
 from .config import settings
 from .core import scan_service, tip_evidence
+from .core.candles import build_markers
 from .settings_store import SettingsStore, last4
 from .storage import QualifyingDaysStore
 
@@ -394,6 +395,36 @@ def ticker_analysis(ticker: str):
         "stock_state": scan.get("stock_state"),
         "history": store.history(ticker),
         "raw": scan["raw"],
+    }
+
+
+@app.get("/api/ticker/{ticker}/ohlc")
+def ticker_ohlc(ticker: str, timeframe: str = "1d", limit: int = 180):
+    """Candlestick bars + evidence markers for the Ticker Analysis chart.
+    Markers come from the SAME flow_alerts/darkpool_trades the detection
+    engine already uses -- never a new data source, never an invented
+    price (see backend/app/core/candles.py::build_markers). `unavailable`
+    is a structured, non-crashing result (e.g. an unentitled live key, or
+    a demo scenario with no captured OHLC fixture) -- the frontend must
+    show an explicit "chart data unavailable" state, not silently render
+    nothing."""
+    adapter = get_adapter()
+    ticker = ticker.upper()
+    if ticker not in adapter.get_universe():
+        raise HTTPException(status_code=404, detail=f"{ticker} is not in the current adapter universe")
+    ohlc = adapter.get_ohlc(ticker, timeframe=timeframe, limit=limit)
+    flow_alerts = adapter.get_flow_alerts(ticker)
+    darkpool_trades = adapter.get_darkpool_trades(ticker)
+    markers = build_markers(flow_alerts, darkpool_trades)
+    return {
+        "ticker": ticker,
+        "timeframe": timeframe,
+        "candles": ohlc.get("candles", []),
+        "source": ohlc.get("source"),
+        "negative_volume_bars_clamped": ohlc.get("negative_volume_bars_clamped", 0),
+        "unavailable": ohlc.get("unavailable", False),
+        "reason": ohlc.get("reason"),
+        "markers": markers,
     }
 
 

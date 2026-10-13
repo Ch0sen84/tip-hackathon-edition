@@ -16,7 +16,149 @@
   ],
   "stock_state": {
     "ticker": "QRVX",
-    "last_price": 70.40,
+    "last_price": 70.4,
     "change_percent": 0.3
-  }
+  },
+  "ohlc": [
+    {
+      "date": "2026-09-23",
+      "open": 66.76,
+      "high": 67.15,
+      "low": 66.41,
+      "close": 66.75,
+      "volume": 2273245,
+      "market_time": "r",
+      "total_volume": 2273245
+    },
+    {
+      "date": "2026-09-24",
+      "open": 67.17,
+      "high": 67.34,
+      "low": 67.03,
+      "close": 67.03,
+      "volume": 1935141,
+      "market_time": "r",
+      "total_volume": 1935141
+    },
+    {
+      "date": "2026-09-25",
+      "open": 67.25,
+      "high": 67.87,
+      "low": 67.05,
+      "close": 67.32,
+      "volume": 1710167,
+      "market_time": "r",
+      "total_volume": 1710167
+    },
+    {
+      "date": "2026-09-28",
+      "open": 67.91,
+      "high": 68.12,
+      "low": 67.57,
+      "close": 67.73,
+      "volume": 1515943,
+      "market_time": "r",
+      "total_volume": 1515943
+    },
+    {
+      "date": "2026-09-29",
+      "open": 68.14,
+      "high": 68.55,
+      "low": 67.57,
+      "close": 67.89,
+      "volume": 1559739,
+      "market_time": "r",
+      "total_volume": 1559739
+    },
+    {
+      "date": "2026-09-30",
+      "open": 68.31,
+      "high": 68.5,
+      "low": 68.01,
+      "close": 68.37,
+      "volume": 1129184,
+      "market_time": "r",
+      "total_volume": 1129184
+    },
+    {
+      "date": "2026-10-01",
+      "open": 68.43,
+      "high": 69.05,
+      "low": 68.16,
+      "close": 68.77,
+      "volume": 965417,
+      "market_time": "r",
+      "total_volume": 965417
+    },
+    {
+      "date": "2026-10-02",
+      "open": 68.48,
+      "high": 69.08,
+      "low": 68.02,
+      "close": 68.92,
+      "volume": 1181369,
+      "market_time": "r",
+      "total_volume": 1181369
+    },
+    {
+      "date": "2026-10-05",
+      "open": 68.86,
+      "high": 69.34,
+      "low": 68.37,
+      "close": 68.92,
+      "volume": 1197971,
+      "market_time": "r",
+      "total_volume": 1197971
+    },
+    {
+      "date": "2026-10-06",
+      "open": 69.63,
+      "high": 69.82,
+      "low": 69.02,
+      "close": 69.53,
+      "volume": 1046709,
+      "market_time": "r",
+      "total_volume": 1046709
+    },
+    {
+      "date": "2026-10-07",
+      "open": 69.37,
+      "high": 70.2,
+      "low": 69.02,
+      "close": 69.78,
+      "volume": 2379263,
+      "market_time": "r",
+      "total_volume": 2379263
+    },
+    {
+      "date": "2026-10-08",
+      "open": 69.75,
+      "high": 70.5,
+      "low": 69.58,
+      "close": 69.87,
+      "volume": 2260000,
+      "market_time": "r",
+      "total_volume": 2260000
+    },
+    {
+      "date": "2026-10-09",
+      "open": 70.15,
+      "high": 70.49,
+      "low": 69.93,
+      "close": 70.1,
+      "volume": 919746,
+      "market_time": "r",
+      "total_volume": 919746
+    },
+    {
+      "date": "2026-10-12",
+      "open": 70.44,
+      "high": 71.35,
+      "low": 69.72,
+      "close": 70.4,
+      "volume": 1246667,
+      "market_time": "r",
+      "total_volume": 1246667
+    }
+  ]
 }

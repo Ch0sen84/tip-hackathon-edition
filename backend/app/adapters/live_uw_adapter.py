@@ -29,6 +29,7 @@ from typing import Optional
 import requests
 
 from .base import UWDataAdapter
+from ..core.candles import build_candles, clamp_limit
 
 DEFAULT_BASE_URL = "https://api.unusualwhales.com"
 UNAVAILABLE = "unavailable_on_tier"
@@ -107,7 +108,10 @@ class UWRestClient:
         return self.get(f"/api/stock/{ticker}/options-volume", {"limit": limit})
 
     def stock_ohlc(self, ticker: str, timeframe: str = "1d", limit: int = 30) -> dict:
-        return self.get(f"/api/stock/{ticker}/ohlc", {"timeframe": timeframe, "limit": limit})
+        # Path-segment form (/api/stock/{ticker}/ohlc/{size}) -- confirmed live
+        # (Phase-A verification) for both daily ("1d") and intraday ("5m" etc.)
+        # sizes. The size string is UW's own vocabulary; pass timeframe through.
+        return self.get(f"/api/stock/{ticker}/ohlc/{timeframe}", {"limit": limit})
 
     def darkpool_recent(self, limit: int = 100, min_premium: Optional[int] = None) -> dict:
         return self.get("/api/darkpool/recent", {"limit": limit, "min_premium": min_premium})
@@ -189,6 +193,22 @@ class LiveUWAdapter(UWDataAdapter):
             return {"unavailable": True, "reason": body}
         data = body.get("data") or body
         return data if data else None
+
+    def get_ohlc(self, ticker: str, timeframe: str = "1d", limit: int = 180) -> dict:
+        safe_limit = clamp_limit(limit)
+        body = self.client.stock_ohlc(ticker, timeframe=timeframe, limit=safe_limit)
+        if not isinstance(body, dict) or body.get("status") in (UNAVAILABLE, UNAUTHORIZED, ERROR):
+            return {
+                "candles": [], "source": "unusual_whales_stock_ohlc",
+                "negative_volume_bars_clamped": 0, "unavailable": True,
+                "reason": body if isinstance(body, dict) else None,
+            }
+        raw = body.get("data") or []
+        candles, neg_vol_count = build_candles(raw, dedupe_daily=(timeframe == "1d"))
+        return {
+            "candles": candles, "source": "unusual_whales_stock_ohlc",
+            "negative_volume_bars_clamped": neg_vol_count, "unavailable": False, "reason": None,
+        }
 
     def health(self) -> dict:
         probe = self.client.stock_state("SPY")

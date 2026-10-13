@@ -113,6 +113,14 @@ async function loadTickerDetail(ticker) {
     const d = await apiGet(`/api/ticker/${encodeURIComponent(ticker)}`);
     if (mySeq !== _navSeq) return; // superseded by a newer ticker/mode switch
     el.innerHTML = renderTickerDetail(d);
+    try {
+      const ohlc = await apiGet(`/api/ticker/${encodeURIComponent(ticker)}/ohlc`);
+      if (mySeq !== _navSeq) return;
+      mountCandlestickChart("ohlcChartContainer", ohlc);
+    } catch (chartErr) {
+      if (mySeq !== _navSeq) return;
+      mountCandlestickChart("ohlcChartContainer", { unavailable: true, reason: { message: chartErr.message } });
+    }
     await loadInvestigateSection(ticker, mySeq);
   } catch (err) {
     if (mySeq !== _navSeq) return;
