@@ -115,6 +115,19 @@ curl -s http://localhost:8000/api/radar
 Tell the user the app is available at **http://localhost:8000/** (frontend
 and API on the same port). Nothing further is required for demo mode.
 
+Before telling the user it's ready, verify the binding is what they
+intended (loopback-only by default) rather than assuming it:
+
+```bash
+tools/check_deployment_binding.sh <compose_project_name>
+```
+
+This fails loudly if the container ended up published on `0.0.0.0`/`::`
+(every interface) instead of the intended `BIND_HOST`. The Settings UI's
+credential-management endpoints have no authentication of their own --
+they rely entirely on this network-level binding, so this check matters
+more than it might look like for a demo app.
+
 ### h. Enabling Live UW mode (optional, user-driven)
 
 Live mode replaces synthetic fixtures with real Unusual Whales API calls.

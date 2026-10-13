@@ -250,7 +250,22 @@ cp .env.example .env   # edit if using TIP_MODE=live
 docker compose up --build
 ```
 
-Serves on `http://localhost:8000/`.
+Serves on `http://127.0.0.1:8000/` by default -- loopback-only, not
+reachable from your LAN or the internet. `BIND_HOST`/`BIND_PORT` in
+`.env.example` control this; see that file for how to open it to a
+specific LAN interface if you want to reach it from another device
+(**never** set `BIND_HOST=0.0.0.0`, which exposes it on every interface,
+including any public one). The Settings UI's credential-management
+endpoints have no authentication of their own -- they rely entirely on
+this network-level binding, so after deploying, verify the actual
+published binding matches what you intended:
+
+```bash
+tools/check_deployment_binding.sh <your-compose-project-name>
+```
+
+This fails loudly if the container is published on `0.0.0.0`/`::` (every
+interface) unless you explicitly set `ALLOW_PUBLIC_BIND=1` first.
 
 ## AI-assisted installation
 

@@ -2,7 +2,15 @@ services:
   tip-hackathon:
     build: .
     ports:
-      - "8000:8000"
+      # Configurable bind address/port, SAFE-BY-DEFAULT (loopback only).
+      # See .env.example's BIND_HOST/BIND_PORT for how to open this to your
+      # LAN -- do not set BIND_HOST=0.0.0.0 unless you specifically intend
+      # to expose this on every network interface (the Settings UI's
+      # credential-management endpoints have no additional auth of their
+      # own; they rely entirely on this network-level binding for
+      # protection). Run tools/check_deployment_binding.sh after deploying
+      # to verify the actual published binding matches what you intended.
+      - "${BIND_HOST:-127.0.0.1}:${BIND_PORT:-8000}:8000"
     environment:
       TIP_MODE: ${TIP_MODE:-demo}
       UW_API_KEY: ${UW_API_KEY:-}
