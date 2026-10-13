@@ -13,6 +13,7 @@ backend/app/core/tip_evidence.py for display. No business logic lives here.
 """
 from __future__ import annotations
 
+import os
 from datetime import date, timedelta
 from typing import Optional
 
@@ -21,12 +22,14 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
 
 from .adapters.base import UWDataAdapter
-from .adapters.live_uw_adapter import LiveUWAdapter
+from .adapters.live_uw_adapter import ERROR, UNAUTHORIZED, UNAVAILABLE, LiveUWAdapter, UWRestClient
 from .adapters.synthetic_adapter import SyntheticDataAdapter
 from .config import settings
 from .core import scan_service, tip_evidence
+from .settings_store import SettingsStore, last4
 from .storage import QualifyingDaysStore
 
 app = FastAPI(title="TIP Hackathon Edition", version="0.1.0")
@@ -39,21 +42,46 @@ app.add_middleware(
 )
 
 _adapter: Optional[UWDataAdapter] = None
+_adapter_sig: Optional[tuple] = None
 _store: Optional[QualifyingDaysStore] = None
+_settings_store = SettingsStore(os.environ.get("TIP_SETTINGS_PATH", "./data/settings.json"))
+_last_uw_test_result: Optional[str] = None  # in-memory only, informational; never persisted
+
+
+def _effective_uw_key(store_data: dict) -> tuple[Optional[str], str]:
+    """A UI-saved key always wins over the .env/environment fallback value
+    (see config.py docstring + README). Returns (key_or_None, source)."""
+    ui_key = store_data.get("uw_api_key")
+    if ui_key:
+        return ui_key, "ui"
+    if settings.uw_api_key:
+        return settings.uw_api_key, "env"
+    return None, "none"
+
+
+def _reset_adapter_cache() -> None:
+    global _adapter, _adapter_sig
+    _adapter = None
+    _adapter_sig = None
 
 
 def get_adapter() -> UWDataAdapter:
-    global _adapter
-    if _adapter is None:
-        if settings.is_demo:
+    global _adapter, _adapter_sig
+    data = _settings_store.get_all()
+    mode = data["mode"]
+    key, _source = _effective_uw_key(data)
+    sig = (mode, key)
+    if _adapter is None or _adapter_sig != sig:
+        if mode != "live":
             _adapter = SyntheticDataAdapter(settings.fixtures_dir)
         else:
             _adapter = LiveUWAdapter(
-                api_key=settings.uw_api_key,
+                api_key=key or "",
                 base_url=settings.uw_base_url,
                 client_api_id=settings.uw_client_api_id,
                 watchlist=settings.live_watchlist,
             )
+        _adapter_sig = sig
     return _adapter
 
 
@@ -118,12 +146,152 @@ def _to_evidence_item(scan: dict) -> dict:
 @app.get("/api/health")
 def health():
     adapter = get_adapter()
-    return {"ok": True, "mode": settings.mode, "adapter": adapter.health()}
+    return {"ok": True, "mode": _settings_store.get_mode(), "adapter": adapter.health()}
 
 
 @app.get("/api/mode")
 def mode():
-    return {"mode": settings.mode}
+    return {"mode": _settings_store.get_mode()}
+
+
+# --- Settings / credentials -------------------------------------------
+#
+# These routes are the only place UW/AI API keys are read or written.
+# Keys are NEVER included in a response body -- only a `configured`
+# boolean and the key's last 4 characters (for user recognition) are ever
+# returned. See settings_store.py for the on-disk format and
+# README "Credential precedence" for the .env-vs-UI-key precedence rule.
+
+
+class ModeBody(BaseModel):
+    mode: str
+
+
+class UwKeyBody(BaseModel):
+    api_key: str
+
+
+class AiKeyBody(BaseModel):
+    provider: str
+    api_key: str
+
+
+@app.get("/api/settings")
+def get_settings():
+    data = _settings_store.get_all()
+    uw_key, uw_source = _effective_uw_key(data)
+    ai_key = data.get("ai_api_key")
+    return {
+        "mode": data["mode"],
+        "public_demo": settings.public_demo,
+        "uw": {
+            "configured": bool(uw_key),
+            "source": uw_source,  # "ui" | "env" | "none"
+            "last4": last4(uw_key),
+            "last_test_result": _last_uw_test_result,
+        },
+        "ai": {
+            "configured": bool(ai_key),
+            "provider": data.get("ai_provider"),
+            "last4": last4(ai_key),
+        },
+    }
+
+
+@app.post("/api/settings/mode")
+def set_mode(body: ModeBody):
+    requested = body.mode.strip().lower()
+    if requested not in ("demo", "live"):
+        raise HTTPException(status_code=400, detail="mode must be 'demo' or 'live'")
+    if requested == "live":
+        if settings.public_demo:
+            raise HTTPException(
+                status_code=403,
+                detail="Live mode is not available in the public demo build.",
+            )
+        key, _source = _effective_uw_key(_settings_store.get_all())
+        if not key:
+            raise HTTPException(
+                status_code=400,
+                detail="Cannot switch to live mode: no UW API key is configured yet.",
+            )
+    data = _settings_store.set_mode(requested)
+    _reset_adapter_cache()
+    return {"mode": data["mode"]}
+
+
+@app.post("/api/settings/uw-key")
+def save_uw_key(body: UwKeyBody):
+    if settings.public_demo:
+        raise HTTPException(status_code=403, detail="Credential entry is not available in the public demo build.")
+    key = body.api_key.strip()
+    if not key:
+        raise HTTPException(status_code=400, detail="api_key must not be empty")
+    _settings_store.set_uw_key(key)
+    _reset_adapter_cache()
+    global _last_uw_test_result
+    _last_uw_test_result = None
+    return {"configured": True, "last4": last4(key)}
+
+
+@app.post("/api/settings/uw-key/test")
+def test_uw_key():
+    """Real live test against the UW API using whichever key is currently
+    effective (UI-saved, else .env fallback) -- not a stub. Never raises on
+    a UW-side error; every branch returns a structured, keyless result."""
+    global _last_uw_test_result
+    data = _settings_store.get_all()
+    key, source = _effective_uw_key(data)
+    if not key:
+        _last_uw_test_result = "not_configured"
+        return {"result": "not_configured", "message": "No UW API key is configured.", "source": source}
+
+    client = UWRestClient(
+        api_key=key,
+        base_url=settings.uw_base_url,
+        client_api_id=settings.uw_client_api_id,
+    )
+    body = client.stock_info("SPY")  # cheap, cache-friendly endpoint used purely as a connectivity probe
+    status = body.get("status") if isinstance(body, dict) else None
+    if status == UNAUTHORIZED:
+        result, message = "unauthorized", "Unusual Whales rejected this API key (401)."
+    elif status == UNAVAILABLE:
+        result, message = "forbidden_tier_limited", "This endpoint isn't available on the configured UW tier (403)."
+    elif status == ERROR:
+        result, message = "network_error", "Could not reach the Unusual Whales API."
+    else:
+        result, message = "success", "Connected to the Unusual Whales API."
+    _last_uw_test_result = result
+    return {"result": result, "message": message, "source": source}
+
+
+@app.delete("/api/settings/uw-key")
+def delete_uw_key():
+    data = _settings_store.clear_uw_key()
+    _reset_adapter_cache()
+    global _last_uw_test_result
+    _last_uw_test_result = None
+    return {"configured": False, "mode": data["mode"]}
+
+
+@app.post("/api/settings/ai-key")
+def save_ai_key(body: AiKeyBody):
+    if settings.public_demo:
+        raise HTTPException(status_code=403, detail="Credential entry is not available in the public demo build.")
+    provider = body.provider.strip().lower()
+    if provider not in ("anthropic", "openai"):
+        raise HTTPException(status_code=400, detail="provider must be 'anthropic' or 'openai'")
+    key = body.api_key.strip()
+    if not key:
+        raise HTTPException(status_code=400, detail="api_key must not be empty")
+    _settings_store.set_ai_key(provider, key)
+    return {"configured": True, "provider": provider, "last4": last4(key)}
+
+
+@app.delete("/api/settings/ai-key")
+def delete_ai_key():
+    _settings_store.clear_ai_key()
+    return {"configured": False}
 
 
 @app.get("/api/radar")
