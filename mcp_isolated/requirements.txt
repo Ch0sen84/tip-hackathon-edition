@@ -1,0 +1,26 @@
+# Isolated requirements for the real MCP-protocol transport of
+# "Investigate with AI". Installed into mcp_isolated/venv/ ONLY -- this
+# file is never merged into backend/requirements.txt and this venv is
+# never on the main app's PYTHONPATH. See README.md "Investigate with AI
+# -> transport decision" for why this lives in its own venv.
+#
+# Version choice (checked 2026-10-12 against PyPI + OSV):
+#   - mcp 1.9.4 (the only version compatible with the main app's pinned
+#     FastAPI/Starlette if installed in the SAME venv) has three published
+#     HIGH-severity advisories: GHSA-9h52-p55h-vw2f, GHSA-j975-95f5-7wqh,
+#     GHSA-jpw9-pfvf-9f58 (plus GHSA-vj7q-gjh5-988w, fixed later).
+#   - Because this venv is fully isolated from the main app, the
+#     Starlette-version conflict that forced 1.9.4 in the first place does
+#     not apply here -- we can and do use the current release instead.
+#   - mcp==2.3.0 (current latest as of this check) returns ZERO vulnerabilities
+#     from the OSV API (https://api.osv.dev/v1/query, package=mcp,
+#     ecosystem=PyPI, version=2.3.0) -- all four advisories above are fixed
+#     by 1.27.2/1.28.1 and do not affect 2.3.0. It also only requires
+#     starlette>=0.27 (not >=1.7 as an earlier check assumed), but that no
+#     longer matters here anyway since nothing else shares this venv.
+#   - All of 1.9.4's published advisories are about SERVER-side HTTP
+#     transports (SSE/WebSocket/StreamableHTTP session auth) we never run;
+#     this code is a pure MCP CLIENT connecting outbound to UW's hosted
+#     server, so even the fixed-in-1.9.4 issues were never reachable here.
+#   - Requires-Python >=3.10; runtime here is 3.13.5, so no issue.
+mcp==2.3.0

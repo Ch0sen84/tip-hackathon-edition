@@ -29,6 +29,7 @@ from .adapters.live_uw_adapter import ERROR, UNAUTHORIZED, UNAVAILABLE, LiveUWAd
 from .adapters.synthetic_adapter import SyntheticDataAdapter
 from .ai import orchestrator as ai_orchestrator
 from .ai.llm_provider import LLMCallError
+from .ai.mcp_tool_client import MCPSubprocessError
 from .ai.schemas import MalformedAIResponse
 from .ai.simulated import get_simulated_transcript
 from .ai.validation import ValidationError as AiValidationError
@@ -442,6 +443,7 @@ def investigate_ticker(ticker: str):
             uw_api_key=uw_key,
             uw_base_url=settings.uw_base_url,
             uw_client_api_id=settings.uw_client_api_id,
+            transport=settings.investigate_transport,
         )
     except AiValidationError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -451,6 +453,8 @@ def investigate_ticker(ticker: str):
         raise HTTPException(status_code=502, detail=f"AI returned a malformed response: {e}")
     except LLMCallError as e:
         raise HTTPException(status_code=502, detail=f"AI provider call failed: {e}")
+    except MCPSubprocessError as e:
+        raise HTTPException(status_code=502, detail=f"MCP transport unavailable: {e}")
 
     return result.model_dump()
 

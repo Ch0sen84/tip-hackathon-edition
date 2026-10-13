@@ -31,6 +31,14 @@ class Settings:
         self.public_demo = _bool(os.environ.get("PUBLIC_DEMO"))
         self.uw_base_url = os.environ.get("UW_BASE_URL", "https://api.unusualwhales.com")
         self.uw_client_api_id = os.environ.get("UW_CLIENT_API_ID", "")
+        # "rest" (default) -> REST-ported tool calls via UWRestClient, the
+        # documented fallback transport. "mcp" -> real MCP-protocol calls
+        # against UW's hosted https://api.unusualwhales.com/api/mcp server
+        # via the isolated subprocess in app/ai/mcp_tool_client.py (see
+        # mcp_isolated/ at the repo root). Any other value falls back to
+        # "rest" rather than crashing on a typo.
+        _transport = os.environ.get("INVESTIGATE_TRANSPORT", "rest").strip().lower()
+        self.investigate_transport = _transport if _transport in ("rest", "mcp") else "rest"
         self.db_path = os.environ.get("TIP_DB_PATH", "./data/tip_hackathon.db")
         self.fixtures_dir = os.environ.get(
             "TIP_FIXTURES_DIR",

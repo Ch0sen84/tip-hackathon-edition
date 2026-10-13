@@ -62,43 +62,61 @@ dependency, and makes no calls to the production TIP service.
    (Docker, CI, a laptop), so it reads `UW_API_KEY` from the environment
    (see `.env.example`). Never commit a real key.
 
-5. **"Investigate with AI" uses a REST fallback, NOT real MCP protocol --
-   read this before calling this a "uses UW's official MCP server"
-   submission.** The plan was to speak real MCP (the official `mcp` Python
-   SDK's streamable-HTTP client) to UW's hosted server at
-   `https://api.unusualwhales.com/api/mcp`. In practice:
-   - The current PyPI `mcp` release (2.3.0) pulls in `starlette>=1.7`,
-     which is incompatible with this repo's pinned `fastapi==0.115.6`
-     (`fastapi` requires `starlette<0.42`) -- installing it broke 17 of
-     the existing 73 tests (`Router.__init__() got an unexpected keyword
-     argument 'on_startup'`) by silently upgrading `starlette` out from
-     under FastAPI.
-   - Downgrading to an `mcp` release old enough to coexist (`1.9.4`) comes
-     with three published HIGH-severity OSV advisories
+5. **"Investigate with AI" -> MCP transport: real MCP protocol now works,
+   via an isolated venv -- read this for the full transport-decision
+   history.** The original plan was to speak real MCP (the official `mcp`
+   Python SDK's streamable-HTTP client) to UW's hosted server at
+   `https://api.unusualwhales.com/api/mcp`, *in the same venv/process as
+   the main FastAPI app*. That specific approach genuinely doesn't work:
+   - The current PyPI `mcp` release pulls in a `starlette` floor that's
+     incompatible with this repo's pinned `fastapi==0.115.6`/`starlette`
+     combination when installed into the *same* venv -- installing it
+     broke part of the existing test suite by upgrading `starlette` out
+     from under FastAPI.
+   - Downgrading to an `mcp` release old enough to coexist in that same
+     venv (`1.9.4`) comes with three published HIGH-severity OSV advisories
      (GHSA-9h52-p55h-vw2f, GHSA-j975-95f5-7wqh, GHSA-jpw9-pfvf-9f58).
-   Per this task's explicit fallback instruction, that combination (break
-   the app's own test suite, or ship a dependency with known HIGH
-   advisories) was treated as the "major unexpected complexity" trigger,
-   and the feature was built on a REST fallback instead:
-   `backend/app/ai/rest_tool_client.py` executes each allowlisted tool name
-   (`get_flow_alerts`, `get_dark_pool_trades`, etc. -- see
-   `backend/app/ai/allowlist.py`) as a plain REST call against the same
-   `https://api.unusualwhales.com` host `LiveUWAdapter` already talks to,
-   reusing `UWRestClient`. The tool *names* match the allowlist given for
-   this task exactly; only the transport underneath is REST, not MCP. **We
-   never connected to the live hosted MCP server at all, so the exact tool
-   names/args were not independently verified against it** -- the mapping
-   in `rest_tool_client.py` is a best-effort match to UW's public REST API
-   paths, with a couple (`get_institutional_ownership_by_ticker`,
-   `get_analyst_ratings`) going through a UWRestClient endpoint path that
-   isn't already wired up elsewhere in this repo and so is unconfirmed on
-   every tier. **If this is submitted to the hackathon as "uses UW's
-   official MCP server," that claim would be false for this feature; it
-   should be described as "uses the UW REST API, with an AI agent
-   selecting which endpoints to call within a hard 4-call bound," not as
-   an MCP integration.** Re-attempting real MCP (e.g. once an `mcp` release
-   compatible with current FastAPI pins ships, or by isolating it in its
-   own venv/process) is a reasonable follow-up, not done here.
+
+   Both of those are **same-venv** problems, though, not inherent problems
+   with real MCP. Re-checking PyPI/OSV (2026-10-12): `mcp==2.3.0` (current
+   latest) now returns **zero** advisories from the OSV API, and all of
+   1.9.4's three HIGH advisories above are fixed by then anyway (they were
+   server-transport issues -- SSE/StreamableHTTP session auth, DNS
+   rebinding -- that never applied to this app's pure client usage in the
+   first place). So the fix isn't a new dependency, it's **isolation**:
+   `mcp_isolated/` at the repo root is a *separate* Python venv
+   (`mcp_isolated/venv/`, built from `mcp_isolated/requirements.txt` --
+   pins `mcp==2.3.0`, nothing else) that is never on the main app's
+   `PYTHONPATH` and is never merged into `backend/requirements.txt`. The
+   main app talks to it only by shelling out to
+   `mcp_isolated/venv/bin/python mcp_isolated/mcp_investigate.py`, passing
+   JSON on stdin/stdout and the UW API key via the subprocess's `env=`
+   mapping only (never a CLI arg, never a file) -- see
+   `backend/app/ai/mcp_tool_client.py`. No new port, no new long-running
+   process; the main app's own dependencies are completely untouched.
+
+   This transport is real, live, and selectable via
+   `INVESTIGATE_TRANSPORT=mcp` (default remains `rest`; see `.env.example`
+   and `backend/app/config.py`) -- a drop-in alternate backend behind the
+   same `POST /api/investigate/{ticker}` contract, not a parallel feature
+   (see `orchestrator.py`'s `transport` parameter). We DID connect to the
+   live hosted MCP server directly (not guessed) to confirm the real tool
+   names and schemas via its actual `tools/list` capability: **all 10
+   allowlisted tool names match the live server exactly, no renaming
+   needed**, but 3 of them (`get_flow_alerts`, `get_dark_pool_trades`,
+   `get_option_trades`) take `ticker_symbol` as the argument name, not
+   `ticker`, and 5 others (`get_insider_activity_by_ticker`,
+   `get_short_data_by_ticker`, `get_company_info`, `get_max_pain`,
+   `get_greek_exposure_by_ticker`) don't accept a `limit` argument at all
+   (the live schemas are `additionalProperties: false`, so sending one
+   would fail the call outright). `get_institutional_ownership_by_ticker`
+   caps `limit` at 50 and `get_analyst_ratings` at 500, tighter than the
+   REST port's generic 1-100 clamp. All of this is reconciled in
+   `MCP_ARG_BUILDERS` in `mcp_tool_client.py` -- the REST transport's
+   assumed argument shapes were never wrong on tool *names*, only on a few
+   argument *names*/limits. The REST transport
+   (`backend/app/ai/rest_tool_client.py`) remains in place and is still the
+   default, clearly labeled as the fallback, not removed.
 
    The bounded design itself (round 1: LLM selects <=4 read-only tools from
    a fixed allowlist with every argument validated/sanitized server-side;
@@ -159,6 +177,22 @@ python3 -m venv ../.venv && source ../.venv/bin/activate
 pip install -r requirements.txt
 TIP_MODE=demo uvicorn app.main:app --reload --port 8000
 ```
+
+To use the real MCP transport for Investigate with AI
+(`INVESTIGATE_TRANSPORT=mcp`), also set up the isolated venv once (separate
+from the one above, never merged into `backend/requirements.txt`):
+
+```bash
+cd mcp_isolated
+python3 -m venv venv
+venv/bin/pip install -r requirements.txt
+```
+
+Then run the main app with `INVESTIGATE_TRANSPORT=mcp` in its environment
+(or `.env`). If `mcp_isolated/venv/` doesn't exist, the MCP transport fails
+fast with a clear 502 (`MCP transport unavailable: mcp_isolated venv not
+found at ...`) instead of a confusing stack trace -- it never silently
+falls back to REST.
 
 Open `http://localhost:8000/` for the frontend, or hit the API directly:
 
@@ -242,7 +276,13 @@ returning the static transcript and asserting the mocked real-call
 functions are never invoked, and schema enforcement rejecting a
 synthesis response missing `ai_interpretation` or smuggling a prediction
 into `observed_facts`. **95 passed, 0 failed** (73 prior + 22 new) as of
-this feature's addition.
+this feature's addition; **108 passed, 0 failed** (95 prior + 13 new,
+`test_mcp_tool_client.py`) after adding the real MCP transport -- argument
+reconciliation per tool against the live schema, credential-in-env-not-argv,
+one-bad-call/connection-failure/timeout/unparseable-output/missing-venv all
+degrading or raising the documented way, all via `monkeypatch` on
+`subprocess.run`, no network or real `mcp` SDK/venv required for the suite
+to pass.
 
 ## Fixtures
 
@@ -257,17 +297,22 @@ live data.
 ```
 backend/app/core/            pure, DB-free logic (signal_engine, tip_evidence, scan_service)
 backend/app/adapters/        SyntheticDataAdapter, LiveUWAdapter (same interface)
-backend/app/ai/              Investigate with AI: allowlist, validation, REST-fallback tool
-                              client, provider-agnostic LLM wrapper, orchestrator, schemas
+backend/app/ai/              Investigate with AI: allowlist, validation, REST + real-MCP tool
+                              clients (transport-selectable), provider-agnostic LLM wrapper,
+                              orchestrator, schemas
 backend/app/main.py          FastAPI routes, incl. /api/settings*, /api/investigate/*
 backend/app/settings_store.py  local JSON settings/credential store (data/settings.json)
 backend/app/storage.py       local SQLite qualifying-days store
-backend/tests/                pytest suite (incl. test_settings.py, test_investigate.py)
+backend/tests/                pytest suite (incl. test_settings.py, test_investigate.py,
+                               test_mcp_tool_client.py)
 fixtures/                    synthetic scenario_*.json + README_SYNTHETIC.md
 fixtures/investigate_simulated/  static, labeled simulated AI-investigation transcripts
 frontend/                    plain HTML/CSS/JS, no build step (incl. Settings, Investigate views)
 docs/                        design notes
 data/                        gitignored: settings.json + tip_hackathon.db, created at runtime
+mcp_isolated/                 isolated venv + subprocess script for the real MCP transport --
+                              own requirements.txt (mcp==2.3.0 only), never merged into
+                              backend/requirements.txt; venv/ itself is gitignored
 ```
 
 ## Status

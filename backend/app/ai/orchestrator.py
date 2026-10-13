@@ -18,6 +18,7 @@ import logging
 from ..adapters.live_uw_adapter import UWRestClient
 from .allowlist import MAX_TOOLS_PER_INVESTIGATION
 from .llm_provider import select_tools, synthesize  # noqa: F401  (re-exported for monkeypatching)
+from .mcp_tool_client import execute_tools_mcp  # noqa: F401  (re-exported for monkeypatching)
 from .rest_tool_client import execute_tool  # noqa: F401  (re-exported for monkeypatching)
 from .schemas import InvestigationResult, MalformedAIResponse, validate_investigation_result
 from .validation import ValidationError, validate_ticker, validate_tool_selection
@@ -37,7 +38,17 @@ def investigate(
     uw_api_key: str,
     uw_base_url: str,
     uw_client_api_id: str = "",
+    transport: str = "rest",
 ) -> InvestigationResult:
+    """`transport` selects which backend executes the accepted tool calls:
+    "rest" (default -- plain REST calls via UWRestClient, the original
+    fallback transport) or "mcp" (real MCP-protocol calls against UW's
+    hosted server, via the isolated subprocess in mcp_tool_client.py). Both
+    produce the exact same per-tool result shape, so everything from here
+    down (synthesis, schema validation, the API response contract) is
+    identical regardless of which one ran -- see main.py for how this is
+    set from INVESTIGATE_TRANSPORT.
+    """
     safe_ticker = validate_ticker(ticker)
 
     # --- Round 1: tool selection (exactly one LLM call) -------------------
@@ -50,8 +61,11 @@ def investigate(
     accepted_calls = accepted_calls[:MAX_TOOLS_PER_INVESTIGATION]
 
     # --- Execution: at most MAX_TOOLS_PER_INVESTIGATION real UW calls -----
-    client = UWRestClient(api_key=uw_api_key, base_url=uw_base_url, client_api_id=uw_client_api_id)
-    tool_results = [execute_tool(call["tool"], call["args"]["ticker"], call["args"], client) for call in accepted_calls]
+    if transport == "mcp":
+        tool_results = execute_tools_mcp(accepted_calls, uw_api_key=uw_api_key)
+    else:
+        client = UWRestClient(api_key=uw_api_key, base_url=uw_base_url, client_api_id=uw_client_api_id)
+        tool_results = [execute_tool(call["tool"], call["args"]["ticker"], call["args"], client) for call in accepted_calls]
 
     # --- Round 2: synthesis (the one allowed additional reasoning round) --
     called_tools = [r["tool"] for r in tool_results]
