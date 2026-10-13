@@ -197,6 +197,21 @@ nav#nav .ic { font-size: 13px; width: 16px; text-align: center; opacity: .7; }
 .history-chip .hc-step.state-FADING { color: var(--muted); }
 .history-chip .hc-step.state-INVALIDATED { color: var(--bear); }
 .history-chip .hc-arrow { color: var(--muted); font-size: 10px; }
+/* UX-correction pass (P0): "+N earlier" affordance when a collapsed
+   progression has more segments than fit -- visually distinct (dashed,
+   muted) from a real state chip so it never reads as its own state. */
+.history-chip .hp-more {
+  padding: 1px 6px; border-radius: 3px; border: 1px dashed var(--border2);
+  color: var(--muted); font-style: italic;
+}
+/* P1a: ticker-header-card is the FIRST thing on Ticker Analysis -- ticker
+   + current state, prominently, before the chart. */
+.ticker-header-card { margin-bottom: 14px; }
+.tk-lg { font-size: 23px; }
+/* P0: the full uncollapsed scan-by-scan history is real data and must
+   stay reachable, but never dumped into the main page flow -- bounded
+   height + internal scroll inside the <details> panel it lives in. */
+.history-details-body { max-height: 280px; overflow-y: auto; padding-right: 4px; margin-top: 4px; }
 
 .table-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--panel); }
 .tbl { width: 100%; border-collapse: collapse; font-size: 12.5px; min-width: 560px; }

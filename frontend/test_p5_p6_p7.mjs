@@ -113,18 +113,32 @@ async function main() {
   console.log(`\n=== P5: evidence-first layout -- chart + evidence lead, raw JSON stays inside <details> ===`);
   const fluxDetail = await lib.apiGet("/api/ticker/FLUX");
   const fluxHtml = lib.renderTickerDetail(fluxDetail);
+  // UX-correction pass (P1a), exact required order: (1) ticker + current
+  // state prominently at the very top, (2) chart, (3) concise evidence,
+  // (4) Investigate-with-AI entry point, (5) compact collapsed lifecycle
+  // summary. Raw JSON/internal ids stay inside the bottom <details> panel.
+  // This replaces the prior "evidence before plain state-summary" check,
+  // which was asserting the OLD layout Chad explicitly flagged as wrong
+  // (ticker/state buried below the chart+evidence instead of leading).
+  check("ticker-header-card (ticker + current state, prominent) appears first, before the chart", () => {
+    const headerIdx = fluxHtml.indexOf("ticker-header-card");
+    const chartIdx = fluxHtml.indexOf("chart-card");
+    assert.ok(headerIdx > -1 && chartIdx > -1 && headerIdx < chartIdx, `headerIdx=${headerIdx} chartIdx=${chartIdx}`);
+  });
   check("chart card appears before the evidence classification card", () => {
     const chartIdx = fluxHtml.indexOf("chart-card");
     const evidenceIdx = fluxHtml.indexOf("evidence-primary-card");
     assert.ok(chartIdx > -1 && evidenceIdx > -1 && chartIdx < evidenceIdx, `chartIdx=${chartIdx} evidenceIdx=${evidenceIdx}`);
   });
-  check("evidence classification card appears before the plain state-summary detail-grid card", () => {
+  check("Investigate-with-AI entry point appears before the lifecycle summary (promoted up, not buried)", () => {
     const evidenceIdx = fluxHtml.indexOf("evidence-primary-card");
-    const detailGridIdx = fluxHtml.indexOf("detail-grid");
-    assert.ok(evidenceIdx > -1 && detailGridIdx > -1 && evidenceIdx < detailGridIdx, `evidenceIdx=${evidenceIdx} detailGridIdx=${detailGridIdx}`);
+    const investigateIdx = fluxHtml.indexOf('id="investigateSection"');
+    const lifecycleIdx = fluxHtml.indexOf("timeline-card");
+    assert.ok(evidenceIdx > -1 && investigateIdx > -1 && lifecycleIdx > -1 && evidenceIdx < investigateIdx && investigateIdx < lifecycleIdx,
+      `evidenceIdx=${evidenceIdx} investigateIdx=${investigateIdx} lifecycleIdx=${lifecycleIdx}`);
   });
   check("raw JSON stays inside a collapsed <details> after the evidence/timeline sections", () => {
-    const detailsIdx = fluxHtml.indexOf("<details");
+    const detailsIdx = fluxHtml.lastIndexOf("<details");
     const evidenceIdx = fluxHtml.indexOf("evidence-primary-card");
     assert.ok(detailsIdx > evidenceIdx, "raw <details> appears before the evidence card");
     assert.ok(fluxHtml.slice(detailsIdx).includes("Raw adapter data"));

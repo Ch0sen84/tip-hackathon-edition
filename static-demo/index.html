@@ -85,8 +85,13 @@
         <select id="tickerSelect"></select>
         <button class="btn" id="loadTicker">Analyze</button>
       </div>
+      <!-- investigateSection's container div is rendered INSIDE
+           renderTickerDetail()'s own HTML now (see app.core.js), between
+           the evidence card and the lifecycle summary -- this promotes
+           Investigate near the top of the page per the P1a UX-correction
+           pass without changing loadInvestigateSection()'s existing
+           getElementById("investigateSection") wiring at all. -->
       <div id="tickerDetail"></div>
-      <div id="investigateSection"></div>
     </section>
 
     <section id="view-settings" class="view"></section>

@@ -253,6 +253,18 @@ function fmtPriceLine(px) {
 
 // --- Market Radar: cards / rows ---------------------------------------------
 
+// P1c (UX-correction pass): consistent card height/hierarchy -- ticker,
+// current state, confidence, ONE primary signal/headline line, the
+// compact P0 lifecycle summary, then Investigate. The prior version
+// rendered the full entry.evidence[] list inline (2-4 items per card,
+// variable length, and one of those items was routinely just "TIP signal
+// state NEW" -- a plain duplicate of the state tag already shown above
+// it) plus a separate current_read line; that is exactly the kind of
+// per-card length variance and duplicated content Chad flagged. The full
+// per-category evidence remains real and available -- in the Signal
+// Breakdown panel (click-through, renderSignalBreakdown, unchanged) and
+// in Ticker Analysis's full 4-way classification -- just not duplicated
+// inline on every card in the grid.
 function renderCard(entry) {
   const px = entry.price || {};
   return `
@@ -266,11 +278,8 @@ function renderCard(entry) {
         <span class="tag state-${esc(entry.state)}">${esc(entry.state || "")}</span>
         <span class="tag">confidence: ${esc(entry.confidence)}</span>
       </div>
+      <div class="read card-headline">${esc(entry.headline)}</div>
       ${renderHistoryChip(entry.history_states)}
-      <ul class="ev-list">
-        ${(entry.evidence || []).map((e) => `<li>${esc(e.text)}</li>`).join("")}
-      </ul>
-      <div class="read">${esc(entry.current_read)}</div>
       <button class="btn btn-investigate" data-investigate-ticker="${esc(entry.ticker)}">Investigate ${esc(entry.ticker)} &rarr;</button>
     </div>`;
 }
@@ -337,12 +346,99 @@ function filterRadarEntries(entries, familyFilter, stateFilter) {
 // from /api/radar, sourced from backend/app/storage.py's real scan log --
 // see main.py's radar() _attach()). An empty/short list renders nothing,
 // never a fabricated single-step "history".
+// --- Shared history collapsing (UX-correction pass) -------------------------
+//
+// Root cause of the "dozens of repeated badges" complaint: both the Radar
+// history chip (above) and the Ticker Analysis lifecycle timeline (below)
+// used to render ONE element per raw scan-log row with zero collapsing,
+// and on a long-running dev instance every manual/test GET /api/ticker/{t}
+// triggers a real scan+log write, so the raw list only grows across
+// sessions. collapseHistory() is the single shared fix: a pure function
+// that walks the REAL history array (accepts either Radar's bare state-
+// string list [{...}] or Ticker Analysis's richer
+// {scan_date, any_gate_passed, state, created_at} objects) and merges
+// consecutive entries with the SAME state into one segment. A genuine
+// transition (state actually changes) always starts a new segment -- this
+// never fabricates or merges across a real transition, and every raw
+// entry is retained verbatim inside its segment's `entries` array so
+// re-expanding (the <details> panels below) always shows the exact real
+// data, never a derived approximation.
+function collapseHistory(history) {
+  const entries = Array.isArray(history) ? history : [];
+  const segments = [];
+  entries.forEach((raw) => {
+    const e = (typeof raw === "string") ? { state: raw } : (raw || {});
+    const last = segments[segments.length - 1];
+    if (last && last.state === e.state) {
+      last.scanCount += 1;
+      if (e.scan_date != null) last.lastDate = e.scan_date;
+      if (e.created_at != null) last.lastCreatedAt = e.created_at;
+      last.entries.push(e);
+    } else {
+      segments.push({
+        state: e.state,
+        firstDate: e.scan_date ?? null,
+        lastDate: e.scan_date ?? null,
+        firstCreatedAt: e.created_at ?? null,
+        lastCreatedAt: e.created_at ?? null,
+        scanCount: 1,
+        entries: [e],
+      });
+    }
+  });
+  return segments;
+}
+
+// Short "Oct 10" style label from a real ISO scan_date -- never invents a
+// date when one wasn't supplied (Radar's history_states has none today).
+function fmtSegDate(iso) {
+  if (!iso) return null;
+  const d = new Date(`${iso}T00:00:00Z`);
+  if (Number.isNaN(d.getTime())) return iso;
+  return d.toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" });
+}
+
+// One segment -> "CONFIRMED (8 scans, Oct 11-13, current)" / "NEW (1 scan)"
+// when no real dates exist. `current` is only ever true for the LAST real
+// segment of a non-empty history -- never asserted elsewhere.
+function formatSegmentLabel(seg, isCurrent) {
+  const scanTxt = seg.scanCount === 1 ? "1 scan" : `${seg.scanCount} scans`;
+  const d1 = fmtSegDate(seg.firstDate);
+  const d2 = fmtSegDate(seg.lastDate);
+  let dateTxt = "";
+  if (d1 && d2) dateTxt = d1 === d2 ? `, ${d1}` : `, ${d1}\u2013${d2}`;
+  return `${seg.state} (${scanTxt}${dateTxt}${isCurrent ? ", current" : ""})`;
+}
+
+// Compact horizontal progression over COLLAPSED segments -- shared by both
+// the Radar history chip and the Ticker Analysis lifecycle summary.
+// maxVisible caps how many segments render directly; anything older is
+// folded into a single "+N earlier" affordance rather than ever dumping
+// the full list into the main page flow. Segments are chronological
+// oldest-first (see storage.py's history() ORDER BY id ASC), so the
+// "earlier" ones trimmed are the OLDEST, and the rightmost rendered
+// segment is always the most recent (current) state.
+function renderSegmentProgression(segments, { maxVisible = 5 } = {}) {
+  if (!segments.length) return "";
+  const hiddenCount = Math.max(0, segments.length - maxVisible);
+  const visible = hiddenCount > 0 ? segments.slice(segments.length - maxVisible) : segments;
+  const moreChip = hiddenCount > 0
+    ? `<span class="hp-more" title="${hiddenCount} earlier segment(s) not shown -- see full history below">+${hiddenCount} earlier</span><span class="hc-arrow">\u2192</span>`
+    : "";
+  const steps = visible.map((seg, i) => {
+    const isCurrent = i === visible.length - 1;
+    return `<span class="hc-step state-${esc(seg.state)}">${esc(formatSegmentLabel(seg, isCurrent))}</span>${i < visible.length - 1 ? '<span class="hc-arrow">\u2192</span>' : ""}`;
+  }).join("");
+  return `<div class="history-chip" title="Collapsed from ${segments.reduce((n, s) => n + s.scanCount, 0)} real recorded scan(s)">${moreChip}${steps}</div>`;
+}
+
+// Radar card chip: unchanged behavior for <2 raw entries (renders nothing
+// -- never a fabricated single-step "history"); 2+ real entries now render
+// as a collapsed, capped progression instead of one badge per raw scan.
 function renderHistoryChip(historyStates) {
   if (!historyStates || historyStates.length < 2) return "";
-  const steps = historyStates
-    .map((s, i) => `<span class="hc-step state-${esc(s)}">${esc(s)}</span>${i < historyStates.length - 1 ? '<span class="hc-arrow">\u2192</span>' : ""}`)
-    .join("");
-  return `<div class="history-chip" title="Real scan history for this ticker (${historyStates.length} recorded scans)">${steps}</div>`;
+  const segments = collapseHistory(historyStates);
+  return renderSegmentProgression(segments, { maxVisible: 5 });
 }
 
 function renderRadarFilterOptions(allEntries) {
@@ -804,6 +900,37 @@ function mountCandlestickChart(containerId, ohlc) {
 // (see seed_demo_history.py). This renders exactly what's there --
 // 0/1-entry history gets an explicitly sparse, minimal state, never a
 // padded-looking timeline implying a longer track record than is real.
+// Renders ONE raw history entry's full detail row -- used ONLY inside the
+// bounded-height expandable <details> panel below, never directly in the
+// main page flow regardless of how long `entries` is.
+function renderRawHistoryStep(e, i, entries) {
+  const gloss = STATE_GLOSS[e.state] || "";
+  const prev = i > 0 ? entries[i - 1].state : null;
+  const changed = prev && prev !== e.state;
+  return `
+    <div class="timeline-step">
+      <div class="timeline-dot state-${esc(e.state)}"></div>
+      <div class="timeline-step-body">
+        <div class="timeline-step-head">
+          <span class="tag state-${esc(e.state)}">${esc(e.state)}</span>
+          <span class="muted">${esc(e.scan_date)}</span>
+          ${changed ? `<span class="muted timeline-change">(${esc(prev)} \u2192 ${esc(e.state)})</span>` : ""}
+        </div>
+        <div class="timeline-step-gloss muted">${esc(gloss)}</div>
+        <div class="timeline-step-meta muted">gate passed this scan: ${e.any_gate_passed ? "yes" : "no"}</div>
+      </div>
+    </div>`;
+}
+
+// P0 UX-correction pass: the full per-scan vertical list (one row per raw
+// history entry) is exactly what Chad flagged as overwhelming on a long-
+// running dev/N5 instance where every manual/test GET /api/ticker/{t}
+// triggers a real scan+log write. The fix is NOT to show less real data --
+// it's to show the real COLLAPSED progression (collapseHistory(), shared
+// with the Radar chip) prominently, and move the full uncollapsed list
+// into a bounded-height, scrollable <details> panel that is lossless on
+// expand (exactly the real entries, nothing re-derived). 0/1-entry history
+// keeps its prior minimal-state rendering unchanged.
 function renderLifecycleTimeline(history, currentState) {
   const entries = Array.isArray(history) ? history : [];
   if (entries.length === 0) {
@@ -826,29 +953,18 @@ function renderLifecycleTimeline(history, currentState) {
         </div>
       </div>`;
   }
-  const steps = entries.map((e, i) => {
-    const gloss = STATE_GLOSS[e.state] || "";
-    const prev = i > 0 ? entries[i - 1].state : null;
-    const changed = prev && prev !== e.state;
-    return `
-      <div class="timeline-step">
-        <div class="timeline-dot state-${esc(e.state)}"></div>
-        <div class="timeline-step-body">
-          <div class="timeline-step-head">
-            <span class="tag state-${esc(e.state)}">${esc(e.state)}</span>
-            <span class="muted">${esc(e.scan_date)}</span>
-            ${changed ? `<span class="muted timeline-change">(${esc(prev)} \u2192 ${esc(e.state)})</span>` : ""}
-          </div>
-          <div class="timeline-step-gloss muted">${esc(gloss)}</div>
-          <div class="timeline-step-meta muted">gate passed this scan: ${e.any_gate_passed ? "yes" : "no"}</div>
-        </div>
-      </div>`;
-  }).join("");
+  const segments = collapseHistory(entries);
+  const progressionHtml = renderSegmentProgression(segments, { maxVisible: 5 });
+  const rawSteps = entries.map((e, i) => renderRawHistoryStep(e, i, entries)).join("");
   return `
     <div class="card timeline-card">
       <div class="card-head"><strong>Signal Lifecycle</strong>
-        <span class="muted">(${entries.length} recorded scans, real history &mdash; current state: ${esc(currentState || "")})</span></div>
-      <div class="timeline">${steps}</div>
+        <span class="muted">(${segments.length} segment(s) from ${entries.length} recorded scans &mdash; current state: ${esc(currentState || "")})</span></div>
+      ${progressionHtml}
+      <details class="how history-details">
+        <summary>Full real scan-by-scan history (${entries.length} entries)</summary>
+        <div class="timeline history-details-body">${rawSteps}</div>
+      </details>
     </div>`;
 }
 
@@ -862,12 +978,40 @@ function renderLifecycleTimeline(history, currentState) {
 // confidence language below is deliberately never framed as a predicted
 // trade outcome/success rate -- "confidence" describes how clearly gates
 // fired this scan, nothing about what happens next.
+// P1a layout order (UX-correction pass, deliberately exact): (1) selected
+// ticker + current signal state, prominently, at the very top; (2) the
+// candlestick chart with evidence markers; (3) the concise 4-way evidence
+// classification immediately below the chart (both together must visually
+// dominate the page); (4) a placeholder slot for the "Investigate with AI"
+// workspace -- app.live.js/app.static.js's loadInvestigateSection() fills
+// #investigateSection wherever it is in the DOM, so simply positioning
+// this div here (instead of as a page-bottom sibling in index.html, see
+// that file's comment) promotes Investigate near the top with zero change
+// to the existing fetch/render wiring; (5) the NEW compact collapsed
+// lifecycle summary from P0. Raw JSON / internal rule ids stay inside the
+// existing bottom <details> panel, unchanged in content, just de-prioritized
+// by position.
 function renderTickerDetail(d) {
   const gatesHtml = renderGateGroups(d.gates);
   const stateGloss = STATE_GLOSS[d.state] || "";
   const ruleGloss = TRANSITION_RULE_GLOSS[d.transition_rule] || "internal rule identifier";
   const timelineHtml = renderLifecycleTimeline(d.history, d.state);
   return `
+    <div class="card ticker-header-card">
+      <div class="card-head"><span class="tk tk-lg">${esc(d.ticker)}</span>
+        <span class="tag state-${esc(d.state)}">${esc(d.state)}</span>
+        ${stateGloss ? `<span class="muted state-gloss">(${esc(stateGloss)})</span>` : ""}
+      </div>
+      <div class="tags">
+        <span class="tag">confidence: ${esc(d.confidence)}</span>
+        <span class="tag">${esc(d.signal_type)}</span>
+        <span class="tag">qualifying days: ${d.qualifying_days_count}</span>
+      </div>
+      <div class="read">${esc(d.headline)}</div>
+      <div class="read">${esc(d.current_read)}</div>
+      <div class="read">Transition: ${esc(d.previous_state || "none")} &rarr; ${esc(d.state)}</div>
+      <div class="read">Confidence reason: ${esc(d.confidence_reason)}</div>
+    </div>
     <div class="card chart-card">
       <div class="card-head"><strong>Price Chart &mdash; ${esc(d.ticker)}</strong>
         <span class="muted">evidence markers from the same flow_alerts/darkpool_trades the gates use</span></div>
@@ -878,24 +1022,8 @@ function renderTickerDetail(d) {
       <p class="muted gate-group-intro">A gate that did not pass is not automatically "conflicting evidence." Grouped below by what it actually represents, each with a plain-English note on what it observed. Confidence below describes how clearly gates fired this scan &mdash; it is never a prediction of trade outcome.</p>
       ${gatesHtml}
     </div>
+    <div id="investigateSection"></div>
     ${timelineHtml}
-    <div class="detail-grid">
-      <div class="card">
-        <div class="card-head"><span class="tk">${esc(d.ticker)}</span>
-          <span class="tag state-${esc(d.state)}">${esc(d.state)}</span>
-          ${stateGloss ? `<span class="muted state-gloss">(${esc(stateGloss)})</span>` : ""}
-        </div>
-        <div class="tags">
-          <span class="tag">confidence: ${esc(d.confidence)}</span>
-          <span class="tag">${esc(d.signal_type)}</span>
-          <span class="tag">qualifying days: ${d.qualifying_days_count}</span>
-        </div>
-        <div class="read">${esc(d.headline)}</div>
-        <div class="read">${esc(d.current_read)}</div>
-        <div class="read">Transition: ${esc(d.previous_state || "none")} &rarr; ${esc(d.state)}</div>
-        <div class="read">Confidence reason: ${esc(d.confidence_reason)}</div>
-      </div>
-    </div>
     <details class="how" style="margin-top:14px">
       <summary>Raw adapter data (what fed the gates above)</summary>
       <p class="muted">Transition rule id: <code>${esc(d.transition_rule)}</code> &mdash; ${esc(ruleGloss)}</p>
