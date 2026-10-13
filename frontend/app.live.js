@@ -56,9 +56,27 @@ async function loadRadar() {
     document.getElementById("radarEmpty").style.display =
       (data.highest.length === 0 && data.other.length === 0) ? "block" : "none";
 
+    // Ticker Analysis's <select> must offer EVERY known scenario ticker,
+    // not just the ones that happen to qualify for Radar display today --
+    // /api/radar's highest+other only ever contains Radar-qualifying
+    // tickers (by design, see tip_evidence.qualifies), so a ticker like
+    // DRFT ("Fading signal") or NADA ("Quiet control") that legitimately
+    // has zero qualifying gates right now would otherwise be completely
+    // unreachable from this view. /api/scenarios lists all known tickers
+    // regardless of qualification; merge it in, deduped, so they stay
+    // selectable and loadable via /api/ticker/{t} (which already works
+    // for any ticker in the adapter's universe).
+    let scenarioTickers = [];
+    try {
+      const scenariosResp = await apiGet("/api/scenarios");
+      scenarioTickers = (scenariosResp.scenarios || []).map((s) => s.ticker);
+    } catch (e) {
+      /* non-fatal: select falls back to Radar-qualifying tickers only */
+    }
+    const radarTickers = [...data.highest, ...data.other].map((e) => e.ticker);
+    const allTickers = Array.from(new Set([...radarTickers, ...scenarioTickers])).sort();
     const sel = document.getElementById("tickerSelect");
-    const allTickers = [...data.highest, ...data.other].map((e) => e.ticker);
-    sel.innerHTML = allTickers.map((t) => `<option value="${esc(t)}">${esc(t)}</option>`).join("");
+    sel.innerHTML = renderTickerOptions(allTickers, TIP_STATE.currentTicker);
 
     wireInvestigateButtons(loadTickerDetail);
     if (featured) {
@@ -153,6 +171,14 @@ async function setMode(mode) {
   try {
     await apiPost("/api/settings/mode", { mode });
     await loadSettings();
+    // The OLD mode's ticker/Investigate state must never survive onto the
+    // NEW mode's adapter -- a ticker loaded under Demo (e.g. a synthetic-
+    // only scenario) can be meaningless or simply absent under Live, and
+    // vice versa. Clear first (covers the user being on Ticker Analysis
+    // right now), then reload Market Radar so the <select> is rebuilt
+    // from the new mode's own universe/scenarios instead of the stale one.
+    clearTickerView();
+    await loadRadar();
   } catch (err) {
     alert(`Could not switch mode: ${err.message}`);
   }
