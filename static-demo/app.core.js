@@ -14,40 +14,166 @@
 // library. navigateToTicker() is the one function both adapters call from
 // a Market Radar "Investigate" click so the user never has to reselect a
 // ticker they already clicked on.
-const TIP_STATE = { currentTicker: null };
+const TIP_STATE = { currentTicker: null, currentView: "radar" };
 
-function setCurrentTicker(ticker) {
-  TIP_STATE.currentTicker = ticker;
+// --- URL/history scheme (P0 navigation fix) --------------------------------
+//
+// Format: a hash of the form `#view=<radar|ticker|settings|about>&ticker=<T>`
+// (ticker only present/meaningful when view=ticker). Chosen over a real
+// query string (`?view=...`) because BOTH editions (frontend/ and the
+// zero-backend static-demo/) are single index.html files with no
+// server-side route handling -- a hash change never issues a network
+// request and always resolves against the one index.html that's already
+// loaded, so a freshly-pasted deep link or a refresh behaves identically
+// whether or not there's a real server behind it. A bare query string
+// would 404 on static-demo/ hosting without URL-rewrite rules it doesn't
+// have. This extends (does not replace) the prior session's bare
+// `#ticker=XXX` convention: that exact old format is still recognized on
+// load (see parseNavHash) so old bookmarks/links keep working.
+const NAV_VIEWS = ["radar", "ticker", "settings", "about"];
+
+function parseNavHash(hash) {
+  const raw = String(hash || "").replace(/^#/, "");
+  if (!raw) return { view: null, ticker: null };
+  const params = new URLSearchParams(raw);
+  // Legacy format from the prior session: a bare `#ticker=XXX` with no
+  // `view=` key at all.
+  if (!params.has("view") && params.has("ticker")) {
+    const t = params.get("ticker");
+    return { view: "ticker", ticker: t ? t.toUpperCase() : null };
+  }
+  let view = params.get("view");
+  if (!NAV_VIEWS.includes(view)) view = null;
+  const ticker = params.get("ticker");
+  return { view, ticker: ticker ? ticker.toUpperCase() : null };
+}
+
+function buildNavHash(view, ticker) {
+  const params = new URLSearchParams();
+  params.set("view", view);
+  if (view === "ticker" && ticker) params.set("ticker", ticker);
+  return `#${params.toString()}`;
+}
+
+// pushNav: a REAL navigation (nav-item click, Investigate click, ticker
+// select+Analyze) -- creates a new history entry so Back/Forward has
+// somewhere to go. replaceNav: an in-place update to the same logical view
+// (bootstrap-time URL normalization, popstate-driven restores, and the
+// mode-switch ticker-invalidation case below) -- never adds a Back stop.
+function pushNav(view, ticker) {
+  TIP_STATE.currentView = view;
+  TIP_STATE.currentTicker = ticker || null;
   try {
-    history.replaceState(null, "", `#ticker=${encodeURIComponent(ticker)}`);
+    history.pushState({ view, ticker: ticker || null }, "", buildNavHash(view, ticker));
   } catch (e) {
-    /* hash update is a convenience, never fatal */
+    /* history update is a convenience, never fatal */
   }
 }
 
-function getTickerFromHash() {
-  const m = /ticker=([A-Za-z0-9.\-]+)/.exec(location.hash || "");
-  return m ? m[1].toUpperCase() : null;
+function replaceNav(view, ticker) {
+  TIP_STATE.currentView = view;
+  TIP_STATE.currentTicker = ticker || null;
+  try {
+    history.replaceState({ view, ticker: ticker || null }, "", buildNavHash(view, ticker));
+  } catch (e) {
+    /* history update is a convenience, never fatal */
+  }
+}
+
+// navigateToView: nav-item clicks (Market Radar / Ticker Analysis /
+// Settings / About). Pushes a new entry by default; pass push:false for
+// the mode-switch-invalidation case, which must REPLACE the current entry
+// rather than add a new one.
+function navigateToView(view, opts = {}) {
+  const { push = true } = opts;
+  const ticker = view === "ticker" ? TIP_STATE.currentTicker : null;
+  if (push) pushNav(view, ticker); else replaceNav(view, ticker);
+  switchView(view);
+}
+
+// renderTickerUnavailable: shown in #tickerDetail when the URL names a
+// ticker that doesn't exist in the current mode's universe/scenario set
+// (typo, or a ticker valid in Demo but not Live or vice versa) -- never a
+// silent blank page or a thrown error. The already-rendered #tickerSelect
+// above (populated with every currently-valid ticker) is "a way to pick a
+// valid one"; this message doesn't duplicate that control.
+function renderTickerUnavailable(ticker) {
+  return `<div class="empty">"${esc(ticker)}" is not available in demo mode. Use the dropdown above to pick a valid ticker.</div>`;
+}
+
+// applyNavState: the one shared function both adapters' bootstrap AND
+// popstate handler call to make the DOM match a parsed {view, ticker}
+// state. `handlers.getKnownTickers()` returns the adapter's current list
+// of valid tickers (may be null before Radar/scenarios have loaded, in
+// which case ticker validity isn't checked yet). `push` controls whether
+// this resulting state is pushed (never used here -- bootstrap/popstate
+// both normalize via replace) or replaced; kept as a parameter for clarity
+// at call sites rather than hardcoding replaceNav calls three times.
+function applyNavState(state, handlers, opts = {}) {
+  const { push = false } = opts;
+  const setHistory = (view, ticker) => { if (push) pushNav(view, ticker); else replaceNav(view, ticker); };
+
+  if (!state || !state.view || state.view === "radar") {
+    setHistory("radar", null);
+    switchView("radar");
+    return;
+  }
+  if (state.view === "settings" || state.view === "about") {
+    setHistory(state.view, null);
+    switchView(state.view);
+    return;
+  }
+  // state.view === "ticker"
+  if (!state.ticker) {
+    setHistory("ticker", null);
+    switchView("ticker");
+    return;
+  }
+  const known = handlers && handlers.getKnownTickers ? handlers.getKnownTickers() : null;
+  if (known && !known.includes(state.ticker)) {
+    setHistory("ticker", null);
+    switchView("ticker");
+    const el = document.getElementById("tickerDetail");
+    if (el) el.innerHTML = renderTickerUnavailable(state.ticker);
+    const inv = document.getElementById("investigateSection");
+    if (inv) inv.innerHTML = "";
+    return;
+  }
+  navigateToTicker(state.ticker, handlers.loadTickerDetail, { push });
+}
+
+// wireHistoryHandling: call once at adapter bootstrap AFTER the adapter's
+// own `window.TIP_NAV_HANDLERS` has been assigned. Handles Back/Forward:
+// popstate always REPLACEs-in-place (the browser already moved the
+// history pointer; we're just making the DOM agree with it), and the
+// existing request-token/sequence-number guard in each adapter's
+// loadTickerDetail (see app.live.js _navSeq) is exercised the same way
+// here as any other navigateToTicker call, so a late response for a
+// ticker the user has since navigated away from via Back/Forward is
+// still dropped, not rendered.
+function wireHistoryHandling() {
+  window.addEventListener("popstate", (ev) => {
+    const state = (ev.state && ev.state.view) ? ev.state : parseNavHash(location.hash);
+    applyNavState(state, window.TIP_NAV_HANDLERS, { push: false });
+  });
 }
 
 // clearTickerView: the one place that resets ALL state tied to "whichever
-// ticker is currently loaded" -- TIP_STATE.currentTicker, the #ticker=...
-// hash, the <select> (back to its placeholder), and the two DOM panes that
-// render ticker-specific content (#tickerDetail, #investigateSection).
-// Needed whenever the underlying data source changes out from under an
+// ticker is currently loaded" -- TIP_STATE.currentTicker, the <select>
+// (back to its placeholder), and the two DOM panes that render
+// ticker-specific content (#tickerDetail, #investigateSection). Needed
+// whenever the underlying data source changes out from under an
 // already-rendered ticker (e.g. a Demo<->Live mode switch) so stale
 // content from the OLD mode/adapter never stays on screen referencing a
-// ticker that may not even exist in the new mode. Both adapters can call
-// this; the static demo has no mode switch so it currently has no caller,
-// but it is kept here (not duplicated) since app.core.js is the one
-// shared, byte-identical file.
+// ticker that may not even exist in the new mode. Deliberately does NOT
+// touch history itself -- the caller (app.live.js's setMode) decides
+// whether/how to replace the current history entry, since that depends on
+// which view the user was on (see setMode's comment). Both adapters can
+// call this; the static demo has no mode switch so it currently has no
+// caller, but it is kept here (not duplicated) since app.core.js is the
+// one shared, byte-identical file.
 function clearTickerView() {
   TIP_STATE.currentTicker = null;
-  try {
-    history.replaceState(null, "", location.pathname + location.search);
-  } catch (e) {
-    /* hash update is a convenience, never fatal */
-  }
   const sel = document.getElementById("tickerSelect");
   if (sel) sel.value = "";
   const detailEl = document.getElementById("tickerDetail");
@@ -68,19 +194,34 @@ function renderTickerOptions(tickers, selected) {
 }
 
 // navigateToTicker: switches to the Ticker Analysis view, pre-selects the
-// ticker in the <select>, and invokes the adapter-supplied loader. Kept
-// deliberately dumb -- no route table, no history stack beyond the hash.
-function navigateToTicker(ticker, loadTickerDetailFn) {
-  setCurrentTicker(ticker);
+// ticker in the <select>, records the navigation in history (push by
+// default; pass push:false for a non-navigating restore e.g. bootstrap/
+// popstate), and invokes the adapter-supplied loader. opts.focusInvestigate
+// scrolls #investigateSection into view once loadTickerDetailFn's promise
+// resolves -- used by the Radar/Ticker-Analysis "Investigate with AI"
+// affordances so that entry point visibly lands on the Investigate section
+// rather than just the top of Ticker Analysis (there is no separate
+// Investigate view to navigate to; it's a section within this one).
+function navigateToTicker(ticker, loadTickerDetailFn, opts = {}) {
+  const { push = true, focusInvestigate = false } = opts;
+  if (push) pushNav("ticker", ticker); else replaceNav("ticker", ticker);
   switchView("ticker");
   const sel = document.getElementById("tickerSelect");
   if (sel) sel.value = ticker;
-  loadTickerDetailFn(ticker);
+  const result = loadTickerDetailFn(ticker);
+  if (focusInvestigate && result && typeof result.then === "function") {
+    result.then(() => {
+      const el = document.getElementById("investigateSection");
+      if (el && typeof el.scrollIntoView === "function") el.scrollIntoView({ behavior: "smooth", block: "start" });
+    });
+  }
+  return result;
 }
 
 function switchView(view) {
   document.querySelectorAll(".nav-item").forEach((b) => b.classList.toggle("active", b.dataset.view === view));
   document.querySelectorAll(".view").forEach((v) => v.classList.toggle("active", v.id === `view-${view}`));
+  TIP_STATE.currentView = view;
 }
 
 // --- basic formatting helpers ----------------------------------------------
@@ -682,7 +823,7 @@ function wireInvestigateButtons(loadTickerDetailFn) {
   document.querySelectorAll("[data-investigate-ticker]").forEach((btn) => {
     btn.addEventListener("click", (ev) => {
       ev.stopPropagation();
-      navigateToTicker(btn.dataset.investigateTicker, loadTickerDetailFn);
+      navigateToTicker(btn.dataset.investigateTicker, loadTickerDetailFn, { focusInvestigate: true });
     });
   });
 }

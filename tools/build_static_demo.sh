@@ -17,4 +17,8 @@ echo "Copied frontend/app.core.js -> static-demo/app.core.js"
 echo "Copied frontend/styles.css  -> static-demo/styles.css"
 echo "Copied frontend/lightweight-charts.js -> static-demo/lightweight-charts.js"
 
-python3 tools/capture_static_ohlc.py
+PY=python3
+if [ -x backend/.venv_run/bin/python ]; then
+  PY=backend/.venv_run/bin/python
+fi
+"$PY" tools/capture_static_ohlc.py

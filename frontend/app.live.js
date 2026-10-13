@@ -35,6 +35,12 @@ async function apiDelete(path) {
 }
 
 let _lastRadarData = null;
+// Tracks every currently-selectable ticker (Radar-qualifying + full
+// scenario universe), rebuilt each loadRadar() call. Exposed via
+// window.TIP_NAV_HANDLERS.getKnownTickers() so app.core.js's
+// applyNavState() can validate a URL-supplied ticker without this file
+// needing to know anything about history/popstate itself.
+let _knownTickers = [];
 
 async function loadRadar() {
   const statusEl = document.getElementById("radarStatus");
@@ -75,6 +81,7 @@ async function loadRadar() {
     }
     const radarTickers = [...data.highest, ...data.other].map((e) => e.ticker);
     const allTickers = Array.from(new Set([...radarTickers, ...scenarioTickers])).sort();
+    _knownTickers = allTickers;
     const sel = document.getElementById("tickerSelect");
     sel.innerHTML = renderTickerOptions(allTickers, TIP_STATE.currentTicker);
 
@@ -205,6 +212,15 @@ async function setMode(mode) {
     // from the new mode's own universe/scenarios instead of the stale one.
     _navSeq++; // invalidate any in-flight ticker/investigate request from the OLD mode
     clearTickerView();
+    // History: if the user was on Ticker Analysis, that history entry's
+    // ticker may not exist in the new mode -- REPLACE it (not push) with a
+    // plain Market Radar entry so Back from here never lands on a
+    // dangling ticker=X that's invalid under the new mode. If they were on
+    // Settings/About/Radar, those entries never carried a ticker, so there
+    // is nothing stale to fix and we leave history alone.
+    if (TIP_STATE.currentView === "ticker") {
+      navigateToView("radar", { push: false });
+    }
     await loadRadar();
   } catch (err) {
     alert(`Could not switch mode: ${err.message}`);
@@ -287,22 +303,25 @@ async function disconnectAiKey() {
 }
 
 document.querySelectorAll(".nav-item").forEach((b) => {
-  b.addEventListener("click", () => switchView(b.dataset.view));
+  b.addEventListener("click", () => navigateToView(b.dataset.view));
 });
 document.getElementById("refreshRadar").addEventListener("click", loadRadar);
 document.getElementById("loadTicker").addEventListener("click", () => {
   const t = document.getElementById("tickerSelect").value;
-  if (t) loadTickerDetail(t);
+  if (t) navigateToTicker(t, loadTickerDetail);
 });
 
-// Bootstrap: if the page was opened with #ticker=XXX (e.g. a link from
-// Market Radar's Investigate affordance surviving a reload), go straight
-// to Ticker Analysis with it loaded instead of defaulting to Market Radar.
+// Bootstrap: read the URL (view=.../ticker=..., or the legacy bare
+// #ticker=XXX) and land on THAT view+ticker instead of unconditionally
+// defaulting to Market Radar -- covers both a fresh deep link and a
+// browser refresh. Radar is always loaded first regardless of the target
+// view because it's what populates _knownTickers (needed to validate a
+// URL-supplied ticker) and the <select> options Ticker Analysis uses.
+window.TIP_NAV_HANDLERS = { loadTickerDetail, getKnownTickers: () => _knownTickers };
+wireHistoryHandling();
 (async function bootstrap() {
   await loadSettings();
   await loadRadar();
-  const hashTicker = getTickerFromHash();
-  if (hashTicker) {
-    navigateToTicker(hashTicker, loadTickerDetail);
-  }
+  const initialState = parseNavHash(location.hash);
+  applyNavState(initialState, window.TIP_NAV_HANDLERS, { push: false });
 })();

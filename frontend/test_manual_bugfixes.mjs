@@ -50,8 +50,14 @@ global.document = {
   // before this fix -- not a bug in the app code under test).
   querySelector: (sel) => el(sel),
 };
-global.history = { replaceState: () => {} };
+global.history = { replaceState: () => {}, pushState: () => {} };
 global.location = { pathname: "/", search: "", hash: "" };
+// Minimal window stub: app.core.js's wireHistoryHandling() registers a real
+// popstate listener on `window`, and app.live.js/app.static.js stash
+// TIP_NAV_HANDLERS on it. Not exercising real browser history here (that's
+// done separately against a real backend+browser) -- just enough for the
+// module to load and for other checks in this file to run unmodified.
+global.window = { addEventListener: () => {}, TIP_NAV_HANDLERS: null };
 global.ResizeObserver = class { observe() {} };
 // Minimal fake of the vendored LightweightCharts global so
 // mountCandlestickChart() (app.core.js) runs its real logic end to end
@@ -129,7 +135,7 @@ async function main() {
       new URL("./app.live.js", import.meta.url).pathname,
     ],
     [
-      "setMode", "loadRadar", "loadTickerDetail", "setCurrentTicker", "TIP_STATE",
+      "setMode", "loadRadar", "loadTickerDetail", "navigateToTicker", "TIP_STATE",
       "loadSettings", "testUwKey", "saveUwKey", "disconnectUwKey", "apiPost", "apiGet",
       "mountCandlestickChart",
     ],
@@ -155,7 +161,7 @@ async function main() {
   });
   // Simulate the real navigateToTicker path (Radar "Investigate" click) so
   // TIP_STATE.currentTicker is actually populated like production code does.
-  liveB.setCurrentTicker("FLUX");
+  await liveB.navigateToTicker("FLUX", liveB.loadTickerDetail);
   check("TIP_STATE.currentTicker set before switch", () => {
     assert.equal(liveB.TIP_STATE.currentTicker, "FLUX");
   });
