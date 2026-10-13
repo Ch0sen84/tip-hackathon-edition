@@ -63,6 +63,45 @@ dependency, and makes no calls to the production TIP service.
    (see `.env.example`). Never commit a real key.
 
 5. **No MCP / LLM code anywhere in this repo**, per the hackathon task scope.
+   The Settings page's "AI / MCP (optional)" section only saves/clears a
+   provider API key for now -- no AI/MCP calls happen yet.
+
+6. **Settings infrastructure is .env-primary, UI-layer-on-top (Phase 2.5
+   judgment call).** `backend/app/settings_store.py` is a small local JSON
+   file (`data/settings.json`, gitignored) holding mode + both keys. It is
+   genuinely safe UI-based key *saving* (server-side only, chmod 600,
+   never echoed back), not a cosmetic stub -- see "Credential precedence"
+   below for why `.env` is still called primary. A full secrets-manager /
+   OS-keychain integration (e.g. `keyring`) was considered and rejected as
+   over-engineering for a single-user local/Docker hackathon app; a
+   plain-JSON file under a gitignored, chmod-600 directory is a pragmatic
+   match for the actual threat model here (protecting against an
+   accidental git commit or UI leak, not a local filesystem attacker).
+
+## Credential precedence (read this before testing Live Mode)
+
+Two ways to configure a UW API key, in this precedence order:
+
+1. **UI-saved key** (Settings page -> Save, or `POST /api/settings/uw-key`)
+   -- written to `data/settings.json`. **Always wins if present.**
+2. **`.env` / environment `UW_API_KEY`** -- read once at process startup
+   (via `python-dotenv`, see `backend/app/config.py`). Used only as a
+   fallback when no UI-saved key exists.
+
+`GET /api/settings` reports which source is active (`"source": "ui"` or
+`"env"`) plus a `configured` boolean and the key's last 4 characters --
+**never the real key value**, in either case. Switching `TIP_MODE`/Live
+via the UI is independent of which source supplied the key; `POST
+/api/settings/mode {"mode":"live"}` just requires *some* effective key to
+exist (fails with 400 otherwise), and `DELETE /api/settings/uw-key`
+clears the UI-saved key and force-reverts mode to `demo`.
+
+`PUBLIC_DEMO=1` (see `.env.example`) renders Settings in explanatory-only
+mode (Live Mode and key inputs disabled/hidden client-side) **and** blocks
+`POST /api/settings/mode {"mode":"live"}`, `POST /api/settings/uw-key`,
+and `POST /api/settings/ai-key` server-side with 403 -- defense in depth
+for the later public static-demo build, implemented now so that code path
+never needs revisiting.
 
 ## Running locally (no Docker)
 
@@ -84,8 +123,24 @@ Open `http://localhost:8000/` for the frontend, or hit the API directly:
   drill-down plus raw adapter data for one ticker.
 - `GET /api/scenarios` -- (demo mode only) lists what each synthetic
   fixture is meant to demonstrate.
+- `GET /api/settings` -- current mode, `public_demo` flag, and whether the
+  UW/AI keys are configured (boolean + last-4-characters only, never the
+  real value).
+- `POST /api/settings/mode {"mode": "demo"|"live"}` -- switch mode.
+- `POST /api/settings/uw-key {"api_key": "..."}` / `DELETE /api/settings/uw-key`
+  -- save/clear the UW key (saving requires a non-empty key; clearing
+  force-reverts mode to `demo` if it was `live`).
+- `POST /api/settings/uw-key/test` -- a **real** live call to the UW API
+  (stock-info for SPY) using the saved key; returns `success`,
+  `unauthorized`, `forbidden_tier_limited`, `network_error`, or
+  `not_configured`.
+- `POST /api/settings/ai-key {"provider": "anthropic"|"openai", "api_key": "..."}`
+  / `DELETE /api/settings/ai-key` -- save/clear the optional AI provider
+  key for the upcoming (not-yet-implemented) MCP/AI module.
 
-Switch to the real UW API with `TIP_MODE=live UW_API_KEY=... uvicorn ...`.
+Switch to Live Mode either through the Settings page (Save a UW key, then
+toggle to Live) or via env: `TIP_MODE=live UW_API_KEY=... uvicorn ...`. See
+"Credential precedence" above for how a UI-saved key and `.env` interact.
 
 The SQLite file (`TIP_DB_PATH`, default `./data/tip_hackathon.db`) is
 created automatically on first run -- delete it to reset all lifecycle
@@ -127,19 +182,23 @@ live data.
 ## Repo layout
 
 ```
-backend/app/core/        pure, DB-free logic (signal_engine, tip_evidence, scan_service)
-backend/app/adapters/    SyntheticDataAdapter, LiveUWAdapter (same interface)
-backend/app/main.py      FastAPI routes
-backend/app/storage.py   local SQLite qualifying-days store
-backend/tests/           pytest suite
-fixtures/                synthetic scenario_*.json + README_SYNTHETIC.md
-frontend/                plain HTML/CSS/JS, no build step
-docs/                    design notes
+backend/app/core/            pure, DB-free logic (signal_engine, tip_evidence, scan_service)
+backend/app/adapters/        SyntheticDataAdapter, LiveUWAdapter (same interface)
+backend/app/main.py          FastAPI routes, incl. /api/settings*
+backend/app/settings_store.py  local JSON settings/credential store (data/settings.json)
+backend/app/storage.py       local SQLite qualifying-days store
+backend/tests/                pytest suite (incl. test_settings.py)
+fixtures/                    synthetic scenario_*.json + README_SYNTHETIC.md
+frontend/                    plain HTML/CSS/JS, no build step (incl. Settings view)
+docs/                        design notes
+data/                        gitignored: settings.json + tip_hackathon.db, created at runtime
 ```
 
 ## Status
 
 Phase 1 + Phase 2 scope (backend port + synthetic/live adapters + minimal
-frontend + tests) is implemented and passing locally. This README is a
-skeleton; polish (screenshots, architecture diagram, deployment notes) is
-planned for a later pass before submission.
+frontend + tests) is implemented and passing locally. Phase 2.5 (Settings
+UI + local credential store, Demo/Live mode switching, PUBLIC_DEMO
+explanatory mode, no MCP/AI calls yet) is also implemented and passing
+locally. This README is a skeleton; polish (screenshots, architecture
+diagram, deployment notes) is planned for a later pass before submission.
