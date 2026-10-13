@@ -85,7 +85,7 @@ nav#nav .ic { font-size: 13px; width: 16px; text-align: center; opacity: .7; }
 #app { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 
 @media (max-width: 980px) {
-  body { flex-direction: column; }
+  .shell { flex-direction: column; }
   #sidebar {
     width: 100%; min-width: 0; height: auto; position: static;
     flex-direction: row; align-items: center; flex-wrap: wrap;
@@ -120,7 +120,14 @@ nav#nav .ic { font-size: 13px; width: 16px; text-align: center; opacity: .7; }
 .mode-pill.mode-demo { color: var(--amber); border-color: var(--amber); background: rgba(232,179,57,0.08); }
 .mode-pill.mode-live { color: var(--bull); border-color: var(--bull); background: rgba(62,207,142,0.08); }
 
-.main { padding: 18px 20px 60px; max-width: clamp(1200px, 92vw, 1680px); margin: 0 auto; }
+/* Bug found via real mobile-width screenshot verification: clamp(1200px,
+   92vw, 1680px) has a 1200px FLOOR, so at narrow widths 92vw (< 1200px)
+   is discarded and the max-width stays pinned at 1200px -- forcing
+   horizontal overflow/clipping on every view at mobile width. min(...)
+   has no floor, so it actually shrinks below 1200px when the viewport
+   is narrower than that. */
+.main { padding: 18px 20px 60px; max-width: min(1680px, 100%); width: 100%; margin: 0 auto; box-sizing: border-box; }
+@media (max-width: 600px) { .main { padding: 14px 14px 50px; } }
 .view { display: none; }
 .view.active { display: block; }
 
