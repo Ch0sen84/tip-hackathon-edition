@@ -482,8 +482,10 @@ function renderSettingsView(d) {
     : "";
 
   // The real enforcement of "Live Mode requires a passed Test Connection"
-  // lives server-side (POST /api/settings/mode rejects with 400 otherwise
-  // -- see backend/app/main.py + settings_store.is_key_verified). This
+  // lives server-side in the local-edition backend's mode-switch route
+  // (rejects with HTTP 400 otherwise -- see backend/app/main.py's set_mode
+  // handler + settings_store.is_key_verified; never called from here, this
+  // file has zero fetch() calls, see the module docstring above). This
   // disables the Activate button as a UX nicety ONLY; it is never the
   // actual security boundary, and the server re-checks regardless of
   // whether this disabled attribute was somehow bypassed client-side.

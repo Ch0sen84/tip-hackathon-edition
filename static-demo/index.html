@@ -12,17 +12,23 @@
     No live Unusual Whales data, no live AI calls, no backend of any kind. The downloadable local
     edition runs the exact same decision engine against real Unusual Whales data.
   </div>
-  <header class="topbar">
-    <div class="brand">TIP <span class="brand-sub">Hackathon Edition · Public Demo</span></div>
-    <nav class="nav">
-      <button class="nav-item active" data-view="radar">Market Radar</button>
-      <button class="nav-item" data-view="ticker">Ticker Analysis</button>
-      <button class="nav-item" data-view="settings">Settings</button>
+  <div class="shell">
+  <aside id="sidebar">
+    <div class="brand-block">
+      <div class="brand-name">TIP</div>
+      <span class="brand-sub">Hackathon Edition &middot; Public Demo</span>
+      <div class="mode-pill" id="modePill">mode: ...</div>
+    </div>
+    <nav id="nav">
+      <button class="nav-item active" data-view="radar"><span class="ic">&#9673;</span>Market Radar</button>
+      <button class="nav-item" data-view="ticker"><span class="ic">&#128269;</span>Ticker Analysis</button>
+      <button class="nav-item" data-view="settings"><span class="ic">&#9881;</span>Settings</button>
+      <button class="nav-item" data-view="about"><span class="ic">&#8505;</span>About / Beyond the Hackathon</button>
     </nav>
-    <div class="mode-pill" id="modePill">mode: ...</div>
-  </header>
+    <div class="sidebar-foot">Public demo &middot; simulated data only.<br>No backend, no credentials, no live calls.</div>
+  </aside>
 
-  <main class="main">
+  <main class="main" id="app">
     <section id="view-radar" class="view active">
       <div class="status-strip">
         <span id="radarStatus">Loading Market Radar...</span>
@@ -31,15 +37,18 @@
 
       <div id="activityStrip"></div>
 
-      <h2 class="section-title">Featured Signal</h2>
-      <div id="featuredSignalSlot"></div>
+      <h2 class="section-title eyebrow">Featured Signal</h2>
+      <div class="td-attn-grid">
+        <div id="featuredSignalSlot"></div>
+        <aside class="radar-sidebar" id="breakdownSlot"></aside>
+      </div>
 
       <div class="radar-with-breakdown">
         <div class="radar-main">
-          <h2 class="section-title">Highest Attention</h2>
+          <h2 class="section-title eyebrow">Highest Attention</h2>
           <div class="attn-grid" id="highestGrid"></div>
 
-          <h2 class="section-title">Other Noteworthy</h2>
+          <h2 class="section-title eyebrow">Other Noteworthy</h2>
           <div class="table-wrap">
             <table class="tbl" id="otherTable">
               <thead>
@@ -57,7 +66,6 @@
           </div>
           <div class="empty" id="radarEmpty" style="display:none">No tickers qualify right now.</div>
         </div>
-        <aside class="radar-sidebar" id="breakdownSlot"></aside>
       </div>
     </section>
 
@@ -71,12 +79,10 @@
     </section>
 
     <section id="view-settings" class="view"></section>
-  </main>
 
-  <footer class="foot">
-    <details class="how">
-      <summary>About this demo</summary>
-      <div class="how-body">
+    <section id="view-about" class="view">
+      <h2 class="section-title eyebrow">About / Beyond the Hackathon</h2>
+      <div class="how-body" style="padding:0">
         <p>This is a standalone hackathon build of TIP (Trading Intelligence
         Platform). The gate / confidence / state-transition logic in
         <code>backend/app/core/signal_engine.py</code> is ported verbatim
@@ -86,9 +92,16 @@
         Unusual Whales API). Nothing shown here is a canned conclusion --
         every NEW / BUILDING / CONFIRMED / STABLE / FADING / INVALIDATED
         label is computed from whatever data the active adapter returned.</p>
+        <p class="muted">Beyond this hackathon build, the full production TIP platform
+        additionally includes: Databento/futures collectors, a production TimescaleDB
+        history spanning weeks of continuous scanning, scheduled Discord reporting,
+        an experimental Research Lab, and home-lab infrastructure automation. None of
+        that is included here by design -- this public demo is credential-free, static,
+        and limited to pre-captured simulated output.</p>
       </div>
-    </details>
-  </footer>
+    </section>
+  </main>
+  </div>
 
 <script src="app.core.js"></script>
 <script src="app.static.js"></script>

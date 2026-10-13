@@ -1,33 +1,100 @@
-/* Dark theme + card/table primitives adapted from the production TIP
-   frontend's CSS (same variable names, card layout idea, and mobile
-   breakpoints), rebuilt small and standalone for the new API shape. */
+/* Design tokens ported BY VALUE from production TIP's actual frontend
+   (~/.hermes/scripts/uw/webapp/frontend/index.html :root block) -- same
+   literal hex/px values and variable names, copied as CSS text, not by
+   reference/import/API call. Production is read-only reference material
+   only; nothing here depends on it at runtime. */
 :root {
-  --bg: #0b0d10;
-  --panel: #12161b;
-  --panel2: #171c22;
-  --panel3: #1b2128;
-  --border: #22282f;
-  --border2: #2a313a;
-  --text: #e8ecf0;
-  --text2: #b7c0c9;
-  --muted: #808992;
-  --muted2: #5c6570;
-  --accent: #4da3ff;
-  --bull: #3ecf8e;
-  --bear: #f1636e;
-  --amber: #e8b339;
-  --blue: #4da3ff;
-  --radius-md: 10px;
+  --bg: #0a0c11;
+  --panel: #12151d;
+  --panel2: #191d28;
+  --panel3: #1f2433;
+  --border: #262b3a;
+  --border2: #323949;
+  --text: #e4e7ee;
+  --text2: #b7bccb;
+  --muted: #7d8496;
+  --muted2: #565d70;
+  --bull: #22c07a;
+  --bear: #ef4a5e;
+  --amber: #e8a83c;
+  --blue: #4d9de5;
+  --accent: #22d3a8;
+  --accent2: #1aa989;
+  --sidebar-w: 224px;
   --radius-sm: 6px;
+  --radius-md: 9px;
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 24px;
 }
 
 * { box-sizing: border-box; }
+html { font-size: 16px; }
 body {
   margin: 0;
   background: var(--bg);
   color: var(--text);
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-  font-size: 14px;
+  font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+}
+/* .shell wraps #sidebar + the main content area so an optional banner
+   (e.g. static-demo's public-demo-top-banner) can sit ABOVE both as a
+   full-width row, instead of squeezing into the same flex row as the
+   sidebar. Plain <body> direct children (no .shell wrapper) still work
+   via the fallback rule below. */
+.shell { display: flex; flex: 1; min-height: 0; }
+
+/* Eyebrow label primitive + tabular-nums, ported by value from production
+   (small-caps-style section/field labels, and monospaced-width digits for
+   anything that updates/compares numerically, e.g. prices, confidence). */
+.eyebrow { font-size: 10px; font-weight: 700; letter-spacing: .6px; text-transform: uppercase; color: var(--muted); }
+.tabular-nums, .px, .pxchg, .activity-num, .featured-ticker, .conf-value { font-variant-numeric: tabular-nums; }
+
+/* ---------------------------------------------------------------------
+   Sidebar-first navigation (ported by value from production's #sidebar
+   pattern): persistent left column with a brand block + mode badge +
+   grouped nav buttons, replacing the old top navbar. AI Investigation is
+   intentionally NOT a sidebar entry -- it stays inside Ticker Analysis as
+   a section, matching production's own placement of equivalent
+   drill-down tooling under its parent view rather than as a sibling
+   top-level nav item. */
+#sidebar {
+  width: var(--sidebar-w); min-width: var(--sidebar-w); background: var(--panel);
+  border-right: 1px solid var(--border); display: flex; flex-direction: column;
+  position: sticky; top: 0; height: 100vh; flex-shrink: 0;
+}
+.brand-block { padding: 20px 20px 15px; border-bottom: 1px solid var(--border); }
+.brand-block .brand-name { font-size: 19px; font-weight: 800; letter-spacing: .5px; line-height: 1; }
+.brand-block .brand-sub { display: block; margin-top: 4px; font-size: 11px; color: var(--muted); font-weight: 600; }
+.brand-block .mode-pill { display: inline-block; margin-top: 10px; }
+nav#nav { display: flex; flex-direction: column; padding: 10px 0; flex: 1; }
+nav#nav button {
+  display: flex; align-items: center; gap: 10px; text-align: left; background: none; border: none;
+  border-left: 3px solid transparent; color: var(--muted); padding: 10px 18px; cursor: pointer;
+  font-size: 13px; font-weight: 600; width: 100%;
+}
+nav#nav button:hover { background: var(--panel2); color: var(--text2); }
+nav#nav button.active { background: var(--panel2); color: var(--text); border-left-color: var(--accent); font-weight: 700; }
+nav#nav .ic { font-size: 13px; width: 16px; text-align: center; opacity: .7; }
+.sidebar-foot { padding: 12px 20px; border-top: 1px solid var(--border); font-size: 10px; color: var(--muted2); line-height: 1.5; }
+
+#app { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+
+@media (max-width: 980px) {
+  body { flex-direction: column; }
+  #sidebar {
+    width: 100%; min-width: 0; height: auto; position: static;
+    flex-direction: row; align-items: center; flex-wrap: wrap;
+  }
+  .brand-block { border-bottom: none; border-right: 1px solid var(--border); padding: 12px 16px; }
+  nav#nav { flex-direction: row; flex-wrap: wrap; padding: 6px 10px; }
+  nav#nav button { width: auto; border-left: none; border-bottom: 3px solid transparent; }
+  nav#nav button.active { border-left-color: transparent; border-bottom-color: var(--accent); }
+  .sidebar-foot { display: none; }
 }
 
 .topbar {
@@ -196,9 +263,15 @@ pre.raw { background: var(--panel3); padding: 12px; border-radius: 8px; overflow
 
 .btn-investigate { margin-top: 12px; align-self: flex-start; font-size: 12px; }
 
-.radar-with-breakdown { display: grid; grid-template-columns: 1fr 300px; gap: 18px; align-items: start; }
+.radar-with-breakdown { display: grid; grid-template-columns: 1fr; gap: 18px; align-items: start; margin-top: 22px; }
 .radar-sidebar { position: sticky; top: 14px; }
-@media (max-width: 1100px) { .radar-with-breakdown { grid-template-columns: 1fr; } .radar-sidebar { position: static; } }
+
+/* td-attn-grid: production's featured-signal + supporting-grid pattern,
+   ported by value (2fr primary / 3fr support, same breakpoint). Applied
+   here to the Featured Signal + Signal Breakdown pairing -- restyling of
+   existing markup/logic, not a new layout engine. */
+.td-attn-grid { display: grid; grid-template-columns: minmax(300px, 2fr) minmax(0, 3fr); gap: 16px; align-items: start; }
+@media (max-width: 1180px) { .td-attn-grid { grid-template-columns: 1fr; } .radar-sidebar { position: static; } }
 
 .breakdown-panel {
   border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--panel);
