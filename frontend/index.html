@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TIP Hackathon Edition</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">TIP <span class="brand-sub">Hackathon Edition</span></div>
+    <nav class="nav">
+      <button class="nav-item active" data-view="radar">Market Radar</button>
+      <button class="nav-item" data-view="ticker">Ticker Analysis</button>
+    </nav>
+    <div class="mode-pill" id="modePill">mode: ...</div>
+  </header>
+
+  <main class="main">
+    <section id="view-radar" class="view active">
+      <div class="status-strip">
+        <span id="radarStatus">Loading Market Radar...</span>
+        <button class="btn-link" id="refreshRadar">refresh</button>
+      </div>
+
+      <h2 class="section-title">Highest Attention</h2>
+      <div class="attn-grid" id="highestGrid"></div>
+
+      <h2 class="section-title">Other Noteworthy</h2>
+      <div class="table-wrap">
+        <table class="tbl" id="otherTable">
+          <thead>
+            <tr>
+              <th>Ticker</th>
+              <th>State</th>
+              <th>Confidence</th>
+              <th class="col-headline">Headline</th>
+              <th class="col-read">Current read</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <div class="empty" id="radarEmpty" style="display:none">No tickers qualify right now.</div>
+    </section>
+
+    <section id="view-ticker" class="view">
+      <div class="toolbar">
+        <select id="tickerSelect"></select>
+        <button class="btn" id="loadTicker">Analyze</button>
+      </div>
+      <div id="tickerDetail"></div>
+    </section>
+  </main>
+
+  <footer class="foot">
+    <details class="how">
+      <summary>About this demo</summary>
+      <div class="how-body">
+        <p>This is a standalone hackathon build of TIP (Trading Intelligence
+        Platform). The gate / confidence / state-transition logic in
+        <code>backend/app/core/signal_engine.py</code> is ported verbatim
+        from the production app and runs identically whether the backend is
+        in <code>demo</code> mode (synthetic fixtures, clearly marked
+        <code>synthetic: true</code>) or <code>live</code> mode (real
+        Unusual Whales API). Nothing shown here is a canned conclusion --
+        every NEW / BUILDING / CONFIRMED / STABLE / FADING / INVALIDATED
+        label is computed from whatever data the active adapter returned.</p>
+      </div>
+    </details>
+  </footer>
+
+<script src="app.js"></script>
+</body>
+</html>

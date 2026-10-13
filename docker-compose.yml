@@ -1,0 +1,16 @@
+services:
+  tip-hackathon:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      TIP_MODE: ${TIP_MODE:-demo}
+      UW_API_KEY: ${UW_API_KEY:-}
+      UW_BASE_URL: ${UW_BASE_URL:-https://api.unusualwhales.com}
+      UW_CLIENT_API_ID: ${UW_CLIENT_API_ID:-}
+      TIP_LIVE_WATCHLIST: ${TIP_LIVE_WATCHLIST:-SPY,QQQ,NVDA,TSLA}
+    volumes:
+      - tip-data:/srv/data
+
+volumes:
+  tip-data:

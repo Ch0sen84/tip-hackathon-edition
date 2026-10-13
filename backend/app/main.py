@@ -16,8 +16,11 @@ from __future__ import annotations
 from datetime import date, timedelta
 from typing import Optional
 
+from pathlib import Path
+
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
 from .adapters.base import UWDataAdapter
 from .adapters.live_uw_adapter import LiveUWAdapter
@@ -196,3 +199,11 @@ def scenarios():
     if isinstance(adapter, SyntheticDataAdapter):
         return {"scenarios": adapter.list_scenarios()}
     return {"scenarios": [], "note": "scenario listing only available in TIP_MODE=demo"}
+
+
+# Serve the plain HTML/CSS/JS frontend at "/" when its directory is present
+# (true in the Docker image; optional for local `uvicorn app.main:app` runs
+# started from backend/ without the sibling frontend/ dir mounted).
+_FRONTEND_DIR = Path(__file__).resolve().parents[2] / "frontend"
+if _FRONTEND_DIR.exists():
+    app.mount("/", StaticFiles(directory=str(_FRONTEND_DIR), html=True), name="frontend")
