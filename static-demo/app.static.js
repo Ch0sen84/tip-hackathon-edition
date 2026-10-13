@@ -33,9 +33,22 @@ async function loadRadar() {
     document.getElementById("radarEmpty").style.display =
       (data.highest.length === 0 && data.other.length === 0) ? "block" : "none";
 
+    // Same fix as the local edition's app.live.js: data/radar.json only
+    // ever contains Radar-qualifying tickers, so DRFT/NADA (zero
+    // qualifying gates by design) would otherwise never appear in this
+    // <select>. Merge in data/scenarios.json, deduped, so all 5 captured
+    // scenarios stay selectable and loadable via data/ticker/{t}.json.
+    let scenarioTickers = [];
+    try {
+      const scenariosResp = await loadJson("data/scenarios.json");
+      scenarioTickers = (scenariosResp.scenarios || []).map((s) => s.ticker);
+    } catch (e) {
+      /* non-fatal: select falls back to Radar-qualifying tickers only */
+    }
+    const radarTickers = [...data.highest, ...data.other].map((e) => e.ticker);
+    const allTickers = Array.from(new Set([...radarTickers, ...scenarioTickers])).sort();
     const sel = document.getElementById("tickerSelect");
-    const allTickers = [...data.highest, ...data.other].map((e) => e.ticker);
-    sel.innerHTML = allTickers.map((t) => `<option value="${esc(t)}">${esc(t)}</option>`).join("");
+    sel.innerHTML = renderTickerOptions(allTickers, TIP_STATE.currentTicker);
 
     wireInvestigateButtons(loadTickerDetail);
     document.querySelectorAll('[data-ticker]').forEach((card) => {
