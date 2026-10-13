@@ -36,6 +36,15 @@ class InvestigationResult(BaseModel):
     rejected_tool_selections: list[dict] = Field(default_factory=list)
     simulated: bool = False
     simulated_label: Optional[str] = None
+    # Which backend actually executed the UW tool calls for a REAL
+    # (non-simulated) investigation: "mcp" (genuine MCP-protocol calls
+    # against UW's hosted server) or "rest" (plain REST fallback over the
+    # same allowlisted endpoints). Left None for simulated transcripts --
+    # `simulated`/`simulated_label` already cover that case. Exists so the
+    # UI and logs can state plainly which transport ran, rather than
+    # leaving it as a server-only config switch (INVESTIGATE_TRANSPORT)
+    # nothing in the response ever surfaced.
+    transport: Optional[str] = None
 
 
 def validate_investigation_result(raw: dict, ticker: str, called_tools: list[str]) -> InvestigationResult:

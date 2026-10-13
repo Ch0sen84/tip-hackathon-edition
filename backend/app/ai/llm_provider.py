@@ -35,7 +35,13 @@ class _Provider(Protocol):
 class AnthropicProvider:
     name = "anthropic"
     url = "https://api.anthropic.com/v1/messages"
-    model = "claude-sonnet-5"
+    # Verified against platform.claude.com/docs/en/models/overview on
+    # 2026-10-13 (not assumed): claude-sonnet-5 is still a valid, undeprecated
+    # model ID, but claude-sonnet-5-5 is the current generation at the same
+    # "efficient model for coding and agents" tier -- $2/$10 per MTok
+    # in/out, well inside this feature's 2-call bound. Pin it explicitly
+    # here (not an alias) so behavior/pricing doesn't drift silently.
+    model = "claude-sonnet-5-5"
 
     def complete(self, system: str, user: str, api_key: str) -> str:
         resp = requests.post(
@@ -66,7 +72,18 @@ class AnthropicProvider:
 class OpenAIProvider:
     name = "openai"
     url = "https://api.openai.com/v1/chat/completions"
-    model = "gpt-5"
+    # Verified against developers.openai.com/api/docs/models/gpt-5 on
+    # 2026-10-13 (not assumed): gpt-5 is now explicitly marked Deprecated
+    # there, with gpt-6-astra named as its replacement ($10/$50 per MTok
+    # in/out -- still trivial for this feature's 2-call bound). Pin the
+    # current, non-deprecated ID explicitly.
+    model = "gpt-6-astra"
+    # Mirrors AnthropicProvider's max_tokens=1500 bound -- previously this
+    # request had NO output-token cap at all, a real cost/runaway-output
+    # gap for a feature whose whole design goal is a tightly bounded call
+    # count. chat/completions uses `max_tokens` (not the Responses API's
+    # `max_output_tokens`).
+    max_output_tokens = 1500
 
     def complete(self, system: str, user: str, api_key: str) -> str:
         resp = requests.post(
@@ -76,6 +93,7 @@ class OpenAIProvider:
                 "model": self.model,
                 "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
                 "response_format": {"type": "json_object"},
+                "max_tokens": self.max_output_tokens,
             },
             timeout=REQUEST_TIMEOUT_S,
         )

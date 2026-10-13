@@ -180,6 +180,31 @@ def test_orchestrator_never_executes_more_than_max_tools_even_if_llm_requests_mo
     assert call_counts["execute"] <= MAX_TOOLS_PER_INVESTIGATION
 
 
+def test_orchestrator_result_reports_which_transport_actually_ran(monkeypatch):
+    """The response must say plainly whether MCP or REST executed the real
+    tool calls -- previously this was only a server-side config switch
+    (INVESTIGATE_TRANSPORT) with no trace in the API response at all, which
+    is exactly the ambiguity the user asked to have eliminated."""
+    monkeypatch.setattr(orchestrator, "select_tools", lambda *a, **k: GOOD_SELECTION)
+    monkeypatch.setattr(orchestrator, "execute_tool", lambda tool, ticker, args, client: {"tool": tool, "ok": True, "data": {}, "error": None})
+    monkeypatch.setattr(orchestrator, "execute_tools_mcp", lambda calls, uw_api_key: [{"tool": c["tool"], "ok": True, "data": {}, "error": None} for c in calls])
+    monkeypatch.setattr(orchestrator, "synthesize", lambda *a, **k: GOOD_SYNTHESIS)
+
+    rest_result = orchestrator.investigate(
+        ticker="ZYNC", evidence={}, ai_provider="anthropic", ai_api_key="fake",
+        uw_api_key="fake", uw_base_url="https://x", transport="rest",
+    )
+    assert rest_result.transport == "rest"
+    assert rest_result.simulated is False
+
+    mcp_result = orchestrator.investigate(
+        ticker="ZYNC", evidence={}, ai_provider="anthropic", ai_api_key="fake",
+        uw_api_key="fake", uw_base_url="https://x", transport="mcp",
+    )
+    assert mcp_result.transport == "mcp"
+    assert mcp_result.simulated is False
+
+
 def test_orchestrator_raises_when_no_valid_tools_selected(monkeypatch):
     monkeypatch.setattr(orchestrator, "select_tools", lambda *a, **k: [{"tool": "not_allowed", "args": {}}])
     try:

@@ -74,6 +74,7 @@ def investigate(
         raise MalformedAIResponse(f"synthesis round did not return a JSON object (got {type(raw_synthesis).__name__})")
     result = validate_investigation_result(raw_synthesis, safe_ticker, called_tools)
     result.rejected_tool_selections = rejected_selection
+    result.transport = transport
     return result
 
 

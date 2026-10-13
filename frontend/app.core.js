@@ -1117,6 +1117,16 @@ function renderInvestigateProcessSteps() {
     </div>`;
 }
 
+// Plain-language label for InvestigationResult.transport (schemas.py).
+// "mcp"/"rest" are both REAL (non-simulated) -- this only states which
+// backend executed the UW tool calls, so the UI never implies genuine
+// MCP activity happened when the REST fallback actually ran, or vice versa.
+function transportLabel(transport) {
+  if (transport === "mcp") return "Real MCP-protocol calls to UW's hosted server";
+  if (transport === "rest") return "Real REST calls (MCP fallback transport)";
+  return "Unknown (older response or unset)";
+}
+
 function renderInvestigateResult(d, ticker, modeLabel) {
   const simBanner = d.simulated
     ? `<div class="ai-simulated-banner ai-simulated-banner-strong">
@@ -1125,7 +1135,8 @@ function renderInvestigateResult(d, ticker, modeLabel) {
        </div>`
     : `<div class="ai-live-banner">LIVE: this investigation made real calls using your configured AI provider and UW key.
          Bounded, read-only tool selection and synthesis -- see README for the one documented gap:
-         full LLM-directed tool-selection/synthesis has not yet been verified end-to-end with a real provider.</div>`;
+         full LLM-directed tool-selection/synthesis has not yet been verified end-to-end with a real provider.
+         <br><strong>Transport: ${esc(transportLabel(d.transport))}</strong></div>`;
   const headerHtml = ticker ? renderInvestigateHeader(ticker, modeLabel || "") : "";
   return `
     ${headerHtml}
