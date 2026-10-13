@@ -610,7 +610,7 @@ const GATE_CATEGORY = {
 // Real limitation text sourced from signal_engine.py's own docstrings/notes
 // (not newly-invented claims) -- surfaced next to the gate it documents.
 const GATE_LIMITATION_NOTES = {
-  historical_percentile: "This gate's percentile estimate is a SYNTHETIC static-bucket model (see synthetic_percentile_gate() in signal_engine.py), not the production trailing-window historical-percentile calculation -- it is not a claim about real historical rarity.",
+  historical_percentile: "This gate's percentile estimate is a SYNTHETIC static-bucket model, not the production trailing-window historical-percentile calculation -- it is not a claim about real historical rarity.",
   persistence: "Persistence counts qualifying prints seen so far in this app's own short local history; with only a few sessions of data, \"persistence\" cannot yet mean the same thing it does in production's longer trailing window.",
   dark_pool_anomaly: "When this gate's bootstrap flag is set, there isn't yet enough trailing history for a real baseline ratio/z-score -- the gate reports non-qualifying rather than asserting an anomaly.",
   catalyst_identified: "Not auto-computed from any data feed -- this gate is only true when a catalyst has been explicitly, manually tagged. False means absent input, not evidence against a catalyst.",
@@ -991,6 +991,18 @@ function renderLifecycleTimeline(history, currentState) {
 // lifecycle summary from P0. Raw JSON / internal rule ids stay inside the
 // existing bottom <details> panel, unchanged in content, just de-prioritized
 // by position.
+// Accurate, non-confusing wording for the state-transition line: a real
+// change shows "Transition: OLD -> NEW", the very first observation (no
+// previous_state at all) shows "Initial detection: NEW", and -- the actual
+// fix requested here -- a scan that left the state unchanged shows
+// "Status: Still X" instead of the confusing "Transition: X -> X". Purely
+// presentation: does not touch what previous_state/state actually are.
+function transitionLabel(previousState, state) {
+  if (!previousState) return `Initial detection: ${state}`;
+  if (previousState === state) return `Status: Still ${state}`;
+  return `Transition: ${previousState} \u2192 ${state}`;
+}
+
 function renderTickerDetail(d) {
   const gatesHtml = renderGateGroups(d.gates);
   const stateGloss = STATE_GLOSS[d.state] || "";
@@ -1009,7 +1021,7 @@ function renderTickerDetail(d) {
       </div>
       <div class="read">${esc(d.headline)}</div>
       <div class="read">${esc(d.current_read)}</div>
-      <div class="read">Transition: ${esc(d.previous_state || "none")} &rarr; ${esc(d.state)}</div>
+      <div class="read">${esc(transitionLabel(d.previous_state, d.state))}</div>
       <div class="read">Confidence reason: ${esc(d.confidence_reason)}</div>
     </div>
     <div class="card chart-card">
