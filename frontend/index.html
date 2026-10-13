@@ -24,25 +24,36 @@
         <button class="btn-link" id="refreshRadar">refresh</button>
       </div>
 
-      <h2 class="section-title">Highest Attention</h2>
-      <div class="attn-grid" id="highestGrid"></div>
+      <div id="activityStrip"></div>
 
-      <h2 class="section-title">Other Noteworthy</h2>
-      <div class="table-wrap">
-        <table class="tbl" id="otherTable">
-          <thead>
-            <tr>
-              <th>Ticker</th>
-              <th>State</th>
-              <th>Confidence</th>
-              <th class="col-headline">Headline</th>
-              <th class="col-read">Current read</th>
-            </tr>
-          </thead>
-          <tbody></tbody>
-        </table>
+      <h2 class="section-title">Featured Signal</h2>
+      <div id="featuredSignalSlot"></div>
+
+      <div class="radar-with-breakdown">
+        <div class="radar-main">
+          <h2 class="section-title">Highest Attention</h2>
+          <div class="attn-grid" id="highestGrid"></div>
+
+          <h2 class="section-title">Other Noteworthy</h2>
+          <div class="table-wrap">
+            <table class="tbl" id="otherTable">
+              <thead>
+                <tr>
+                  <th>Ticker</th>
+                  <th>State</th>
+                  <th>Confidence</th>
+                  <th class="col-headline">Headline</th>
+                  <th class="col-read">Current read</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+          <div class="empty" id="radarEmpty" style="display:none">No tickers qualify right now.</div>
+        </div>
+        <aside class="radar-sidebar" id="breakdownSlot"></aside>
       </div>
-      <div class="empty" id="radarEmpty" style="display:none">No tickers qualify right now.</div>
     </section>
 
     <section id="view-ticker" class="view">
@@ -74,6 +85,7 @@
     </details>
   </footer>
 
-<script src="app.js"></script>
+<script src="app.core.js"></script>
+<script src="app.live.js"></script>
 </body>
 </html>
