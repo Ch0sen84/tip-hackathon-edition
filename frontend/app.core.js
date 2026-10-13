@@ -30,6 +30,43 @@ function getTickerFromHash() {
   return m ? m[1].toUpperCase() : null;
 }
 
+// clearTickerView: the one place that resets ALL state tied to "whichever
+// ticker is currently loaded" -- TIP_STATE.currentTicker, the #ticker=...
+// hash, the <select> (back to its placeholder), and the two DOM panes that
+// render ticker-specific content (#tickerDetail, #investigateSection).
+// Needed whenever the underlying data source changes out from under an
+// already-rendered ticker (e.g. a Demo<->Live mode switch) so stale
+// content from the OLD mode/adapter never stays on screen referencing a
+// ticker that may not even exist in the new mode. Both adapters can call
+// this; the static demo has no mode switch so it currently has no caller,
+// but it is kept here (not duplicated) since app.core.js is the one
+// shared, byte-identical file.
+function clearTickerView() {
+  TIP_STATE.currentTicker = null;
+  try {
+    history.replaceState(null, "", location.pathname + location.search);
+  } catch (e) {
+    /* hash update is a convenience, never fatal */
+  }
+  const sel = document.getElementById("tickerSelect");
+  if (sel) sel.value = "";
+  const detailEl = document.getElementById("tickerDetail");
+  if (detailEl) detailEl.innerHTML = `<div class="empty">Select a ticker to analyze.</div>`;
+  const investigateEl = document.getElementById("investigateSection");
+  if (investigateEl) investigateEl.innerHTML = "";
+}
+
+// renderTickerOptions: builds the Ticker Analysis <select> options from a
+// merged/deduped ticker list, always with a leading placeholder so "no
+// ticker selected" is a real, visible state instead of silently defaulting
+// to whatever option happened to be first.
+function renderTickerOptions(tickers, selected) {
+  const opts = tickers
+    .map((t) => `<option value="${esc(t)}" ${t === selected ? "selected" : ""}>${esc(t)}</option>`)
+    .join("");
+  return `<option value="">-- select a ticker --</option>${opts}`;
+}
+
 // navigateToTicker: switches to the Ticker Analysis view, pre-selects the
 // ticker in the <select>, and invokes the adapter-supplied loader. Kept
 // deliberately dumb -- no route table, no history stack beyond the hash.
@@ -273,13 +310,47 @@ function renderGateGroups(gates) {
 
 // --- Ticker Analysis detail --------------------------------------------------
 
+// Plain-language glosses for the internal state-machine value and
+// transition-rule-id strings surfaced below. These are copy-only additions
+// placed NEXT TO the technical value (never replacing it) -- see
+// determine_transition()'s own rule-id strings in signal_engine.py, which
+// this map mirrors 1:1 so it never invents a reason the engine didn't give.
+const STATE_GLOSS = {
+  NEW: "just started qualifying",
+  BUILDING: "one qualifying signal so far, not yet confirmed",
+  CONFIRMED: "multiple signals, or repeated qualifying days",
+  STABLE: "confirmed and still qualifying after 3+ days",
+  FADING: "was qualifying; no gate passed this scan",
+  INVALIDATED: "price moved against the signal (terminal state)",
+};
+
+const TRANSITION_RULE_GLOSS = {
+  first_qualifying_gate: "First time this ticker qualified.",
+  multi_signal_or_persistence_on_first_reeval: "Two+ signals fired together, or this is at least the 2nd qualifying day.",
+  single_signal_reevaluated: "Still only one signal firing on re-evaluation.",
+  no_gate_passed_while_building: "No gate passed this scan while still BUILDING.",
+  still_single_signal: "Still only one signal firing; stayed BUILDING.",
+  no_gate_passed_while_confirmed: "No gate passed this scan while CONFIRMED.",
+  still_confirmed: "Kept qualifying; stayed CONFIRMED.",
+  no_gate_passed_while_stable: "No gate passed this scan while STABLE.",
+  still_stable: "Kept qualifying; stayed STABLE.",
+  reheated_multi_signal: "Multiple signals fired again after fading.",
+  reheated_single_signal: "One signal fired again after fading.",
+  still_fading: "Still no gate passing since fading started.",
+  terminal_state: "INVALIDATED is terminal; no further automatic transitions.",
+  no_rule_matched_state_unchanged: "No transition rule matched; state left unchanged.",
+};
+
 function renderTickerDetail(d) {
   const gatesHtml = renderGateGroups(d.gates);
+  const stateGloss = STATE_GLOSS[d.state] || "";
+  const ruleGloss = TRANSITION_RULE_GLOSS[d.transition_rule] || "internal rule identifier";
   return `
     <div class="detail-grid">
       <div class="card">
         <div class="card-head"><span class="tk">${esc(d.ticker)}</span>
           <span class="tag state-${esc(d.state)}">${esc(d.state)}</span>
+          ${stateGloss ? `<span class="muted state-gloss">(${esc(stateGloss)})</span>` : ""}
         </div>
         <div class="tags">
           <span class="tag">confidence: ${esc(d.confidence)}</span>
@@ -288,7 +359,7 @@ function renderTickerDetail(d) {
         </div>
         <div class="read">${esc(d.headline)}</div>
         <div class="read">${esc(d.current_read)}</div>
-        <div class="read">Transition: ${esc(d.previous_state || "none")} &rarr; ${esc(d.state)} (<code>${esc(d.transition_rule)}</code>)</div>
+        <div class="read">Transition: ${esc(d.previous_state || "none")} &rarr; ${esc(d.state)}</div>
         <div class="read">Confidence reason: ${esc(d.confidence_reason)}</div>
       </div>
       <div class="card">
@@ -299,6 +370,7 @@ function renderTickerDetail(d) {
     </div>
     <details class="how" style="margin-top:14px">
       <summary>Raw adapter data (what fed the gates above)</summary>
+      <p class="muted">Transition rule id: <code>${esc(d.transition_rule)}</code> &mdash; ${esc(ruleGloss)}</p>
       <pre class="raw">${esc(JSON.stringify(d.raw, null, 2))}</pre>
     </details>`;
 }
