@@ -1,0 +1,13 @@
+{
+  "synthetic": true,
+  "ticker": "DRFT",
+  "scenario_name": "Fading signal",
+  "description": "This scan has no qualifying activity at all for a ticker whose current_state (seeded separately in tests/demo seed data) is CONFIRMED. Used to exercise the CONFIRMED -> FADING transition rule (no_gate_passed_while_confirmed), not the NEW path.",
+  "flow_alerts": [],
+  "darkpool_trades": [],
+  "stock_state": {
+    "ticker": "DRFT",
+    "last_price": 55.02,
+    "change_percent": -0.2
+  }
+}

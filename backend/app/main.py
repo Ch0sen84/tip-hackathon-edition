@@ -1,0 +1,198 @@
+"""FastAPI app wiring Market Radar / Ticker Analysis routes to the ported
+core logic via whichever adapter TIP_MODE selects.
+
+TIP_MODE=demo (default) -> SyntheticDataAdapter over fixtures/*.json
+TIP_MODE=live            -> LiveUWAdapter over the real UW API (needs
+                             UW_API_KEY; see .env.example)
+
+Routes are intentionally thin: they fetch raw data from the adapter, run it
+through backend/app/core/scan_service.py (which is where the real gate /
+confidence / state-transition decision happens), persist the scan result to
+the local SQLite store for qualifying-days counting, and format it with
+backend/app/core/tip_evidence.py for display. No business logic lives here.
+"""
+from __future__ import annotations
+
+from datetime import date, timedelta
+from typing import Optional
+
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+
+from .adapters.base import UWDataAdapter
+from .adapters.live_uw_adapter import LiveUWAdapter
+from .adapters.synthetic_adapter import SyntheticDataAdapter
+from .config import settings
+from .core import scan_service, tip_evidence
+from .storage import QualifyingDaysStore
+
+app = FastAPI(title="TIP Hackathon Edition", version="0.1.0")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+_adapter: Optional[UWDataAdapter] = None
+_store: Optional[QualifyingDaysStore] = None
+
+
+def get_adapter() -> UWDataAdapter:
+    global _adapter
+    if _adapter is None:
+        if settings.is_demo:
+            _adapter = SyntheticDataAdapter(settings.fixtures_dir)
+        else:
+            _adapter = LiveUWAdapter(
+                api_key=settings.uw_api_key,
+                base_url=settings.uw_base_url,
+                client_api_id=settings.uw_client_api_id,
+                watchlist=settings.live_watchlist,
+            )
+    return _adapter
+
+
+def get_store() -> QualifyingDaysStore:
+    global _store
+    if _store is None:
+        _store = QualifyingDaysStore(settings.db_path)
+    return _store
+
+
+def _price_move_pct(stock_state: Optional[dict]) -> Optional[float]:
+    if not stock_state or stock_state.get("unavailable"):
+        return None
+    for key in ("change_percent", "chg_pct", "percent_change"):
+        if stock_state.get(key) is not None:
+            return float(stock_state[key])
+    return None
+
+
+def _run_scan(adapter: UWDataAdapter, store: QualifyingDaysStore, ticker: str) -> dict:
+    flow_alerts = adapter.get_flow_alerts(ticker)
+    darkpool_trades = adapter.get_darkpool_trades(ticker)
+    stock_state = adapter.get_stock_state(ticker)
+    current_state = store.current_state(ticker)
+    qualifying_days = store.qualifying_days_count(ticker)
+    result = scan_service.evaluate_ticker_scan(
+        ticker=ticker,
+        flow_alerts=flow_alerts,
+        darkpool_trades=darkpool_trades,
+        current_state=current_state,
+        qualifying_days_count=qualifying_days,
+        price_move_pct=_price_move_pct(stock_state),
+    )
+    any_gate_passed = len(result["gates_passed"]) > 0
+    store.record_scan(ticker, any_gate_passed, result["state"])
+    result["stock_state"] = stock_state
+    result["raw"] = {"flow_alerts": flow_alerts, "darkpool_trades": darkpool_trades}
+    return result
+
+
+def _to_evidence_item(scan: dict) -> dict:
+    """Shape one scan result into the dict backend/app/core/tip_evidence.py
+    expects (see its module docstring for the schema)."""
+    stock_state = scan.get("stock_state") or {}
+    chg = _price_move_pct(stock_state)
+    dp_metrics = scan["gates"]["dark_pool_anomaly"]["metrics"]
+    return {
+        "ticker": scan["ticker"],
+        "state": scan["state"],
+        "gates_passed": scan["gates_passed"],
+        "dp": {"ratio": dp_metrics.get("ratio"), "hist": None, "prints": None} if dp_metrics.get("ratio") else None,
+        "options": None,
+        "options_partial": False,
+        "price": {"chg_pct": chg, "last": stock_state.get("last_price")} if stock_state else None,
+        "alerts": None,
+        "context": None,
+        "next_earnings_date": None,
+        "research": [],
+    }
+
+
+@app.get("/api/health")
+def health():
+    adapter = get_adapter()
+    return {"ok": True, "mode": settings.mode, "adapter": adapter.health()}
+
+
+@app.get("/api/mode")
+def mode():
+    return {"mode": settings.mode}
+
+
+@app.get("/api/radar")
+def radar():
+    """Market Radar: scan every ticker in the adapter's universe and return
+    the ones that qualify (tip_evidence.qualifies), highest-attention first."""
+    adapter = get_adapter()
+    store = get_store()
+    universe = adapter.get_universe()
+    if not universe:
+        return {"highest": [], "other": [], "scanned": 0}
+
+    items = []
+    scans_by_ticker = {}
+    for ticker in universe:
+        scan = _run_scan(adapter, store, ticker)
+        scans_by_ticker[ticker] = scan
+        items.append(_to_evidence_item(scan))
+
+    highest, other = tip_evidence.present(items, next_session=date.today() + timedelta(days=1))
+
+    def _attach(entry: dict) -> dict:
+        s = scans_by_ticker[entry["ticker"]]
+        entry["confidence"] = s["confidence"]
+        entry["signal_type"] = s["signal_type"]
+        entry["qualifying_days_count"] = s["qualifying_days_count"]
+        return entry
+
+    return {
+        "highest": [_attach(e) for e in highest],
+        "other": [_attach(e) for e in other],
+        "scanned": len(universe),
+    }
+
+
+@app.get("/api/ticker/{ticker}")
+def ticker_analysis(ticker: str):
+    """Ticker Analysis: full evidence drill-down for one ticker -- gates,
+    confidence, state transition, and the tip_evidence explanation."""
+    adapter = get_adapter()
+    store = get_store()
+    ticker = ticker.upper()
+    if ticker not in adapter.get_universe():
+        raise HTTPException(status_code=404, detail=f"{ticker} is not in the current adapter universe")
+
+    scan = _run_scan(adapter, store, ticker)
+    item = _to_evidence_item(scan)
+    return {
+        "ticker": ticker,
+        "state": scan["state"],
+        "previous_state": scan["previous_state"],
+        "transition_rule": scan["transition_rule"],
+        "confidence": scan["confidence"],
+        "signal_type": scan["signal_type"],
+        "confidence_reason": scan["confidence_reason"],
+        "qualifies": scan["qualifies"],
+        "qualifying_days_count": scan["qualifying_days_count"],
+        "gates": scan["gates"],
+        "headline": tip_evidence.headline(item),
+        "current_read": tip_evidence.current_read(item),
+        "evidence": tip_evidence.evidence(item),
+        "stock_state": scan.get("stock_state"),
+        "history": store.history(ticker),
+        "raw": scan["raw"],
+    }
+
+
+@app.get("/api/scenarios")
+def scenarios():
+    """Demo-mode only: lists the synthetic scenarios available, so the
+    frontend can show what each fixture is meant to demonstrate."""
+    adapter = get_adapter()
+    if isinstance(adapter, SyntheticDataAdapter):
+        return {"scenarios": adapter.list_scenarios()}
+    return {"scenarios": [], "note": "scenario listing only available in TIP_MODE=demo"}

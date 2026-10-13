@@ -1,0 +1,22 @@
+{
+  "synthetic": true,
+  "ticker": "QRVX",
+  "scenario_name": "Dark-pool print anomaly",
+  "description": "Single large dark-pool print at ~6.4x its (fabricated) trailing average baseline. Exercises the dark_pool_anomaly gate alone, with a strong ratio pushing confidence to 'high'.",
+  "flow_alerts": [],
+  "darkpool_trades": [
+    {
+      "ticker": "QRVX",
+      "premium": 28750000,
+      "size": 410000,
+      "price": 70.12,
+      "executed_at": "2026-10-12T11:02:17Z",
+      "avg_premium_baseline": 4500000
+    }
+  ],
+  "stock_state": {
+    "ticker": "QRVX",
+    "last_price": 70.40,
+    "change_percent": 0.3
+  }
+}

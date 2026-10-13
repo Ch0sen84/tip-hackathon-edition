@@ -1,0 +1,35 @@
+{
+  "synthetic": true,
+  "ticker": "NADA",
+  "scenario_name": "Quiet control (negative case)",
+  "description": "Ordinary low-premium flow and a dark-pool print near its own baseline. No gate should pass. Exercises the NEW ticker with zero qualifying gates -> proves the engine does not always say yes.",
+  "flow_alerts": [
+    {
+      "ticker_symbol": "NADA",
+      "total_premium": 42000,
+      "total_ask_premium": 22000,
+      "total_bid_premium": 20000,
+      "has_sweep": false,
+      "has_multileg": false,
+      "is_call": true,
+      "is_put": false,
+      "underlying_price": 31.02,
+      "created_at": "2026-10-12T15:10:01Z"
+    }
+  ],
+  "darkpool_trades": [
+    {
+      "ticker": "NADA",
+      "premium": 610000,
+      "size": 19000,
+      "price": 31.05,
+      "executed_at": "2026-10-12T12:00:00Z",
+      "avg_premium_baseline": 590000
+    }
+  ],
+  "stock_state": {
+    "ticker": "NADA",
+    "last_price": 31.10,
+    "change_percent": 0.1
+  }
+}

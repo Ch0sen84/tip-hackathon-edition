@@ -1,0 +1,38 @@
+{
+  "synthetic": true,
+  "ticker": "ZYNC",
+  "scenario_name": "Large call-side sweep",
+  "description": "One-sided ask-side call sweep with no corresponding dark-pool activity. Exercises the options_flow_anomaly gate alone (single-signal, not multi-signal).",
+  "flow_alerts": [
+    {
+      "ticker_symbol": "ZYNC",
+      "total_premium": 3250000,
+      "total_ask_premium": 3100000,
+      "total_bid_premium": 150000,
+      "has_sweep": true,
+      "has_multileg": false,
+      "is_call": true,
+      "is_put": false,
+      "underlying_price": 84.12,
+      "created_at": "2026-10-12T14:31:05Z"
+    },
+    {
+      "ticker_symbol": "ZYNC",
+      "total_premium": 1180000,
+      "total_ask_premium": 1120000,
+      "total_bid_premium": 60000,
+      "has_sweep": true,
+      "has_multileg": false,
+      "is_call": true,
+      "is_put": false,
+      "underlying_price": 84.30,
+      "created_at": "2026-10-12T14:47:22Z"
+    }
+  ],
+  "darkpool_trades": [],
+  "stock_state": {
+    "ticker": "ZYNC",
+    "last_price": 84.95,
+    "change_percent": 1.4
+  }
+}
