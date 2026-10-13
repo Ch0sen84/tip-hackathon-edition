@@ -50,6 +50,8 @@ body {
   font-size: 11px; font-weight: 700; letter-spacing: .4px; color: var(--text2);
   background: var(--panel2); border: 1px solid var(--border2); border-radius: 20px; padding: 4px 11px;
 }
+.mode-pill.mode-demo { color: var(--amber); border-color: var(--amber); background: rgba(232,179,57,0.08); }
+.mode-pill.mode-live { color: var(--bull); border-color: var(--bull); background: rgba(62,207,142,0.08); }
 
 .main { padding: 18px 20px 60px; max-width: 1200px; margin: 0 auto; }
 .view { display: none; }
@@ -111,6 +113,21 @@ select, input { background: var(--panel2); color: var(--text); border: 1px solid
 .gate-row .gpass.no { color: var(--muted); }
 
 pre.raw { background: var(--panel3); padding: 12px; border-radius: 8px; overflow: auto; font-size: 10.5px; max-height: 320px; color: var(--muted); white-space: pre-wrap; word-break: break-word; }
+
+.settings-card {
+  border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--panel);
+  padding: 16px 18px; margin-bottom: 18px; max-width: 540px;
+}
+.settings-card h3 { margin: 0 0 8px; font-size: 14px; }
+.settings-card input, .settings-card select { width: 100%; display: block; margin: 8px 0; }
+.settings-row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 6px; }
+.btn.btn-active { border-color: var(--accent); color: var(--accent); }
+.btn:disabled { opacity: .5; cursor: not-allowed; }
+.public-demo-banner {
+  background: var(--panel2); border: 1px solid var(--amber); color: var(--amber);
+  padding: 10px 14px; border-radius: 8px; margin-bottom: 16px; font-size: 13px; max-width: 540px;
+}
+.muted { color: var(--muted); font-size: 12px; }
 
 .foot { padding: 20px; color: var(--muted); font-size: 12px; }
 .how { border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--panel); max-width: 1160px; margin: 0 auto; }
