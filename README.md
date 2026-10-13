@@ -252,6 +252,15 @@ docker compose up --build
 
 Serves on `http://localhost:8000/`.
 
+## AI-assisted installation
+
+For handing this repo to a coding agent, see `INSTALL_AGENT.md` at the
+repo root for a standalone, agent-executable install walkthrough, and
+`skills/tip-hackathon/SKILL.md` for an Agent Skills-compatible reference
+covering installation plus day-2 operation (mode switching, health checks,
+logs, Settings API). Both reuse the exact Docker Compose workflow above
+rather than a different one.
+
 ## Tests
 
 ```bash
