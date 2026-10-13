@@ -35,6 +35,11 @@ async function apiDelete(path) {
 }
 
 let _lastRadarData = null;
+// Tracks the backend's currently-active mode (demo/live) so the
+// Investigate workspace can ALWAYS show it prominently (P6 requirement:
+// never leave this only inferable from the page header) -- set once per
+// loadSettings() call, which already fetches it from /api/settings.
+let _currentMode = "demo";
 // Tracks every currently-selectable ticker (Radar-qualifying + full
 // scenario universe), rebuilt each loadRadar() call. Exposed via
 // window.TIP_NAV_HANDLERS.getKnownTickers() so app.core.js's
@@ -124,16 +129,33 @@ async function loadTickerDetail(ticker) {
   }
 }
 
-async function runInvestigate(ticker, navSeq) {
+// modeLabelFor: builds the "active mode" string shown prominently inside
+// the Investigate workspace itself (P6: must never be inferred only from
+// the page header). Combines the real backend mode (_currentMode, set by
+// loadSettings) with whether THIS investigation will be/was simulated
+// (avail.simulated / d.simulated) -- both real, fetched flags, nothing
+// invented.
+function modeLabelFor(simulated) {
+  const modePart = _currentMode === "live" ? "LIVE mode" : "DEMO mode";
+  const aiPart = simulated ? "simulated AI transcript" : "live AI + MCP calls";
+  return `${modePart} \u2014 ${aiPart}`;
+}
+
+async function runInvestigate(ticker, navSeq, modeLabel) {
   const mySeq = navSeq != null ? navSeq : _navSeq;
   const body = document.getElementById("investigateBody");
+  // Per explicit instruction: prefer accurate progress states over a fake
+  // multi-second "thinking" animation when the result (simulated or
+  // cached) is already fully captured -- this loading line is honest
+  // about what's actually happening (a real bounded network call that can
+  // take real seconds), not a staged show.
   body.innerHTML = `<div class="empty">Investigating ${esc(ticker)}... this makes a few bounded read-only calls and can take several seconds.</div>`;
   try {
     const res = await fetch(`${API_BASE}/api/investigate/${encodeURIComponent(ticker)}`, { method: "POST" });
     const d = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(d.detail || `HTTP ${res.status}`);
-    if (mySeq !== _navSeq) return; // user moved on before this resolved
-    body.innerHTML = renderInvestigateResult(d);
+    if (mySeq !== _navSeq) return; // user moved on before this resolved -- never render a stale ticker's result
+    body.innerHTML = renderInvestigateResult(d, ticker, modeLabel || modeLabelFor(d.simulated));
   } catch (err) {
     if (mySeq !== _navSeq) return;
     body.innerHTML = `<div class="empty">Investigation failed: ${esc(err.message)}</div>`;
@@ -144,11 +166,13 @@ async function loadInvestigateSection(ticker, navSeq) {
   const el = document.getElementById("investigateSection");
   try {
     const avail = await apiGet("/api/investigate/availability");
-    if (navSeq != null && navSeq !== _navSeq) return; // superseded mid-fetch
+    if (navSeq != null && navSeq !== _navSeq) return; // superseded mid-fetch -- never render for a ticker the user has since left
+    const modeLabel = modeLabelFor(avail.simulated);
     if (!avail.available) {
       el.innerHTML = `
         <div class="ai-card">
           <h3>Investigate with AI</h3>
+          ${renderInvestigateHeader(ticker, modeLabel)}
           <p class="ai-disabled-note">${esc(avail.reason || "This feature is not available right now.")}</p>
         </div>`;
       return;
@@ -159,11 +183,12 @@ async function loadInvestigateSection(ticker, navSeq) {
     el.innerHTML = `
       <div class="ai-card">
         <h3>Investigate with AI</h3>
+        ${renderInvestigateHeader(ticker, modeLabel)}
         ${simNote}
         <button class="btn" id="runInvestigateBtn">Investigate ${esc(ticker)} with AI</button>
         <div id="investigateBody" style="margin-top:10px"></div>
       </div>`;
-    document.getElementById("runInvestigateBtn").addEventListener("click", () => runInvestigate(ticker, navSeq));
+    document.getElementById("runInvestigateBtn").addEventListener("click", () => runInvestigate(ticker, navSeq, modeLabel));
   } catch (err) {
     el.innerHTML = `<div class="ai-card"><h3>Investigate with AI</h3><p class="ai-disabled-note">Unavailable: ${esc(err.message)}</p></div>`;
   }
@@ -172,6 +197,7 @@ async function loadInvestigateSection(ticker, navSeq) {
 async function loadSettings() {
   try {
     const d = await apiGet("/api/settings");
+    _currentMode = d.mode || "demo";
     renderModePill(d.mode, d.public_demo);
     const { publicDemo } = renderSettingsView(d);
     document.getElementById("btnModeDemo").addEventListener("click", () => setMode("demo"));

@@ -87,14 +87,19 @@ async function loadTickerDetail(ticker) {
 
 // --- Investigate with AI (always simulated on this static build) --------
 
+// This build has no mode switch and never makes a live AI/UW call -- the
+// mode label is always this one constant string (never inferred from a
+// fetch), matching the real, fixed nature of the static demo.
+const STATIC_MODE_LABEL = "DEMO mode \u2014 simulated AI transcript";
+
 async function runInvestigate(ticker, navSeq) {
   const mySeq = navSeq != null ? navSeq : _navSeq;
   const body = document.getElementById("investigateBody");
   body.innerHTML = `<div class="empty">Loading simulated investigation for ${esc(ticker)}...</div>`;
   try {
     const d = await loadJson(`data/investigate/${encodeURIComponent(ticker)}.json`);
-    if (mySeq !== _navSeq) return; // user navigated elsewhere before this resolved
-    body.innerHTML = renderInvestigateResult(d);
+    if (mySeq !== _navSeq) return; // user navigated elsewhere before this resolved -- never render a stale ticker's result
+    body.innerHTML = renderInvestigateResult(d, ticker, STATIC_MODE_LABEL);
   } catch (err) {
     if (mySeq !== _navSeq) return;
     body.innerHTML = `<div class="empty">Investigation failed: ${esc(err.message)}</div>`;
@@ -103,10 +108,11 @@ async function runInvestigate(ticker, navSeq) {
 
 async function loadInvestigateSection(ticker, navSeq) {
   const el = document.getElementById("investigateSection");
-  if (navSeq != null && navSeq !== _navSeq) return; // superseded mid-load
+  if (navSeq != null && navSeq !== _navSeq) return; // superseded mid-load -- never render for a ticker the user has since left
   el.innerHTML = `
     <div class="ai-card">
       <h3>Investigate with AI</h3>
+      ${renderInvestigateHeader(ticker, STATIC_MODE_LABEL)}
       <p class="ai-disabled-note">Public demo: this always shows a pre-written simulated transcript
         captured from a real run of the local app's bounded AI-investigation feature -- no live AI
         or MCP call happens on this page. The downloadable local edition can run a bounded, read-only

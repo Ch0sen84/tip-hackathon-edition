@@ -550,7 +550,79 @@ function classifyGate(name, gate) {
   }
 }
 
+// gateWhyItMatters: a plain-English "why this matters" sentence computed
+// from the gate's OWN real metrics (never a canned string unrelated to
+// the actual numbers) -- this is the fix for the known gap where the
+// CONFLICTING group rendered with no explanation. Every branch below
+// reads values straight out of `gate.metrics` (price_move_pct,
+// direction_heuristic, ratio, z_score, percentile, etc.) exactly as
+// evaluate_gates() in signal_engine.py computed them; nothing here is
+// invented or specific to any one scenario ticker.
+function gateWhyItMatters(name, gate) {
+  const m = gate.metrics || {};
+  switch (name) {
+    case "price_confirmation": {
+      const pct = typeof m.price_move_pct === "number" ? Math.abs(m.price_move_pct).toFixed(1) : null;
+      const leanWord = m.direction_heuristic === "bullish-lean" ? "bullish"
+        : m.direction_heuristic === "bearish-lean" ? "bearish" : null;
+      if (m.confirmed === true && leanWord && pct != null) {
+        const moveWord = m.price_move_pct > 0 ? `rose ${pct}%` : `fell ${pct}%`;
+        return `Flow suggested a ${leanWord} lean, and the stock actually ${moveWord} -- price action moved WITH the flow lean.`;
+      }
+      if (m.confirmed === false && leanWord && pct != null) {
+        const moveWord = m.price_move_pct > 0 ? `rose ${pct}%` : `fell ${pct}%`;
+        return `Options/dark-pool flow suggested a ${leanWord} lean, but the stock actually ${moveWord} -- these observations point in opposite directions.`;
+      }
+      return "No price-confirmation check could be run this scan (missing a price move or a directional lean to compare it against).";
+    }
+    case "dark_pool_anomaly": {
+      if (gate.passed) {
+        const ratioTxt = typeof m.ratio === "number" ? `${m.ratio.toFixed(1)}x its baseline` : "well above its baseline";
+        const zTxt = typeof m.z_score === "number" ? ` (z=${m.z_score.toFixed(1)})` : "";
+        return `Dark-pool print volume measured ${ratioTxt}${zTxt} -- a statistical anomaly, not just a large raw number.`;
+      }
+      if (m.bootstrap) return "Not enough trailing history yet to compute a real baseline ratio/z-score for this gate.";
+      return "Dark-pool print volume stayed within its normal baseline range this scan.";
+    }
+    case "options_flow_anomaly":
+      return gate.passed
+        ? "Options order flow showed a pattern flagged as unusual this scan (see raw metrics in the details below)."
+        : "No unusual options order-flow pattern was observed this scan.";
+    case "historical_percentile": {
+      const pctile = typeof m.percentile === "number" ? `${(m.percentile * 100).toFixed(0)}th percentile` : null;
+      if (gate.passed && pctile) return `Today's premium ranks in the ${pctile} of the trailing ${m.window_days || 30}-day window.`;
+      if (m.reason === "not evaluated (no today_premium supplied)") return "This gate was not evaluated -- no premium figure was supplied for this scan.";
+      return pctile ? `Today's premium ranked only in the ${pctile} of its trailing window -- not high enough to qualify.` : "Today's premium did not rank high enough in its trailing window to qualify.";
+    }
+    case "persistence": {
+      const n = m.tier2_qualifying_prints || 0;
+      const pct = typeof m.tier2_max_pct === "number" ? `${(m.tier2_max_pct * 100).toFixed(0)}%` : "n/a";
+      return gate.passed
+        ? `${n} qualifying print(s) seen so far, the largest at ${pct} of that day's volume.`
+        : "No qualifying persistent print pattern (repeated large prints) was seen this scan.";
+    }
+    case "multi_signal_confirmation": {
+      const contrib = m.contributing_gates || [];
+      return gate.passed
+        ? `${contrib.length} independent gates fired together this scan: ${contrib.map((g) => g.replace(/_/g, " ")).join(", ")}.`
+        : "Fewer than 2 independent gates fired together this scan.";
+    }
+    case "catalyst_identified":
+      return gate.passed
+        ? "A real catalyst was explicitly tagged for this ticker."
+        : "No catalyst has been manually tagged for this ticker -- an absent input, not evidence against one existing.";
+    case "data_quality":
+      return (m.api_errors === 0 && !m.bootstrap)
+        ? "No API errors and no bootstrap flag this scan -- the data feeding the other gates is trustworthy."
+        : `A data-quality concern was flagged this scan (api_errors=${m.api_errors ?? "n/a"}, bootstrap=${m.bootstrap ? "yes" : "no"}) -- weigh the other gates' numbers with that in mind.`;
+    default:
+      return "";
+  }
+}
+
 function renderGateItem(name, gate) {
+  const why = gateWhyItMatters(name, gate);
+  const whyHtml = why ? `<div class="gate-why">${esc(why)}</div>` : "";
   const note = GATE_LIMITATION_NOTES[name]
     ? `<div class="gate-note">${esc(GATE_LIMITATION_NOTES[name])}</div>`
     : "";
@@ -560,6 +632,7 @@ function renderGateItem(name, gate) {
         <span class="gname">${esc(name.replace(/_/g, " "))}</span>
         <span class="gpass ${gate.passed ? "yes" : "no"}">${gate.passed ? "PASS" : "no"}</span>
       </div>
+      ${whyHtml}
       ${note}
     </div>`;
 }
@@ -721,16 +794,91 @@ function mountCandlestickChart(containerId, ohlc) {
   }
 }
 
+// --- P7: Signal lifecycle timeline ------------------------------------------
+//
+// Built purely from the REAL `history` array already present in
+// /api/ticker/{t}'s response (store.history(ticker) -- scan_date/
+// any_gate_passed/state/created_at, see backend/app/storage.py). Most of
+// the 11 scenarios only have 0-1 real recorded scans on a freshly started
+// process; only VOLX/PRSX were seeded with genuine multi-entry history
+// (see seed_demo_history.py). This renders exactly what's there --
+// 0/1-entry history gets an explicitly sparse, minimal state, never a
+// padded-looking timeline implying a longer track record than is real.
+function renderLifecycleTimeline(history, currentState) {
+  const entries = Array.isArray(history) ? history : [];
+  if (entries.length === 0) {
+    return `
+      <div class="card timeline-card">
+        <div class="card-head"><strong>Signal Lifecycle</strong></div>
+        <div class="empty">No scan history recorded yet for this ticker &mdash; this is its first scan.</div>
+      </div>`;
+  }
+  if (entries.length === 1) {
+    const e = entries[0];
+    const gloss = STATE_GLOSS[e.state] || "";
+    return `
+      <div class="card timeline-card">
+        <div class="card-head"><strong>Signal Lifecycle</strong>
+          <span class="muted">(1 recorded scan &mdash; too early for a track record)</span></div>
+        <div class="timeline-single">
+          <span class="tag state-${esc(e.state)}">${esc(e.state)}</span>
+          <span class="muted">${esc(e.scan_date)}${gloss ? ` \u2014 ${esc(gloss)}` : ""}</span>
+        </div>
+      </div>`;
+  }
+  const steps = entries.map((e, i) => {
+    const gloss = STATE_GLOSS[e.state] || "";
+    const prev = i > 0 ? entries[i - 1].state : null;
+    const changed = prev && prev !== e.state;
+    return `
+      <div class="timeline-step">
+        <div class="timeline-dot state-${esc(e.state)}"></div>
+        <div class="timeline-step-body">
+          <div class="timeline-step-head">
+            <span class="tag state-${esc(e.state)}">${esc(e.state)}</span>
+            <span class="muted">${esc(e.scan_date)}</span>
+            ${changed ? `<span class="muted timeline-change">(${esc(prev)} \u2192 ${esc(e.state)})</span>` : ""}
+          </div>
+          <div class="timeline-step-gloss muted">${esc(gloss)}</div>
+          <div class="timeline-step-meta muted">gate passed this scan: ${e.any_gate_passed ? "yes" : "no"}</div>
+        </div>
+      </div>`;
+  }).join("");
+  return `
+    <div class="card timeline-card">
+      <div class="card-head"><strong>Signal Lifecycle</strong>
+        <span class="muted">(${entries.length} recorded scans, real history &mdash; current state: ${esc(currentState || "")})</span></div>
+      <div class="timeline">${steps}</div>
+    </div>`;
+}
+
+// --- P5: evidence-first Ticker Analysis -------------------------------------
+//
+// Layout order, deliberately: (1) candlestick chart + evidence markers,
+// (2) the 4-way evidence classification (Supporting/Conflicting/Unmet/Data
+// Limitation) immediately beside/below it, (3) the lifecycle timeline, then
+// (4) ticker-level state/confidence summary, with raw JSON/internal codes
+// staying inside the EXISTING collapsed <details> at the bottom. Detection
+// confidence language below is deliberately never framed as a predicted
+// trade outcome/success rate -- "confidence" describes how clearly gates
+// fired this scan, nothing about what happens next.
 function renderTickerDetail(d) {
   const gatesHtml = renderGateGroups(d.gates);
   const stateGloss = STATE_GLOSS[d.state] || "";
   const ruleGloss = TRANSITION_RULE_GLOSS[d.transition_rule] || "internal rule identifier";
+  const timelineHtml = renderLifecycleTimeline(d.history, d.state);
   return `
     <div class="card chart-card">
       <div class="card-head"><strong>Price Chart &mdash; ${esc(d.ticker)}</strong>
         <span class="muted">evidence markers from the same flow_alerts/darkpool_trades the gates use</span></div>
       <div id="ohlcChartContainer" class="chart-container"><div class="empty">Loading chart...</div></div>
     </div>
+    <div class="card evidence-primary-card">
+      <div class="card-head"><strong>Evidence &mdash; what the chart above is based on</strong></div>
+      <p class="muted gate-group-intro">A gate that did not pass is not automatically "conflicting evidence." Grouped below by what it actually represents, each with a plain-English note on what it observed. Confidence below describes how clearly gates fired this scan &mdash; it is never a prediction of trade outcome.</p>
+      ${gatesHtml}
+    </div>
+    ${timelineHtml}
     <div class="detail-grid">
       <div class="card">
         <div class="card-head"><span class="tk">${esc(d.ticker)}</span>
@@ -746,11 +894,6 @@ function renderTickerDetail(d) {
         <div class="read">${esc(d.current_read)}</div>
         <div class="read">Transition: ${esc(d.previous_state || "none")} &rarr; ${esc(d.state)}</div>
         <div class="read">Confidence reason: ${esc(d.confidence_reason)}</div>
-      </div>
-      <div class="card">
-        <div class="card-head"><strong>Named gates &mdash; evidence classification</strong></div>
-        <p class="muted gate-group-intro">A gate that did not pass is not automatically "conflicting evidence." Grouped below by what it actually represents.</p>
-        ${gatesHtml}
       </div>
     </div>
     <details class="how" style="margin-top:14px">
@@ -804,7 +947,37 @@ function renderToolsUsed(toolsUsed) {
     </div>`;
 }
 
-function renderInvestigateResult(d) {
+// renderInvestigateHeader: ALWAYS display the ticker + active mode inside
+// this workspace itself, not just inferred from the page header above it
+// (P6 requirement) -- it's the one thing that must stay correct even if
+// the user scrolled down or the AI card is viewed out of page-header
+// context. modeLabel is built by the adapter (it knows demo/live and
+// simulated/real); this file only renders the string handed to it.
+function renderInvestigateHeader(ticker, modeLabel) {
+  return `
+    <div class="investigate-context">
+      <span class="investigate-context-ticker">${esc(ticker)}</span>
+      <span class="investigate-context-mode">${esc(modeLabel)}</span>
+    </div>`;
+}
+
+// Research-process step strip: the ACTUAL bounded workflow this feature
+// runs (tool selection -> bounded read-only UW lookups -> synthesis),
+// never implying more/different steps than the backend's real bounded
+// design (max 4 tool calls, max 1 extra reasoning round -- see
+// backend/app/ai/orchestrator.py). Purely descriptive of the process;
+// the REAL tools_used list (rendered separately via renderToolsUsed) is
+// what shows what actually happened this run.
+function renderInvestigateProcessSteps() {
+  return `
+    <div class="investigate-steps">
+      <div class="investigate-step"><span class="investigate-step-n">1</span>Bounded tool selection (read-only UW lookups, max 4 calls)</div>
+      <div class="investigate-step"><span class="investigate-step-n">2</span>Evidence gathered from the tools actually called this run</div>
+      <div class="investigate-step"><span class="investigate-step-n">3</span>Synthesis: facts vs. interpretation kept separate (see below)</div>
+    </div>`;
+}
+
+function renderInvestigateResult(d, ticker, modeLabel) {
   const simBanner = d.simulated
     ? `<div class="ai-simulated-banner ai-simulated-banner-strong">
          <span class="ai-simulated-badge">SIMULATED</span>
@@ -813,8 +986,11 @@ function renderInvestigateResult(d) {
     : `<div class="ai-live-banner">LIVE: this investigation made real calls using your configured AI provider and UW key.
          Bounded, read-only tool selection and synthesis -- see README for the one documented gap:
          full LLM-directed tool-selection/synthesis has not yet been verified end-to-end with a real provider.</div>`;
+  const headerHtml = ticker ? renderInvestigateHeader(ticker, modeLabel || "") : "";
   return `
+    ${headerHtml}
     ${simBanner}
+    ${renderInvestigateProcessSteps()}
     ${renderToolsUsed(d.tools_used)}
     <div class="ai-section">
       <h4>Observed Facts</h4>
