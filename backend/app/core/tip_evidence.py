@@ -1,0 +1,538 @@
+#!/usr/bin/env python3
+"""TIP shared evidence -> explanation logic (Market Radar / Ticker Analysis).
+
+Ported VERBATIM from the production TIP app's `tip_evidence.py`. That file
+has zero imports and zero DB/network/clock/environment access -- it is pure
+by construction, so no adaptation was needed to run it standalone here. Only
+this header comment and the module docstring below were lightly trimmed of
+references to production-only views (EOD Brief / Morning Brief) that this
+hackathon app does not include; all function bodies, thresholds, and logic
+are identical to production.
+
+PURE MODULE: no database, network, clock or environment access. Every function
+takes plain dicts/numbers and returns plain dicts/strings, so the same logic can
+be fed fixture data in tests and produce identical output to what the
+production app would show for the same inputs.
+
+What this module decides
+  * which per-ticker evidence counts as "noteworthy" (entry criteria),
+  * how surfaced names are ordered and split into HIGHEST ATTENTION / OTHER,
+  * the human-readable reasons ("why TIP surfaced this"),
+  * a short deterministic CURRENT READ,
+  * an UNRESOLVED QUESTION only when a specific, checkable one exists.
+
+What it deliberately does NOT do
+  * no public score, probability, conviction, expected return or BUY/SELL;
+    the internal ordering key is never displayed;
+  * never converts one measurement into another (options volume is not
+    premium, dark-pool notional is not direction, alert counts are not flow
+    direction);
+  * never asserts causation from a headline or event (context only);
+  * research status is supporting context only (FloorTrade = provisional,
+    not validated).
+
+Evidence item schema (input to evidence()/current_read()/rank_key()):
+  ticker            str
+  state             lifecycle state from TIP's existing signal engine or None
+  gates_passed      list of passed anomaly gate names this session
+  dp                {"ratio": float|None, "hist": {...}|None, "prints": (n, observed_premium)} or None
+  options           options_volume snapshot (see options_from_rows below) or None
+  options_partial   True when the session is still in progress (today's partial
+                    volume vs a FULL-day 7-day average -> understates activity)
+  price             {"chg_pct": float, "last": float} or None
+  alerts            alert_activity() row (see below) or None
+  context           {"kind": CONFIRMED_EVENT|POSSIBLE_CONTEXT|NO_CLEAR_CATALYST|UNAVAILABLE, "text": str} or None
+  next_earnings_date ISO date string or None
+  research          list of short research-status strings or []
+
+alerts row (counts/premiums of UW flow alerts for the ticker in this session,
+up to the same ET time of day as the baseline):
+  n, prem, call_prem, put_prem, ask_prem, bid_prem, max_vol_oi,
+  floor_n, floor_rules (list), base_n, base_prem (averages over base_days
+  prior sessions at the same time-of-day cutoff), base_days
+"""
+
+EVIDENCE_VERSION = "tip_evidence_v1"
+RADAR_ENTRY_VERSION = "market_radar_entry_v2"
+RADAR_CATEGORY_VERSION = "market_radar_categories_v1"
+CARRY_RULE_VERSION = "carry_forward_v2_unresolved_question"
+
+# ---- thresholds (structural/presentation choices, NOT fitted to returns) ----
+OPTIONS_HOT_PCT = 50          # existing brief rule: a side >=50% above its 7-day average is "hot"
+DP_STRONG_RATIO = 3.0         # existing carry-forward rule: dark pool >=3x recent average
+ALERT_SURGE_MIN_N = 20        # UW alerts: at least 20 alerts so far this session ...
+ALERT_SURGE_MULT = 4.0        # ... and >=4x the same-time-of-day average of recent sessions
+ALERT_PREM_MIN = 2_000_000    # or: >= $2M alert premium so far ...
+ALERT_PREM_MULT = 5.0         # ... and >=5x the same-time-of-day average premium
+MIN_BASELINE_DAYS = 3         # fewer prior sessions -> no "x times normal" claim (thin history)
+ONE_SIDED_SHARE = 0.70        # call/put or ask/bid share worth stating as a fact
+PRICE_MOVE_PCT = 1.0          # existing brief rule: |move| >= 1% is a move, else "little changed"
+HIGHEST_MAX = 5               # visual emphasis only; never a minimum
+INDEX_CONTEXT_TICKERS = ("SPY", "QQQ")  # eligible under the same rules; labelled, never forced
+FLOOR_TRADE_RULES = ("FloorTradeSmallCap", "FloorTradeMidCap", "FloorTradeLargeCap")  # frozen UW family
+STATE_RANK = {"CONFIRMED": 3, "STRENGTHENING": 3, "BUILDING": 2, "NEW": 1}
+ANOMALY_GATES = ("dark_pool_anomaly", "historical_percentile", "options_flow_anomaly")
+FAMILY_LABELS = {"dark_pool": "Dark pool", "options": "Options", "alerts": "UW alerts", "floor": "FloorTrade"}
+
+
+# ------------------------------------------------------------- formatting --
+def fmt_money(x):
+    if x is None:
+        return "n/a"
+    x = float(x)
+    for unit, div in (("B", 1e9), ("M", 1e6), ("K", 1e3)):
+        if abs(x) >= div:
+            return f"${x / div:,.2f}{unit}" if unit == "B" else f"${x / div:,.0f}{unit}"
+    return f"${x:,.0f}"
+
+
+def fmt_pct(x, d=0):
+    if x is None:
+        return "n/a"
+    x = round(float(x), d) + 0.0  # avoid "-0.0%"
+    return f"{x:+.{d}f}%"
+
+
+def _plural(n, word):
+    return f"{n} {word}" if n == 1 else f"{n} {word}s"
+
+
+# ---------------------------------------------------- options / dark pool --
+def hot_side(o, thresh=OPTIONS_HOT_PCT):
+    if not o or o.get("call_vs7") is None:
+        return None
+    side = "calls" if o["call_vs7"] >= o["put_vs7"] else "puts"
+    return side if max(o["call_vs7"], o["put_vs7"]) >= thresh else None
+
+
+def premium_side(o):
+    if not o or o.get("skew") is None or abs(o["skew"]) <= 0.1:
+        return None
+    return "calls" if o["skew"] > 0 else "puts"
+
+
+def options_from_rows(rows, session_date_iso=None):
+    """Parse UW per-ticker options-volume rows into the options dict used everywhere
+    (same math TIP's briefs have always used). Only the row for exactly session_date
+    counts; returns None when there is no such row (data unavailable, not a negative)."""
+    rows = rows or []
+    if session_date_iso is not None:
+        rows = [r for r in rows if r.get("date") == session_date_iso]
+    if not rows:
+        return None
+    r = rows[0]
+    f = lambda k: float(r.get(k) or 0)  # noqa: E731
+    cv, pv = f("call_volume"), f("put_volume")
+    a7c, a7p = f("avg_7_day_call_volume"), f("avg_7_day_put_volume")
+    bull, bear = f("bullish_premium"), f("bearish_premium")
+    return {"date": r.get("date"), "call_vol": cv, "put_vol": pv,
+            "call_vs7": (cv / a7c - 1) * 100 if a7c else None,
+            "put_vs7": (pv / a7p - 1) * 100 if a7p else None,
+            "bull": bull, "bear": bear,
+            "skew": (bull - bear) / (bull + bear) if (bull + bear) else None}
+
+
+def options_bits(o):
+    """Factual options phrases; volume and premium are reported separately."""
+    if not o:
+        return []
+    parts = []
+    if o.get("call_vs7") is not None and o.get("put_vs7") is not None:
+        parts.append(f"calls {fmt_pct(o['call_vs7'])}, puts {fmt_pct(o['put_vs7'])} vs 7-day avg")
+    if o.get("skew") is not None:
+        side = "bullish-tilted" if o["skew"] > 0.1 else "bearish-tilted" if o["skew"] < -0.1 else "balanced"
+        parts.append(f"premium {side} ({fmt_money(o['bull'])} bull / {fmt_money(o['bear'])} bear)")
+    return parts
+
+
+def options_read(o):
+    if not o or o["call_vs7"] is None:
+        return None
+    hot = max(o["call_vs7"], o["put_vs7"]) >= OPTIONS_HOT_PCT
+    cold = max(o["call_vs7"], o["put_vs7"]) <= 0
+    if cold:
+        return "options activity did not confirm it (both sides at or below normal)"
+    if hot and o["skew"] is not None:
+        vol_side = "calls" if o["call_vs7"] > o["put_vs7"] else "puts"
+        prem_side = "calls" if o["skew"] > 0 else "puts"
+        if vol_side == prem_side:
+            return f"options agree ({vol_side} lead volume and premium)"
+        return f"options mixed ({vol_side} lead volume, {prem_side} lead premium)"
+    return "options activity was only modestly above normal"
+
+
+def dp_bits(ratio, hist, prints):
+    """Dark-pool phrases. z-score withheld below n=10 history; capped sums are floors."""
+    n, prem = prints or (0, 0.0)
+    bits = []
+    if ratio:
+        bits.append(f"~{float(ratio):.1f}x its recent average")
+    if hist and hist.get("window_n", 0) >= 10 and hist.get("z_score") is not None:
+        bits.append(f"z={hist['z_score']:.1f} over {hist['window_n']} sessions")
+    elif ratio:
+        bits.append("short history")
+    if prem:
+        bits.append(f"observed \u2265{fmt_money(prem)} in {n} large prints (sample cap)")
+    return bits
+
+
+def move_phrase(price):
+    if not price or price.get("chg_pct") is None:
+        return None
+    c = price["chg_pct"]
+    if abs(c) >= PRICE_MOVE_PCT:
+        return f"stock {'rose' if c > 0 else 'fell'} {abs(c):.1f}%"
+    return "stock little changed"
+
+
+# --------------------------------------------------------- carry / question --
+def carry_reason(b, next_session):
+    """Carry a name only for a specific unresolved analytical question that the
+    next session can help answer. Agreement between dark pool and options is
+    NOT required -- divergence is itself a question. Returns (code, text) or None.
+    Never carried merely for appearing in a report or being on a watchlist."""
+    o, px = b.get("options"), b.get("price") or {}
+    chg = px.get("chg_pct")
+    dp = float(b.get("dp_ratio") or 0)
+    vol_side, prem_side = hot_side(o), premium_side(o)
+    ned = b.get("next_earnings_date")
+    if ned and (dp >= 3 or vol_side) and str(ned) == next_session.isoformat():
+        return ("FLOW_PLUS_CATALYST", f"unusual flow into earnings {next_session.strftime('%a')}; "
+                "next session shows how the positioning meets the event")
+    if dp >= 3 and vol_side and prem_side and vol_side != prem_side:
+        return ("DP_OPTIONS_DIVERGENCE", f"options split under heavy dark pool ({vol_side} led volume, "
+                f"{prem_side} led premium); which side follows through?")
+    if dp >= 3 and vol_side and prem_side == vol_side:
+        return ("DP_PLUS_OPTIONS_CORROBORATE", f"dark pool and {vol_side}-led options both unusual"
+                + ("; price hasn't responded yet" if chg is not None and abs(chg) < 1 else
+                   "; checks whether the move extends"))
+    if o and vol_side and max(o["call_vs7"], o["put_vs7"]) >= 100 and (chg is None or abs(chg) < 1):
+        return ("OPTIONS_ANOMALY_UNRESOLVED", f"{vol_side} volume ~{max(o['call_vs7'], o['put_vs7']):.0f}% above "
+                "normal with no price response yet")
+    if dp >= 10 and chg is not None and abs(chg) < 0.5:
+        return ("FLOW_NO_PRICE_RESPONSE", f"~{dp:.0f}x normal dark-pool notional with the stock flat; "
+                "next session tests whether it was absorbed or is still building")
+    return None
+
+
+# ------------------------------------------------------------ UW alerts ----
+def alert_multiples(a):
+    """(count multiple, premium multiple) vs same-time baseline, or None when the
+    baseline is thin. A ticker with no recent alerts at all has baseline 0 ->
+    multiple reported as None and only absolute counts are used."""
+    if not a or (a.get("base_days") or 0) < MIN_BASELINE_DAYS:
+        return None, None
+    bn, bp = a.get("base_n") or 0, a.get("base_prem") or 0
+    return (a["n"] / bn if bn > 0 else None), (a["prem"] / bp if bp > 0 else None)
+
+
+def alert_surge(a):
+    """True when UW flow alerts are running well above this ticker's own recent pace."""
+    if not a:
+        return False
+    thin = (a.get("base_days") or 0) < MIN_BASELINE_DAYS
+    if thin:
+        return False
+    mn, mp = alert_multiples(a)
+    no_base_n = (a.get("base_n") or 0) == 0
+    no_base_p = (a.get("base_prem") or 0) == 0
+    by_n = a["n"] >= ALERT_SURGE_MIN_N and (no_base_n or (mn is not None and mn >= ALERT_SURGE_MULT))
+    by_p = (a["prem"] or 0) >= ALERT_PREM_MIN and (no_base_p or (mp is not None and mp >= ALERT_PREM_MULT))
+    return by_n or by_p
+
+
+def alert_premium_surge(a):
+    """Size-based UW path: >= ALERT_PREM_MIN alert premium AND >= ALERT_PREM_MULT x the
+    ticker's same-time-of-day baseline premium (or no baseline premium at all, with a
+    sufficient baseline history). This is the only UW-alert route that can QUALIFY a name."""
+    if not a or (a.get("base_days") or 0) < MIN_BASELINE_DAYS:
+        return False
+    if (a.get("prem") or 0) < ALERT_PREM_MIN:
+        return False
+    bp = a.get("base_prem") or 0
+    return bp == 0 or a["prem"] / bp >= ALERT_PREM_MULT
+
+
+def uw_flow_current_read(a, session_live):
+    """Ticker Analysis: the Evidence Overview UW FLOW card's one-line
+    read. Pure assembly over alert_bits() -- the exact same wording Market
+    Radar uses -- never a second interpretation of what 'unusual' means."""
+    if not a or not a.get("n"):
+        return "No UW Flow history available."
+    bits = alert_bits(a, session_live)
+    return " \u00b7 ".join(bits) if bits else "UW flow is near its normal pace."
+
+
+def _share(x, y):
+    t = (x or 0) + (y or 0)
+    return (x or 0) / t if t > 0 else None
+
+
+ALERT_NORMAL_MIN_N = 5        # below this, a non-surging alert count is too small to mention
+
+
+def alert_bits(a, session_live):
+    """Full alert detail only when alerts are themselves unusual; otherwise a single
+    'at their usual pace' line (useful disconfirmation) or nothing."""
+    if not a or not a.get("n"):
+        return []
+    when = "so far today" if session_live else "this session"
+    mn, mp = alert_multiples(a)
+    by = "by this time" if session_live else "per session"
+    if not alert_surge(a):
+        if a["n"] >= ALERT_NORMAL_MIN_N and mn is not None:
+            return [f"UW flow alerts at about their usual pace ({a['n']} {when} vs ~{a['base_n']:.0f} typical)"]
+        return []
+    bits = []
+    if mn is not None:
+        bits.append(f"{_plural(a['n'], 'UW flow alert')} {when} vs ~{a['base_n']:.1f} typical {by} ({mn:.1f}x)")
+    elif (a.get("base_days") or 0) >= MIN_BASELINE_DAYS:
+        bits.append(f"{_plural(a['n'], 'UW flow alert')} {when} (none {by} on recent sessions)" if session_live else f"{_plural(a['n'], 'UW flow alert')} {when} (none on recent sessions)")
+    else:
+        bits.append(f"{_plural(a['n'], 'UW flow alert')} {when} (short history, no baseline)")
+    if a.get("prem"):
+        s = f"{fmt_money(a['prem'])} alert premium"
+        if mp is not None:
+            s += f" vs ~{fmt_money(a['base_prem'])} typical ({mp:.1f}x)"
+        bits.append(s)
+    cs = _share(a.get("call_prem"), a.get("put_prem"))
+    if cs is not None and (cs >= ONE_SIDED_SHARE or cs <= 1 - ONE_SIDED_SHARE):
+        side, share = ("calls", cs) if cs >= 0.5 else ("puts", 1 - cs)
+        bits.append(f"{side} {share * 100:.0f}% of alert premium")
+    ask = _share(a.get("ask_prem"), a.get("bid_prem"))
+    if ask is not None and (ask >= ONE_SIDED_SHARE or ask <= 1 - ONE_SIDED_SHARE):
+        side, share = ("ask", ask) if ask >= 0.5 else ("bid", 1 - ask)
+        bits.append(f"{share * 100:.0f}% of alert premium printed on the {side} side")
+    if (a.get("max_vol_oi") or 0) >= 5:
+        bits.append(f"a contract traded ~{a['max_vol_oi']:.0f}x its open interest")
+    return bits
+
+
+# ---------------------------------------------------------------- families --
+def families(item):
+    """Independent evidence families firing for this ticker (ordering/tiering only)."""
+    f = []
+    gp = set(item.get("gates_passed") or [])
+    if gp & {"dark_pool_anomaly", "historical_percentile"}:
+        f.append("dark_pool")
+    if hot_side(item.get("options")) or "options_flow_anomaly" in gp:
+        f.append("options")
+    if alert_surge(item.get("alerts")):
+        f.append("alerts")
+    if (item.get("alerts") or {}).get("floor_n"):
+        f.append("floor")
+    # TIP lifecycle state (CONFIRMED etc.) is persistence of the same gate evidence,
+    # so it orders names but is NOT counted as an independent kind of evidence.
+    return f
+
+
+# Distinct evidence CATEGORIES (what Highest Attention and ordering count). Families are
+# descriptive tags; several tags can describe the same underlying data source:
+#   dark_pool -> TIP dark-pool gates (dark-pool prints)
+#   options   -> aggregate per-ticker options volume/premium (UW options-volume snapshot or
+#                TIP's options_flow_anomaly gate) -- a separate dataset from UW flow alerts
+#   alerts, floor -> both are UW flow-alert records, so together they are ONE category
+CATEGORY_OF = {"dark_pool": "dark_pool", "options": "options", "alerts": "uw_flow", "floor": "uw_flow"}
+CATEGORY_LABELS = {"dark_pool": "dark-pool activity", "options": "broader options activity", "uw_flow": "UW-flow context"}
+
+
+def categories(item):
+    """Distinct evidence categories, in fixed order, each counted once."""
+    out = []
+    for f in families(item):
+        c = CATEGORY_OF[f]
+        if c not in out:
+            out.append(c)
+    return out
+
+
+def qualifies(item):
+    """Market Radar entry (swing-oriented, rule set market_radar_entry_v2):
+      * an existing TIP anomaly gate passed this session, OR
+      * meaningful UW alert premium: alert_premium_surge().
+    Alert COUNT/PACE alone and FloorTrade-family activity alone do NOT qualify;
+    both remain evidence (and count toward Highest Attention) once a name is in.
+    Used only by Market Radar."""
+    gp = set(item.get("gates_passed") or [])
+    return bool(gp & set(ANOMALY_GATES)) or alert_premium_surge(item.get("alerts"))
+
+
+def rank_key(item):
+    """Internal deterministic ordering. NEVER displayed; not a score of anything."""
+    fam = families(item)
+    cats = categories(item)
+    dp = min(float((item.get("dp") or {}).get("ratio") or 0), 50)
+    mn, mp = alert_multiples(item.get("alerts"))
+    am = min(max(mn or 0, mp or 0), 50)
+    o = item.get("options") or {}
+    op = min(max(o.get("call_vs7") or 0, o.get("put_vs7") or 0) / 50, 10) if o.get("call_vs7") is not None else 0
+    strength = dp + am + op + (10 if "floor" in fam else 0)
+    return (-len(cats), -STATE_RANK.get(item.get("state"), 0), -round(strength, 6), item["ticker"])
+
+
+# ------------------------------------------------------------- explanation --
+def _short(family, item):
+    """Compact, magnitude-first version of a family's evidence (presentation only).
+    Never states a multiple that alert_multiples()/dp ratio did not support."""
+    if family == "dark_pool":
+        dp = item.get("dp") or {}
+        r, h = dp.get("ratio"), dp.get("hist") or {}
+        if not r:
+            return "Dark-pool activity above normal"
+        thin = not (h.get("window_n", 0) >= 10 and h.get("z_score") is not None)
+        return f"Dark pool ~{float(r):.1f}x recent average" + (" (short history)" if thin else "")
+    if family == "options":
+        o = item.get("options") or {}
+        if o.get("call_vs7") is None:
+            return "Options flow anomaly"
+        side, v = ("Calls", o["call_vs7"]) if o["call_vs7"] >= o["put_vs7"] else ("Puts", o["put_vs7"])
+        return f"{side} volume {fmt_pct(v)} vs 7-day avg"
+    if family == "alerts":
+        a = item.get("alerts") or {}
+        mn, mp = alert_multiples(a)
+        if alert_premium_surge(a) and mp is not None:  # lead with the qualifying (size) fact
+            return f"UW alert premium {mp:.1f}x normal ({fmt_money(a['prem'])})"
+        if mn is not None and (mp is None or mn >= mp):
+            return f"UW alert pace {mn:.1f}x normal ({a['n']} vs ~{a['base_n']:.1f})"
+        if mp is not None:
+            return f"UW alert premium {mp:.1f}x normal ({fmt_money(a['prem'])})"
+        return f"{_plural(a.get('n', 0), 'UW flow alert')} (none on recent sessions)"
+    if family == "floor":
+        n = (item.get("alerts") or {}).get("floor_n") or 0
+        return f"FloorTrade-family activity ({_plural(n, 'alert')})"
+    return None
+
+
+def headline(item):
+    """One-line magnitude-first summary for compact rows: the qualifying evidence
+    kinds in their fixed order. Presentation only; changes no selection/ordering."""
+    parts = [_short(f, item) for f in families(item)]
+    parts = [p for p in parts if p]
+    if not parts:
+        gp = item.get("gates_passed") or []
+        parts = ["TIP anomaly gate passed: " + ", ".join(g.replace("_", " ") for g in gp)] if gp else ["Unusual activity"]
+    return " \u00b7 ".join(parts)
+
+
+def dominant_label(item):
+    fam = families(item)
+    if len(categories(item)) >= 2:
+        return "MULTI-SOURCE"
+    if len(fam) >= 2:  # UW alerts + FloorTrade: one category
+        return "UW FLOW"
+    return {"dark_pool": "DARK POOL", "options": "OPTIONS", "alerts": "UW ALERTS", "floor": "FLOORTRADE"}.get(
+        fam[0] if fam else "", "OTHER")
+
+
+def evidence(item, session_live=False):
+    """List of {"family", "text", "short", "key"} reasons -- the 'why TIP surfaced this'.
+    key=True marks the bullets that are the reason the name qualified (plus price);
+    the rest is supporting context (shown on expansion)."""
+    out = []
+    dp = item.get("dp") or {}
+    gp = set(item.get("gates_passed") or [])
+    if gp & {"dark_pool_anomaly", "historical_percentile"}:
+        b = dp_bits(dp.get("ratio"), dp.get("hist"), dp.get("prints"))
+        if b:
+            out.append({"family": "dark_pool", "text": "Dark pool " + "; ".join(b)})
+    o = item.get("options")
+    if item.get("options_status") == "UNAVAILABLE":
+        out.append({"family": "options_unavailable",
+                     "text": "Options data unavailable for this build (options evidence could not be assessed)"})
+    ob = options_bits(o)
+    if ob:
+        txt = "Options " + "; ".join(ob)
+        if item.get("options_partial"):
+            txt += " (partial session vs full-day average \u2014 understates)"
+        out.append({"family": "options", "text": txt})
+    ab = alert_bits(item.get("alerts"), session_live)
+    if ab:
+        out.append({"family": "alerts", "text": "; ".join(ab)})
+    a = item.get("alerts") or {}
+    if a.get("floor_n"):
+        rules = ", ".join(sorted(set(a.get("floor_rules") or [])))
+        out.append({"family": "floor", "text": f"{a['floor_n']} FloorTrade-family alert{'s' if a['floor_n'] > 1 else ''}"
+                    + (f" ({rules})" if rules else "")})
+    if item.get("state") in STATE_RANK:
+        out.append({"family": "lifecycle", "text": f"TIP signal state {item['state']}"})
+    px = item.get("price")
+    if px and px.get("chg_pct") is not None:
+        out.append({"family": "price", "text": f"Price {fmt_pct(px['chg_pct'], 1)}"
+                    + (f" at {px['last']:,.2f}" if px.get("last") else "")})
+    ctx = item.get("context") or {}
+    if ctx.get("kind") in ("CONFIRMED_EVENT", "POSSIBLE_CONTEXT"):
+        out.append({"family": "context", "text": ctx["text"]})
+    fam = set(families(item))
+    for e in out:
+        e["key"] = e["family"] in fam or e["family"] == "price" or (
+            e["family"] == "context" and ctx.get("kind") == "CONFIRMED_EVENT")
+        e["short"] = _short(e["family"], item) if e["family"] in fam else e["text"]
+    return out
+
+
+def current_read(item):
+    """Short deterministic interpretation. Describes agreement/disagreement and
+    price response; never asserts direction the data does not support."""
+    fam = families(item)
+    lead = []
+    if "dark_pool" in fam:
+        lead.append("dark-pool activity well above normal")
+    if "alerts" in fam:
+        lead.append("UW flow alerts running well above this name's usual pace")
+    if "floor" in fam:
+        lead.append("FloorTrade-family prints")
+    if not lead and "options" in fam:
+        lead.append("unusual options volume")
+    if not lead:
+        lead.append("unusual activity")
+    parts = [" and ".join(lead)]
+    read = options_read(item.get("options"))
+    if read and lead != ["unusual options volume"]:
+        parts.append(read)
+    elif read and "agree" in read:
+        parts.append(read)
+    mv = move_phrase(item.get("price"))
+    flows = {"dark_pool", "alerts", "floor", "options"} & set(fam)
+    if mv == "stock little changed" and flows:
+        parts.append("no corresponding price response")
+    elif mv:
+        parts.append(mv)
+    s = "; ".join(parts) + "."
+    return s[0].upper() + s[1:]
+
+
+def open_question(item, next_session):
+    """A specific checkable question, or None. Reuses the EOD carry-forward rule
+    so every view agrees about what is unresolved."""
+    b = {"options": item.get("options"), "price": item.get("price"),
+         "dp_ratio": (item.get("dp") or {}).get("ratio") if "dark_pool" in families(item) else None,
+         "next_earnings_date": item.get("next_earnings_date")}
+    cr = carry_reason(b, next_session)
+    if cr:
+        return {"code": cr[0], "text": cr[1][0].upper() + cr[1][1:] + ("" if cr[1].endswith("?") else ".")}
+    fam = families(item)
+    px = item.get("price") or {}
+    if "alerts" in fam and px.get("chg_pct") is not None and abs(px["chg_pct"]) < PRICE_MOVE_PCT:
+        return {"code": "ALERTS_NO_PRICE_RESPONSE",
+                "text": "Alert activity well above normal with the stock flat; does price follow next session?"}
+    return None
+
+
+def present(items, next_session, session_live=False, highest_max=HIGHEST_MAX):
+    """Order qualifying items and split them into (highest, other). No minimum
+    in either section. Highest Attention needs >= 2 distinct evidence CATEGORIES
+    (categories(), not families); the strongest few (<= highest_max) are emphasised."""
+    q = sorted((i for i in items if qualifies(i)), key=rank_key)
+    out = []
+    for i in q:
+        out.append({"ticker": i["ticker"], "name": i.get("name"), "families": families(i),
+                    "evidence": evidence(i, session_live), "current_read": current_read(i),
+                    "headline": headline(i), "label": dominant_label(i), "categories": categories(i),
+                    "index_context": i["ticker"] in INDEX_CONTEXT_TICKERS,
+                    "question": open_question(i, next_session), "research": list(i.get("research") or []),
+                    "enriched": bool(i.get("enriched", True))})
+    multi = [x for x in out if len(x["categories"]) >= 2]
+    highest = multi[:highest_max]
+    hs = {x["ticker"] for x in highest}
+    other = [x for x in out if x["ticker"] not in hs]
+    return highest, other
