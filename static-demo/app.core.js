@@ -481,18 +481,32 @@ function renderSettingsView(d) {
        downloadable local edition — this public demo runs on synthetic data only.</div>`
     : "";
 
+  // The real enforcement of "Live Mode requires a passed Test Connection"
+  // lives server-side (POST /api/settings/mode rejects with 400 otherwise
+  // -- see backend/app/main.py + settings_store.is_key_verified). This
+  // disables the Activate button as a UX nicety ONLY; it is never the
+  // actual security boundary, and the server re-checks regardless of
+  // whether this disabled attribute was somehow bypassed client-side.
+  const liveDisabled = publicDemo || !uw.verified;
+  const liveTitle = !publicDemo && !uw.verified
+    ? "Activate Live Mode requires Test Connection to succeed for the current key first."
+    : "";
   const modeSection = `
     <div class="settings-card">
       <h3>Mode</h3>
       <div class="settings-row">
         <button class="btn ${d.mode === "demo" ? "btn-active" : ""}" id="btnModeDemo" ${publicDemo ? "disabled" : ""}>Demo</button>
-        <button class="btn ${d.mode === "live" ? "btn-active" : ""}" id="btnModeLive" ${publicDemo ? "disabled" : ""}>Live</button>
+        <button class="btn ${d.mode === "live" ? "btn-active" : ""}" id="btnModeLive" ${liveDisabled ? "disabled" : ""} title="${esc(liveTitle)}">Activate Live Mode</button>
       </div>
+      ${!publicDemo && !uw.verified ? `<p class="muted">Activate Live Mode is disabled until Test Connection succeeds for the current key.</p>` : ""}
     </div>`;
 
   const uwStatusLine = uw.configured
-    ? `configured (source: ${esc(uw.source)}, ending •••${esc(uw.last4 || "")})${uw.last_test_result ? ` · last test: ${esc(uw.last_test_result)}` : ""}`
+    ? `configured (source: ${esc(uw.source)}, ending •••${esc(uw.last4 || "")})${uw.verified ? " · verified (passed Test Connection)" : " · not yet verified"}${uw.last_test_result ? ` · last test: ${esc(uw.last_test_result)}` : ""}`
     : "not configured";
+  const envDisclosure = uw.env_fallback_disclosure
+    ? `<p class="muted env-disclosure">${esc(uw.env_fallback_disclosure)}</p>`
+    : "";
 
   const uwSection = publicDemo
     ? `<div class="settings-card">
@@ -508,6 +522,7 @@ function renderSettingsView(d) {
     : `<div class="settings-card">
         <h3>Unusual Whales API Key</h3>
         <p class="muted">Status: ${uwStatusLine}</p>
+        ${envDisclosure}
         <input type="password" id="uwKeyInput" placeholder="Paste UW API key" autocomplete="off" />
         <div class="settings-row">
           <button class="btn" id="saveUwKeyBtn">Save</button>

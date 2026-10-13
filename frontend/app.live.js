@@ -94,35 +94,53 @@ async function loadRadar() {
   }
 }
 
+// Request-token/sequence-number guard: if the user switches ticker or
+// mode while a previous /api/ticker/{t} or /api/investigate/{t} request is
+// still in flight, the late-arriving response for the OLD ticker/mode
+// must never overwrite the UI once the user has moved on. _navSeq is
+// incremented on every navigation (loadTickerDetail call); each in-flight
+// request captures its own sequence number in closure and checks it
+// against the CURRENT _navSeq right before writing to the DOM -- if they
+// no longer match, a newer navigation has superseded this one and the
+// response is silently dropped instead of clobbering newer state.
+let _navSeq = 0;
+
 async function loadTickerDetail(ticker) {
+  const mySeq = ++_navSeq;
   const el = document.getElementById("tickerDetail");
   el.innerHTML = `<div class="empty">Loading ${esc(ticker)}...</div>`;
   try {
     const d = await apiGet(`/api/ticker/${encodeURIComponent(ticker)}`);
+    if (mySeq !== _navSeq) return; // superseded by a newer ticker/mode switch
     el.innerHTML = renderTickerDetail(d);
-    await loadInvestigateSection(ticker);
+    await loadInvestigateSection(ticker, mySeq);
   } catch (err) {
+    if (mySeq !== _navSeq) return;
     el.innerHTML = `<div class="empty">Error loading ${esc(ticker)}: ${esc(err.message)}</div>`;
   }
 }
 
-async function runInvestigate(ticker) {
+async function runInvestigate(ticker, navSeq) {
+  const mySeq = navSeq != null ? navSeq : _navSeq;
   const body = document.getElementById("investigateBody");
   body.innerHTML = `<div class="empty">Investigating ${esc(ticker)}... this makes a few bounded read-only calls and can take several seconds.</div>`;
   try {
     const res = await fetch(`${API_BASE}/api/investigate/${encodeURIComponent(ticker)}`, { method: "POST" });
     const d = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(d.detail || `HTTP ${res.status}`);
+    if (mySeq !== _navSeq) return; // user moved on before this resolved
     body.innerHTML = renderInvestigateResult(d);
   } catch (err) {
+    if (mySeq !== _navSeq) return;
     body.innerHTML = `<div class="empty">Investigation failed: ${esc(err.message)}</div>`;
   }
 }
 
-async function loadInvestigateSection(ticker) {
+async function loadInvestigateSection(ticker, navSeq) {
   const el = document.getElementById("investigateSection");
   try {
     const avail = await apiGet("/api/investigate/availability");
+    if (navSeq != null && navSeq !== _navSeq) return; // superseded mid-fetch
     if (!avail.available) {
       el.innerHTML = `
         <div class="ai-card">
@@ -141,7 +159,7 @@ async function loadInvestigateSection(ticker) {
         <button class="btn" id="runInvestigateBtn">Investigate ${esc(ticker)} with AI</button>
         <div id="investigateBody" style="margin-top:10px"></div>
       </div>`;
-    document.getElementById("runInvestigateBtn").addEventListener("click", () => runInvestigate(ticker));
+    document.getElementById("runInvestigateBtn").addEventListener("click", () => runInvestigate(ticker, navSeq));
   } catch (err) {
     el.innerHTML = `<div class="ai-card"><h3>Investigate with AI</h3><p class="ai-disabled-note">Unavailable: ${esc(err.message)}</p></div>`;
   }
@@ -177,6 +195,7 @@ async function setMode(mode) {
     // vice versa. Clear first (covers the user being on Ticker Analysis
     // right now), then reload Market Radar so the <select> is rebuilt
     // from the new mode's own universe/scenarios instead of the stale one.
+    _navSeq++; // invalidate any in-flight ticker/investigate request from the OLD mode
     clearTickerView();
     await loadRadar();
   } catch (err) {
@@ -205,12 +224,21 @@ async function saveUwKey() {
 async function testUwKey() {
   const statusEl = document.getElementById("uwKeyStatus");
   statusEl.textContent = "Testing connection...";
+  let message = null;
   try {
     const d = await apiPost("/api/settings/uw-key/test", {});
-    statusEl.textContent = `Test result: ${d.result} — ${d.message}`;
+    message = `Test result: ${d.result} — ${d.message}`;
   } catch (err) {
-    statusEl.textContent = `Test failed: ${err.message}`;
+    message = `Test failed: ${err.message}`;
   }
+  // Re-render Settings FIRST so the Activate Live Mode button's disabled
+  // state (and the "verified" status line) reflect the just-updated
+  // server-side verification record -- a successful test is the ONLY
+  // thing that can enable that button, per the real backend gate. Then
+  // set the status message, since re-rendering replaces #uwKeyStatus.
+  await loadSettings();
+  const freshStatusEl = document.getElementById("uwKeyStatus");
+  if (freshStatusEl) freshStatusEl.textContent = message;
 }
 
 async function disconnectUwKey() {

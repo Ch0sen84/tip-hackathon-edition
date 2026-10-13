@@ -107,7 +107,10 @@ async function main() {
       new URL("./app.core.js", import.meta.url).pathname,
       new URL("./app.live.js", import.meta.url).pathname,
     ],
-    ["setMode", "loadRadar", "loadTickerDetail", "setCurrentTicker", "TIP_STATE"],
+    [
+      "setMode", "loadRadar", "loadTickerDetail", "setCurrentTicker", "TIP_STATE",
+      "loadSettings", "testUwKey", "saveUwKey", "disconnectUwKey", "apiPost", "apiGet",
+    ],
   );
 
   console.log(`\n=== Bug 2: all 5 scenario tickers reachable via the <select> ===`);
@@ -160,6 +163,69 @@ async function main() {
       assert.ok(el("investigateSection").innerHTML.includes("Investigate with AI"));
     });
   }
+
+  console.log(`\n=== Security: Activate Live Mode stays disabled until Test Connection passes ===`);
+  // Button markup is rendered as a string INTO #view-settings's innerHTML
+  // (there is no separate live DOM node this stub can address by id), so
+  // inspect that container's HTML for the button's own disabled attribute
+  // rather than a same-named-but-unrelated FakeEl.
+  function liveButtonDisabled() {
+    const html = el("view-settings").innerHTML;
+    const m = /<button[^>]*id="btnModeLive"[^>]*>/.exec(html);
+    assert.ok(m, `btnModeLive not found in rendered Settings HTML: ${html.slice(0, 300)}`);
+    return m[0].includes("disabled");
+  }
+
+  // Clean slate: remove any key left over from a previous run of this
+  // backend instance, then drive the real Settings flow end to end.
+  await liveB.disconnectUwKey().catch(() => {});
+  await liveB.loadSettings();
+  check("Activate Live Mode disabled with no key configured", () => {
+    assert.equal(liveButtonDisabled(), true);
+  });
+  el("uwKeyInput").value = "uwtest_sk_live_MANUALTESTKEY000111";
+  await liveB.saveUwKey();
+  await liveB.loadSettings();
+  check("Activate Live Mode disabled right after Save (not yet tested)", () => {
+    assert.equal(liveButtonDisabled(), true);
+  });
+  const modeResp = await liveB.apiPost("/api/settings/mode", { mode: "live" }).catch((e) => e);
+  check("server rejects live activation (400) for an unverified key even if the UI button were bypassed", () => {
+    assert.ok(modeResp instanceof Error, "expected the real backend to reject this, not accept it");
+  });
+  // This is a fake, non-functional key (there is no real UW credential in
+  // this sandbox), so the REAL Test Connection call below is expected to
+  // fail (network_error or unauthorized against the real UW API) -- the
+  // point of this check is that it STAYS disabled/rejected after a real,
+  // non-stubbed test attempt, not that a fake key magically passes.
+  await liveB.testUwKey();
+  check("Activate Live Mode still disabled after a real (failing) Test Connection attempt on a fake key", () => {
+    assert.equal(liveButtonDisabled(), true);
+  });
+  const stillRejected = await liveB.apiPost("/api/settings/mode", { mode: "live" }).catch((e) => e);
+  check("server still rejects live activation after a failed Test Connection", () => {
+    assert.ok(stillRejected instanceof Error);
+  });
+
+  console.log(`\n=== Security: Settings discloses a remaining .env key after Remove Saved Key ===`);
+  await liveB.disconnectUwKey();
+  await liveB.loadSettings();
+  check("no env-fallback disclosure when no .env key is configured on this backend", () => {
+    assert.ok(!el("view-settings").innerHTML.includes("env-configured key is still present"));
+  });
+
+  console.log(`\n=== Robustness: rapid ticker switch does not show stale data (race guard) ===`);
+  // Fire two loadTickerDetail calls back-to-back without awaiting the
+  // first -- the real backend responses can arrive in either order, but
+  // the sequence-number guard in app.live.js must ensure only the LAST
+  // navigation's response is ever rendered, never the first ticker's
+  // stale data clobbering the screen after the user already moved on.
+  const firstCall = liveB.loadTickerDetail("FLUX");
+  const secondCall = liveB.loadTickerDetail("QRVX");
+  await Promise.all([firstCall, secondCall]);
+  check("tickerDetail shows the LAST-navigated ticker (QRVX), not the superseded FLUX", () => {
+    assert.ok(el("tickerDetail").innerHTML.includes("QRVX"), el("tickerDetail").innerHTML.slice(0, 200));
+  });
 
   console.log(`\n${passed} check(s) passed.`);
 }
