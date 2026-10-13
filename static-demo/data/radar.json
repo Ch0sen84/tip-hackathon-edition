@@ -38,9 +38,11 @@
       "question": null,
       "research": [],
       "enriched": true,
+      "state": "NEW",
       "confidence": "high",
       "signal_type": "multi-signal",
-      "qualifying_days_count": 0
+      "qualifying_days_count": 0,
+      "history_states": []
     },
     {
       "ticker": "VOLX",
@@ -74,9 +76,11 @@
       "question": null,
       "research": [],
       "enriched": true,
+      "state": "NEW",
       "confidence": "high",
       "signal_type": "multi-signal",
-      "qualifying_days_count": 0
+      "qualifying_days_count": 0,
+      "history_states": []
     }
   ],
   "other": [
@@ -116,9 +120,15 @@
       "question": null,
       "research": [],
       "enriched": true,
+      "state": "CONFIRMED",
       "confidence": "high",
       "signal_type": "t1-baseline",
-      "qualifying_days_count": 2
+      "qualifying_days_count": 2,
+      "history_states": [
+        "NEW",
+        "BUILDING",
+        "CONFIRMED"
+      ]
     },
     {
       "ticker": "QRVX",
@@ -156,9 +166,11 @@
       "question": null,
       "research": [],
       "enriched": true,
+      "state": "NEW",
       "confidence": "high",
       "signal_type": "multi-signal",
-      "qualifying_days_count": 0
+      "qualifying_days_count": 0,
+      "history_states": []
     },
     {
       "ticker": "TEPID",
@@ -196,9 +208,11 @@
       "question": null,
       "research": [],
       "enriched": true,
+      "state": "NEW",
       "confidence": "high",
       "signal_type": "t1-baseline",
-      "qualifying_days_count": 0
+      "qualifying_days_count": 0,
+      "history_states": []
     },
     {
       "ticker": "BRNX",
@@ -230,9 +244,11 @@
       "question": null,
       "research": [],
       "enriched": true,
+      "state": "NEW",
       "confidence": "low",
       "signal_type": "t1-bootstrap",
-      "qualifying_days_count": 0
+      "qualifying_days_count": 0,
+      "history_states": []
     },
     {
       "ticker": "CATX",
@@ -264,9 +280,11 @@
       "question": null,
       "research": [],
       "enriched": true,
+      "state": "NEW",
       "confidence": "low",
       "signal_type": "t1-bootstrap",
-      "qualifying_days_count": 0
+      "qualifying_days_count": 0,
+      "history_states": []
     },
     {
       "ticker": "CONFL",
@@ -298,9 +316,11 @@
       "question": null,
       "research": [],
       "enriched": true,
+      "state": "NEW",
       "confidence": "low",
       "signal_type": "t1-bootstrap",
-      "qualifying_days_count": 0
+      "qualifying_days_count": 0,
+      "history_states": []
     },
     {
       "ticker": "ZYNC",
@@ -332,9 +352,11 @@
       "question": null,
       "research": [],
       "enriched": true,
+      "state": "NEW",
       "confidence": "low",
       "signal_type": "t1-bootstrap",
-      "qualifying_days_count": 0
+      "qualifying_days_count": 0,
+      "history_states": []
     }
   ],
   "scanned": 11

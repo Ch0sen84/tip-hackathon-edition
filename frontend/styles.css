@@ -176,6 +176,28 @@ nav#nav .ic { font-size: 13px; width: 16px; text-align: center; opacity: .7; }
 .ev-list li { margin: 2px 0; }
 .read { margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--border); font-size: 13px; color: var(--text); line-height: 1.5; }
 
+/* Stage 2 (P3): Market Radar filters + compact history chip. Cards are
+   now the primary "Other Noteworthy" presentation -- the legacy table
+   (.table-wrap-legacy) is kept in the DOM (an older test harness queries
+   it directly) but hidden visually, never the primary view. */
+.radar-filters { display: flex; flex-wrap: wrap; align-items: center; gap: 14px; margin: 10px 0 4px; padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--panel); }
+.radar-filters label { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); }
+.radar-filters select { background: var(--panel2); color: var(--text); border: 1px solid var(--border2); border-radius: 4px; padding: 3px 6px; font-size: 12.5px; }
+.radar-filter-counts { margin-left: auto; font-size: 12px; }
+.attn-grid-compact { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+@media (max-width: 1024px) { .attn-grid-compact { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 760px) { .attn-grid-compact { grid-template-columns: 1fr; } }
+.table-wrap-legacy { display: none; }
+
+.history-chip { display: flex; align-items: center; flex-wrap: wrap; gap: 3px; margin: 6px 0; font-size: 10.5px; }
+.history-chip .hc-step { padding: 1px 6px; border-radius: 3px; background: var(--panel2); border: 1px solid var(--border2); color: var(--text2); }
+.history-chip .hc-step.state-NEW { color: var(--amber); }
+.history-chip .hc-step.state-BUILDING { color: var(--accent); }
+.history-chip .hc-step.state-CONFIRMED, .history-chip .hc-step.state-STABLE { color: var(--bull); }
+.history-chip .hc-step.state-FADING { color: var(--muted); }
+.history-chip .hc-step.state-INVALIDATED { color: var(--bear); }
+.history-chip .hc-arrow { color: var(--muted); font-size: 10px; }
+
 .table-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--panel); }
 .tbl { width: 100%; border-collapse: collapse; font-size: 12.5px; min-width: 560px; }
 .tbl th { text-align: left; color: var(--muted); font-weight: 600; font-size: 10px; text-transform: uppercase; letter-spacing: .4px; padding: 9px 12px; border-bottom: 1px solid var(--border); white-space: nowrap; }

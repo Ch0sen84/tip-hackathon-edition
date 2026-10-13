@@ -266,6 +266,7 @@ function renderCard(entry) {
         <span class="tag state-${esc(entry.state)}">${esc(entry.state || "")}</span>
         <span class="tag">confidence: ${esc(entry.confidence)}</span>
       </div>
+      ${renderHistoryChip(entry.history_states)}
       <ul class="ev-list">
         ${(entry.evidence || []).map((e) => `<li>${esc(e.text)}</li>`).join("")}
       </ul>
@@ -299,6 +300,141 @@ function renderActivitySummary(data) {
     </div>`;
 }
 
+// --- Stage 2 (P3) Market Radar enhancement: evidence-family / signal-
+// state filters, compact per-card signal-history, and a clear
+// all-scanned-vs-qualifying-shown count. Pure client-side filtering over
+// data already present in the /api/radar response -- no new backend
+// endpoint, no new fetch. See fixtures/scenario_persistence_progression.json
+// / backend/app/seed_demo_history.py for the one scenario (PRSX) that
+// genuinely has multi-entry history to show; every other ticker's
+// history_states is [] on a fresh process (real, not fabricated).
+
+// Same evidence-family vocabulary as backend/app/core/tip_evidence.py's
+// CATEGORY_LABELS, plus "multi-signal" -- a derived tag (not a backend
+// category) for any entry with 2+ distinct categories, matching
+// dominant_label()'s own MULTI-SOURCE definition.
+const RADAR_FAMILY_LABELS = {
+  dark_pool: "Dark pool", options: "Options", uw_flow: "UW flow", "multi-signal": "Multi-signal",
+};
+
+function entryFamilyTags(entry) {
+  const cats = entry.categories || [];
+  const tags = [...cats];
+  if (cats.length >= 2 && !tags.includes("multi-signal")) tags.push("multi-signal");
+  return tags;
+}
+
+function filterRadarEntries(entries, familyFilter, stateFilter) {
+  return (entries || []).filter((e) => {
+    if (familyFilter && !entryFamilyTags(e).includes(familyFilter)) return false;
+    if (stateFilter && e.state !== stateFilter) return false;
+    return true;
+  });
+}
+
+// Compact signal-history indicator: only rendered when the caller
+// genuinely has 2+ real recorded states for this ticker (entry.history_states
+// from /api/radar, sourced from backend/app/storage.py's real scan log --
+// see main.py's radar() _attach()). An empty/short list renders nothing,
+// never a fabricated single-step "history".
+function renderHistoryChip(historyStates) {
+  if (!historyStates || historyStates.length < 2) return "";
+  const steps = historyStates
+    .map((s, i) => `<span class="hc-step state-${esc(s)}">${esc(s)}</span>${i < historyStates.length - 1 ? '<span class="hc-arrow">\u2192</span>' : ""}`)
+    .join("");
+  return `<div class="history-chip" title="Real scan history for this ticker (${historyStates.length} recorded scans)">${steps}</div>`;
+}
+
+function renderRadarFilterOptions(allEntries) {
+  const families = new Set();
+  const states = new Set();
+  (allEntries || []).forEach((e) => {
+    entryFamilyTags(e).forEach((f) => families.add(f));
+    if (e.state) states.add(e.state);
+  });
+  const famOpts = `<option value="">All evidence families</option>` +
+    Array.from(families).sort().map((f) => `<option value="${esc(f)}">${esc(RADAR_FAMILY_LABELS[f] || f)}</option>`).join("");
+  const stateOpts = `<option value="">All signal states</option>` +
+    Array.from(states).sort().map((s) => `<option value="${esc(s)}">${esc(s)}</option>`).join("");
+  return { famOpts, stateOpts };
+}
+
+// Re-renders Highest Attention / Other Noteworthy from the SAME already-
+// fetched /api/radar payload (never a new fetch), applying the current
+// filter selection. Also keeps the legacy #otherTable (hidden via CSS,
+// see styles.css) populated unfiltered, since app.live.js/app.static.js's
+// older DOM-stub-based test harness still queries it directly.
+function renderRadarLists(data, filters, loadTickerDetailFn) {
+  const familyFilter = (filters && filters.family) || "";
+  const stateFilter = (filters && filters.state) || "";
+  const allHighest = data.highest || [];
+  const allOther = data.other || [];
+  const featured = allHighest[0] || null;
+  const restOfHighest = allHighest.slice(1);
+  const filteredRest = filterRadarEntries(restOfHighest, familyFilter, stateFilter);
+  const filteredOther = filterRadarEntries(allOther, familyFilter, stateFilter);
+
+  const highestGridEl = document.getElementById("highestGrid");
+  if (highestGridEl) highestGridEl.innerHTML = filteredRest.map(renderCard).join("") || "";
+  const otherGridEl = document.getElementById("otherGrid");
+  if (otherGridEl) otherGridEl.innerHTML = filteredOther.map(renderCard).join("") || "";
+  const tbody = document.querySelector("#otherTable tbody");
+  if (tbody) tbody.innerHTML = allOther.map(renderRow).join("");
+
+  // Counts: "qualifying" (highest+other, i.e. tip_evidence.qualifies()
+  // entries) is always kept distinct from "scanned" (every synthetic
+  // scenario including non-qualifying controls like NADA/DRFT) -- never
+  // blur the two. When a filter is active, also show how many of the
+  // qualifying set are currently shown.
+  const totalQualifying = allHighest.length + allOther.length;
+  const totalShown = (featured ? 1 : 0) + filteredRest.length + filteredOther.length;
+  const countsEl = document.getElementById("radarFilterCounts");
+  if (countsEl) {
+    countsEl.textContent = (familyFilter || stateFilter)
+      ? `Showing ${totalShown} of ${totalQualifying} qualifying signal(s) after filters \u2014 ${data.scanned} scenario(s) scanned in total (including non-qualifying controls)`
+      : `${totalQualifying} qualifying signal(s) shown \u2014 ${data.scanned} scenario(s) scanned in total (including non-qualifying controls)`;
+  }
+  const radarEmptyEl = document.getElementById("radarEmpty");
+  if (radarEmptyEl) {
+    radarEmptyEl.textContent = (familyFilter || stateFilter) && totalQualifying > 0 && totalShown === 0
+      ? "No qualifying signals match the current filters."
+      : "No tickers qualify right now.";
+    radarEmptyEl.style.display = (totalShown === 0) ? "block" : "none";
+  }
+
+  wireInvestigateButtons(loadTickerDetailFn);
+  document.querySelectorAll("[data-ticker]").forEach((card) => {
+    card.addEventListener("click", (ev) => {
+      if (ev.target.closest("[data-investigate-ticker]")) return;
+      const t = card.dataset.ticker;
+      const entry = [...allHighest, ...allOther].find((e) => e.ticker === t);
+      if (entry) {
+        const slot = document.getElementById("breakdownSlot");
+        if (slot) slot.innerHTML = renderSignalBreakdown(entry);
+      }
+    });
+  });
+}
+
+// Builds the filter <select> option lists from the full qualifying pool,
+// wires their onchange to re-render via renderRadarLists (no re-fetch),
+// and renders the initial (unfiltered) state. Call once per loadRadar().
+function setupRadarFiltersAndRender(data, loadTickerDetailFn) {
+  const allEntries = [...(data.highest || []), ...(data.other || [])];
+  const { famOpts, stateOpts } = renderRadarFilterOptions(allEntries);
+  const famSel = document.getElementById("filterFamily");
+  const stateSel = document.getElementById("filterState");
+  if (famSel) famSel.innerHTML = famOpts;
+  if (stateSel) stateSel.innerHTML = stateOpts;
+  const rerender = () => renderRadarLists(data, {
+    family: famSel ? famSel.value : "",
+    state: stateSel ? stateSel.value : "",
+  }, loadTickerDetailFn);
+  if (famSel) famSel.onchange = rerender;
+  if (stateSel) stateSel.onchange = rerender;
+  rerender();
+}
+
 // Featured Signal: large treatment for the single highest-confidence /
 // highest-attention entry (highest[0] -- tip_evidence.present() already
 // orders "highest" strongest-first, see backend/app/core/tip_evidence.py
@@ -320,6 +456,7 @@ function renderFeaturedSignal(entry) {
         <span class="tag">signal type: ${esc(entry.signal_type)}</span>
         <span class="tag">evidence categories: ${esc(cats)}</span>
       </div>
+      ${renderHistoryChip(entry.history_states)}
       <div class="featured-confidence conf-${esc(entry.confidence)}">
         <span class="conf-label">confidence</span>
         <span class="conf-value">${esc((entry.confidence || "").toUpperCase())}</span>

@@ -44,11 +44,28 @@
 
       <div class="radar-with-breakdown">
         <div class="radar-main">
+          <div class="radar-filters" id="radarFilters">
+            <label>Evidence family
+              <select id="filterFamily"><option value="">All evidence families</option></select>
+            </label>
+            <label>Signal state
+              <select id="filterState"><option value="">All signal states</option></select>
+            </label>
+            <span class="muted radar-filter-counts" id="radarFilterCounts"></span>
+          </div>
+
           <h2 class="section-title eyebrow">Highest Attention</h2>
           <div class="attn-grid" id="highestGrid"></div>
 
           <h2 class="section-title eyebrow">Other Noteworthy</h2>
-          <div class="table-wrap">
+          <!-- Cards are the primary presentation (P3 requirement: "not
+               primarily a table"). The table below is kept in the DOM,
+               hidden via CSS, and still populated unfiltered -- an older
+               DOM-stub test harness (test_manual_bugfixes.mjs) queries
+               "#otherTable tbody" directly; removing it would break that
+               harness for no visual benefit. -->
+          <div class="attn-grid attn-grid-compact" id="otherGrid"></div>
+          <div class="table-wrap table-wrap-legacy">
             <table class="tbl" id="otherTable">
               <thead>
                 <tr>

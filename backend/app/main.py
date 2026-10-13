@@ -366,9 +366,28 @@ def radar():
 
     def _attach(entry: dict) -> dict:
         s = scans_by_ticker[entry["ticker"]]
+        # Pre-existing gap found while building the Stage 2 signal-state
+        # filter: tip_evidence.present()'s entry dict has never carried a
+        # "state" key at all (it only tracks state internally for
+        # ordering/STATE_RANK) -- frontend/app.core.js's renderCard()/
+        # renderRow() have always rendered `state-${entry.state}` against
+        # an undefined value, so the state tag on every Market Radar
+        # card/row has always been visually blank. Fixing here (real data
+        # already computed in `scan`, just never attached) since the new
+        # client-side state filter needs a real field to filter on.
+        entry["state"] = s["state"]
         entry["confidence"] = s["confidence"]
         entry["signal_type"] = s["signal_type"]
         entry["qualifying_days_count"] = s["qualifying_days_count"]
+        # Compact signal-history indicator (Stage 2 / P3): only non-empty
+        # when this ticker genuinely has more than one real recorded scan
+        # (store.history() -- never fabricated). On a freshly started
+        # process that's only PRSX (seeded + one live scan = 3 real
+        # entries); every other ticker stays [] until it's actually been
+        # scanned more than once. The frontend only renders a chip when
+        # this list has 2+ entries.
+        hist = store.history(entry["ticker"])
+        entry["history_states"] = [h["state"] for h in hist] if len(hist) > 1 else []
         return entry
 
     return {

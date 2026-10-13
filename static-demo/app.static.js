@@ -34,12 +34,11 @@ async function loadRadar() {
     document.getElementById("featuredSignalSlot").innerHTML = renderFeaturedSignal(featured);
     document.getElementById("breakdownSlot").innerHTML = renderSignalBreakdown(featured);
 
-    const restOfHighest = data.highest.slice(1);
-    document.getElementById("highestGrid").innerHTML = restOfHighest.map(renderCard).join("") || "";
-    const tbody = document.querySelector("#otherTable tbody");
-    tbody.innerHTML = data.other.map(renderRow).join("");
-    document.getElementById("radarEmpty").style.display =
-      (data.highest.length === 0 && data.other.length === 0) ? "block" : "none";
+    // Stage 2 (P3): same filters/cards/counts/history-chip rendering as
+    // the local edition -- see app.core.js's
+    // setupRadarFiltersAndRender/renderRadarLists (byte-identical file,
+    // copied in by tools/build_static_demo.sh).
+    setupRadarFiltersAndRender(data, loadTickerDetail);
 
     // Same fix as the local edition's app.live.js: data/radar.json only
     // ever contains Radar-qualifying tickers, so DRFT/NADA (zero
@@ -58,16 +57,6 @@ async function loadRadar() {
     _knownTickers = allTickers;
     const sel = document.getElementById("tickerSelect");
     sel.innerHTML = renderTickerOptions(allTickers, TIP_STATE.currentTicker);
-
-    wireInvestigateButtons(loadTickerDetail);
-    document.querySelectorAll('[data-ticker]').forEach((card) => {
-      card.addEventListener("click", (ev) => {
-        if (ev.target.closest("[data-investigate-ticker]")) return;
-        const t = card.dataset.ticker;
-        const entry = [...data.highest, ...data.other].find((e) => e.ticker === t);
-        if (entry) document.getElementById("breakdownSlot").innerHTML = renderSignalBreakdown(entry);
-      });
-    });
   } catch (err) {
     statusEl.textContent = `Error loading Market Radar: ${err.message}`;
   }
