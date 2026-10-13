@@ -1,0 +1,1 @@
+node_modules/\n__pycache__/\n*.pyc\n.env\nvenv/\n.DS_Store\n*.log\n
