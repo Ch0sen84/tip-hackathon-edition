@@ -62,9 +62,57 @@ dependency, and makes no calls to the production TIP service.
    (Docker, CI, a laptop), so it reads `UW_API_KEY` from the environment
    (see `.env.example`). Never commit a real key.
 
-5. **No MCP / LLM code anywhere in this repo**, per the hackathon task scope.
-   The Settings page's "AI / MCP (optional)" section only saves/clears a
-   provider API key for now -- no AI/MCP calls happen yet.
+5. **"Investigate with AI" uses a REST fallback, NOT real MCP protocol --
+   read this before calling this a "uses UW's official MCP server"
+   submission.** The plan was to speak real MCP (the official `mcp` Python
+   SDK's streamable-HTTP client) to UW's hosted server at
+   `https://api.unusualwhales.com/api/mcp`. In practice:
+   - The current PyPI `mcp` release (2.3.0) pulls in `starlette>=1.7`,
+     which is incompatible with this repo's pinned `fastapi==0.115.6`
+     (`fastapi` requires `starlette<0.42`) -- installing it broke 17 of
+     the existing 73 tests (`Router.__init__() got an unexpected keyword
+     argument 'on_startup'`) by silently upgrading `starlette` out from
+     under FastAPI.
+   - Downgrading to an `mcp` release old enough to coexist (`1.9.4`) comes
+     with three published HIGH-severity OSV advisories
+     (GHSA-9h52-p55h-vw2f, GHSA-j975-95f5-7wqh, GHSA-jpw9-pfvf-9f58).
+   Per this task's explicit fallback instruction, that combination (break
+   the app's own test suite, or ship a dependency with known HIGH
+   advisories) was treated as the "major unexpected complexity" trigger,
+   and the feature was built on a REST fallback instead:
+   `backend/app/ai/rest_tool_client.py` executes each allowlisted tool name
+   (`get_flow_alerts`, `get_dark_pool_trades`, etc. -- see
+   `backend/app/ai/allowlist.py`) as a plain REST call against the same
+   `https://api.unusualwhales.com` host `LiveUWAdapter` already talks to,
+   reusing `UWRestClient`. The tool *names* match the allowlist given for
+   this task exactly; only the transport underneath is REST, not MCP. **We
+   never connected to the live hosted MCP server at all, so the exact tool
+   names/args were not independently verified against it** -- the mapping
+   in `rest_tool_client.py` is a best-effort match to UW's public REST API
+   paths, with a couple (`get_institutional_ownership_by_ticker`,
+   `get_analyst_ratings`) going through a UWRestClient endpoint path that
+   isn't already wired up elsewhere in this repo and so is unconfirmed on
+   every tier. **If this is submitted to the hackathon as "uses UW's
+   official MCP server," that claim would be false for this feature; it
+   should be described as "uses the UW REST API, with an AI agent
+   selecting which endpoints to call within a hard 4-call bound," not as
+   an MCP integration.** Re-attempting real MCP (e.g. once an `mcp` release
+   compatible with current FastAPI pins ships, or by isolating it in its
+   own venv/process) is a reasonable follow-up, not done here.
+
+   The bounded design itself (round 1: LLM selects <=4 read-only tools from
+   a fixed allowlist with every argument validated/sanitized server-side;
+   execution: <=4 real calls; round 2: ONE synthesis call producing
+   `observed_facts` tagged by source tool, `supporting_evidence`,
+   `conflicting_observations`, `limitations`, and a separately-rendered
+   `ai_interpretation` -- no trade recommendation or price prediction
+   allowed in either round's output, enforced by both prompt and a
+   post-hoc schema/heuristic check) is unaffected by the transport choice
+   and is implemented in full under `backend/app/ai/`. See
+   `POST /api/investigate/{ticker}` below. Demo mode and `PUBLIC_DEMO=1`
+   never call either a real UW endpoint or a real LLM for this feature --
+   they always serve one of the static, clearly-labeled transcripts in
+   `fixtures/investigate_simulated/`.
 
 6. **Settings infrastructure is .env-primary, UI-layer-on-top (Phase 2.5
    judgment call).** `backend/app/settings_store.py` is a small local JSON
@@ -136,7 +184,22 @@ Open `http://localhost:8000/` for the frontend, or hit the API directly:
   `not_configured`.
 - `POST /api/settings/ai-key {"provider": "anthropic"|"openai", "api_key": "..."}`
   / `DELETE /api/settings/ai-key` -- save/clear the optional AI provider
-  key for the upcoming (not-yet-implemented) MCP/AI module.
+  key used by Investigate with AI.
+- `GET /api/investigate/availability` -- whether the Investigate-with-AI
+  button should be enabled, and why not if disabled (no network call).
+- `POST /api/investigate/{ticker}` -- bounded, optional AI investigation
+  for one ticker. Demo mode / `PUBLIC_DEMO=1` always returns a static,
+  clearly-labeled simulated transcript (no network call of any kind).
+  Live mode requires both a UW key and an AI provider key (else 400) and
+  makes <=4 real read-only UW REST calls (see Design Decision #5 above for
+  why REST, not MCP) chosen by one LLM tool-selection call, followed by one
+  LLM synthesis call -- never more than those two LLM calls, never a tool
+  outside `backend/app/ai/allowlist.py`. Returns
+  `{ticker, tools_used, observed_facts: [{fact, source_tool}],
+  supporting_evidence, conflicting_observations, limitations,
+  ai_interpretation, simulated, simulated_label}` or a 4xx with a clear
+  reason (invalid ticker, no AI key, no UW key) / 502 if the AI response
+  was malformed and got rejected by validation.
 
 Switch to Live Mode either through the Settings page (Save a UW key, then
 toggle to Live) or via env: `TIP_MODE=live UW_API_KEY=... uvicorn ...`. See
@@ -169,7 +232,17 @@ Covers: every branch of `signal_engine.evaluate_gates` /
 real engine (proving different fixtures produce different, non-canned
 NEW/BUILDING/CONFIRMED results); `LiveUWAdapter` against a mocked HTTP
 session covering success, 401, 403, and network-exception paths without
-ever making a real network call.
+ever making a real network call; Settings/credential endpoints including a
+key-leak check; and Investigate with AI (`test_investigate.py`) --
+argument validation/sanitization (bad tickers, out-of-range limits,
+non-allowlisted tools all rejected), the tool-selection and synthesis
+rounds each firing exactly once and real tool execution never exceeding 4
+calls (all via `monkeypatch`, no real network), demo/`PUBLIC_DEMO` always
+returning the static transcript and asserting the mocked real-call
+functions are never invoked, and schema enforcement rejecting a
+synthesis response missing `ai_interpretation` or smuggling a prediction
+into `observed_facts`. **95 passed, 0 failed** (73 prior + 22 new) as of
+this feature's addition.
 
 ## Fixtures
 
@@ -184,12 +257,15 @@ live data.
 ```
 backend/app/core/            pure, DB-free logic (signal_engine, tip_evidence, scan_service)
 backend/app/adapters/        SyntheticDataAdapter, LiveUWAdapter (same interface)
-backend/app/main.py          FastAPI routes, incl. /api/settings*
+backend/app/ai/              Investigate with AI: allowlist, validation, REST-fallback tool
+                              client, provider-agnostic LLM wrapper, orchestrator, schemas
+backend/app/main.py          FastAPI routes, incl. /api/settings*, /api/investigate/*
 backend/app/settings_store.py  local JSON settings/credential store (data/settings.json)
 backend/app/storage.py       local SQLite qualifying-days store
-backend/tests/                pytest suite (incl. test_settings.py)
+backend/tests/                pytest suite (incl. test_settings.py, test_investigate.py)
 fixtures/                    synthetic scenario_*.json + README_SYNTHETIC.md
-frontend/                    plain HTML/CSS/JS, no build step (incl. Settings view)
+fixtures/investigate_simulated/  static, labeled simulated AI-investigation transcripts
+frontend/                    plain HTML/CSS/JS, no build step (incl. Settings, Investigate views)
 docs/                        design notes
 data/                        gitignored: settings.json + tip_hackathon.db, created at runtime
 ```
@@ -199,6 +275,11 @@ data/                        gitignored: settings.json + tip_hackathon.db, creat
 Phase 1 + Phase 2 scope (backend port + synthetic/live adapters + minimal
 frontend + tests) is implemented and passing locally. Phase 2.5 (Settings
 UI + local credential store, Demo/Live mode switching, PUBLIC_DEMO
-explanatory mode, no MCP/AI calls yet) is also implemented and passing
-locally. This README is a skeleton; polish (screenshots, architecture
-diagram, deployment notes) is planned for a later pass before submission.
+explanatory mode) is also implemented and passing locally. The optional
+"Investigate with AI" module (bounded tool-selection + synthesis rounds,
+REST-fallback transport -- see Design Decision #5 above for why not real
+MCP, demo-mode static simulated transcripts, Settings-gated graceful
+disable with zero AI key) is implemented and passing locally: **95 tests
+passing, 0 failing** (73 prior + 22 new). This README is a skeleton;
+polish (screenshots, architecture diagram, deployment notes) is planned
+for a later pass before submission.

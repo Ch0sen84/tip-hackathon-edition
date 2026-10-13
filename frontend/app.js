@@ -142,8 +142,103 @@ async function loadTickerDetail(ticker) {
         <summary>Raw adapter data (what fed the gates above)</summary>
         <pre class="raw">${esc(JSON.stringify(d.raw, null, 2))}</pre>
       </details>`;
+    await loadInvestigateSection(ticker);
   } catch (err) {
     el.innerHTML = `<div class="empty">Error loading ${esc(ticker)}: ${esc(err.message)}</div>`;
+  }
+}
+
+// --- Investigate with AI (bounded, optional) -----------------------------
+//
+// Round-trip shape matches backend/app/ai/schemas.py's InvestigationResult:
+// observed_facts (each tagged with source_tool), supporting_evidence,
+// conflicting_observations, limitations, and a visually-separated
+// ai_interpretation. Demo mode / PUBLIC_DEMO always returns a static,
+// clearly-labeled simulated transcript -- this file never makes that
+// distinction itself, it just renders whatever the backend returned,
+// including the prominent "simulated" banner when present.
+
+function renderInvestigateFacts(facts) {
+  if (!facts || !facts.length) return `<p class="muted">No observed facts were retained.</p>`;
+  return facts.map((f) => `
+    <div class="ai-fact">
+      ${esc(f.fact)}
+      <span class="src">source: ${esc(f.source_tool)}</span>
+    </div>`).join("");
+}
+
+function renderInvestigateList(items) {
+  if (!items || !items.length) return `<p class="muted">None noted.</p>`;
+  return `<ul class="ai-list">${items.map((i) => `<li>${esc(i)}</li>`).join("")}</ul>`;
+}
+
+function renderInvestigateResult(d) {
+  const simBanner = d.simulated
+    ? `<div class="ai-simulated-banner">${esc(d.simulated_label || "Simulated agent walkthrough -- not live UW data, not a real AI call")}</div>`
+    : "";
+  return `
+    ${simBanner}
+    <div class="tags"><span class="tag">tools used: ${esc((d.tools_used || []).join(", ") || "none")}</span></div>
+    <div class="ai-section">
+      <h4>Observed Facts</h4>
+      ${renderInvestigateFacts(d.observed_facts)}
+    </div>
+    <div class="ai-section">
+      <h4>Supporting Evidence</h4>
+      ${renderInvestigateList(d.supporting_evidence)}
+    </div>
+    <div class="ai-section">
+      <h4>Conflicting Observations</h4>
+      ${renderInvestigateList(d.conflicting_observations)}
+    </div>
+    <div class="ai-section">
+      <h4>Limitations</h4>
+      ${renderInvestigateList(d.limitations)}
+    </div>
+    <div class="ai-interpretation">
+      <h4>AI Interpretation (model's reasoning, not a retrieved fact)</h4>
+      <p>${esc(d.ai_interpretation)}</p>
+    </div>`;
+}
+
+async function runInvestigate(ticker) {
+  const body = document.getElementById("investigateBody");
+  body.innerHTML = `<div class="empty">Investigating ${esc(ticker)}... this makes a few bounded read-only calls and can take several seconds.</div>`;
+  try {
+    const res = await fetch(`${API_BASE}/api/investigate/${encodeURIComponent(ticker)}`, { method: "POST" });
+    const d = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(d.detail || `HTTP ${res.status}`);
+    body.innerHTML = renderInvestigateResult(d);
+  } catch (err) {
+    body.innerHTML = `<div class="empty">Investigation failed: ${esc(err.message)}</div>`;
+  }
+}
+
+async function loadInvestigateSection(ticker) {
+  const el = document.getElementById("investigateSection");
+  try {
+    const avail = await apiGet("/api/investigate/availability");
+    if (!avail.available) {
+      el.innerHTML = `
+        <div class="ai-card">
+          <h3>Investigate with AI</h3>
+          <p class="ai-disabled-note">${esc(avail.reason || "This feature is not available right now.")}</p>
+        </div>`;
+      return;
+    }
+    const simNote = avail.simulated
+      ? `<p class="ai-disabled-note">Demo mode: running this will show a pre-written simulated transcript, not a real AI/UW call.</p>`
+      : `<p class="ai-disabled-note">Live mode: this will make a few bounded, read-only Unusual Whales lookups plus two AI calls using your saved keys, entirely from your local backend.</p>`;
+    el.innerHTML = `
+      <div class="ai-card">
+        <h3>Investigate with AI</h3>
+        ${simNote}
+        <button class="btn" id="runInvestigateBtn">Investigate ${esc(ticker)} with AI</button>
+        <div id="investigateBody" style="margin-top:10px"></div>
+      </div>`;
+    document.getElementById("runInvestigateBtn").addEventListener("click", () => runInvestigate(ticker));
+  } catch (err) {
+    el.innerHTML = `<div class="ai-card"><h3>Investigate with AI</h3><p class="ai-disabled-note">Unavailable: ${esc(err.message)}</p></div>`;
   }
 }
 

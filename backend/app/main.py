@@ -27,6 +27,11 @@ from pydantic import BaseModel
 from .adapters.base import UWDataAdapter
 from .adapters.live_uw_adapter import ERROR, UNAUTHORIZED, UNAVAILABLE, LiveUWAdapter, UWRestClient
 from .adapters.synthetic_adapter import SyntheticDataAdapter
+from .ai import orchestrator as ai_orchestrator
+from .ai.llm_provider import LLMCallError
+from .ai.schemas import MalformedAIResponse
+from .ai.simulated import get_simulated_transcript
+from .ai.validation import ValidationError as AiValidationError
 from .config import settings
 from .core import scan_service, tip_evidence
 from .settings_store import SettingsStore, last4
@@ -357,6 +362,103 @@ def ticker_analysis(ticker: str):
         "history": store.history(ticker),
         "raw": scan["raw"],
     }
+
+
+@app.get("/api/investigate/availability")
+def investigate_availability():
+    """Tells the frontend whether to show/enable the 'Investigate with AI'
+    button, and why not, without triggering any network call. Demo mode is
+    always available (it only ever serves a static simulated transcript);
+    live mode additionally needs both an AI provider key and a UW key."""
+    data = _settings_store.get_all()
+    mode = data["mode"]
+    if settings.public_demo or mode != "live":
+        return {"available": True, "simulated": True, "reason": None}
+    ai_key = data.get("ai_api_key")
+    if not ai_key:
+        return {
+            "available": False,
+            "simulated": False,
+            "reason": "No AI provider key is configured. Add one in Settings to enable Investigate with AI.",
+        }
+    uw_key, _source = _effective_uw_key(data)
+    if not uw_key:
+        return {
+            "available": False,
+            "simulated": False,
+            "reason": "Live mode requires a Unusual Whales API key (Settings) before Investigate with AI can run.",
+        }
+    return {"available": True, "simulated": False, "reason": None}
+
+
+@app.post("/api/investigate/{ticker}")
+def investigate_ticker(ticker: str):
+    """Bounded 'Investigate with AI' for one ticker. Demo mode / PUBLIC_DEMO
+    always returns a pre-written, clearly-labeled simulated transcript and
+    NEVER calls a real LLM or UW endpoint. Live mode makes the real bounded
+    MCP-allowlist-equivalent REST calls plus two LLM calls described in
+    backend/app/ai/orchestrator.py, entirely from this local backend."""
+    try:
+        safe_ticker = _validate_ticker_for_route(ticker)
+    except AiValidationError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    data = _settings_store.get_all()
+    mode = data["mode"]
+
+    if settings.public_demo or mode != "live":
+        return get_simulated_transcript(settings.fixtures_dir, safe_ticker)
+
+    ai_provider = data.get("ai_provider")
+    ai_key = data.get("ai_api_key")
+    if not ai_key or not ai_provider:
+        raise HTTPException(
+            status_code=400,
+            detail="No AI provider key is configured. Add one in Settings to use Investigate with AI.",
+        )
+    uw_key, _source = _effective_uw_key(data)
+    if not uw_key:
+        raise HTTPException(
+            status_code=400,
+            detail="Live mode requires a Unusual Whales API key (Settings) before Investigate with AI can run.",
+        )
+
+    adapter = get_adapter()
+    store = get_store()
+    try:
+        scan = _run_scan(adapter, store, safe_ticker)
+        evidence = _to_evidence_item(scan)
+        evidence["qualifying_days_count"] = scan["qualifying_days_count"]
+        evidence["confidence"] = scan["confidence"]
+    except Exception:
+        evidence = {"ticker": safe_ticker, "note": "Market Radar evidence unavailable; investigating ticker alone."}
+
+    try:
+        result = ai_orchestrator.investigate(
+            ticker=safe_ticker,
+            evidence=evidence,
+            ai_provider=ai_provider,
+            ai_api_key=ai_key,
+            uw_api_key=uw_key,
+            uw_base_url=settings.uw_base_url,
+            uw_client_api_id=settings.uw_client_api_id,
+        )
+    except AiValidationError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except ai_orchestrator.NoValidToolsSelectedError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except MalformedAIResponse as e:
+        raise HTTPException(status_code=502, detail=f"AI returned a malformed response: {e}")
+    except LLMCallError as e:
+        raise HTTPException(status_code=502, detail=f"AI provider call failed: {e}")
+
+    return result.model_dump()
+
+
+def _validate_ticker_for_route(ticker: str):
+    from .ai.validation import validate_ticker
+
+    return validate_ticker(ticker)
 
 
 @app.get("/api/scenarios")

@@ -34,7 +34,12 @@ class Settings:
         self.db_path = os.environ.get("TIP_DB_PATH", "./data/tip_hackathon.db")
         self.fixtures_dir = os.environ.get(
             "TIP_FIXTURES_DIR",
-            os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "..", "fixtures"),
+            # backend/app/config.py -> backend/app -> backend -> repo root, then /fixtures.
+            # (Fixed an extra stray ".." here that silently never mattered before because
+            # every caller that needed this path -- Dockerfile, test fixtures -- set
+            # TIP_FIXTURES_DIR explicitly; the new Investigate-with-AI demo-mode route is
+            # the first thing that relies on this default actually resolving correctly.)
+            os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "fixtures"),
         )
         watchlist = os.environ.get("TIP_LIVE_WATCHLIST", "SPY,QQQ,NVDA,TSLA")
         self.live_watchlist = [t.strip().upper() for t in watchlist.split(",") if t.strip()]

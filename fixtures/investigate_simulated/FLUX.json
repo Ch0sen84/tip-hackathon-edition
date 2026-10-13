@@ -1,0 +1,23 @@
+{
+  "ticker": "FLUX",
+  "simulated": true,
+  "simulated_label": "Simulated agent walkthrough -- not live UW data, not a real AI call",
+  "tools_used": ["get_flow_alerts", "get_dark_pool_trades", "get_greek_exposure_by_ticker", "get_short_data_by_ticker"],
+  "observed_facts": [
+    {"fact": "Flagged option sweep activity and a dark-pool print were both observed for FLUX in the same window (see raw adapter data in Ticker Analysis for exact figures) -- this is why Market Radar's multi-signal gate fired for this ticker.", "source_tool": "get_flow_alerts"},
+    {"fact": "A dark-pool print was recorded for FLUX in the same window as the flagged option sweep.", "source_tool": "get_dark_pool_trades"},
+    {"fact": "Greek exposure data for FLUX was unavailable in this simulated run (endpoint returned no data).", "source_tool": "get_greek_exposure_by_ticker"},
+    {"fact": "Short interest data for FLUX was unavailable in this simulated run (endpoint returned no data).", "source_tool": "get_short_data_by_ticker"}
+  ],
+  "supporting_evidence": [
+    "Options flow and dark-pool activity co-occurring in the same window is a stronger, multi-signal pattern than either signal appearing alone -- this is exactly the combination Market Radar's gate logic is designed to flag as higher-confidence."
+  ],
+  "conflicting_observations": [
+    "Greek exposure and short-interest data could not be retrieved in this simulated run, so the dealer-positioning and short-covering angles are both unconfirmed -- the picture here rests on options flow and dark-pool activity alone."
+  ],
+  "limitations": [
+    "Two of the four tools selected returned no data in this simulated run -- treat this as a partial picture, not a complete one.",
+    "Co-occurring signals describe correlation in time, not a confirmed causal relationship between the option trade and the dark-pool print."
+  ],
+  "ai_interpretation": "Options flow and a dark-pool print occurring together is the kind of multi-signal pattern that tends to get more analyst attention than either alone, because it suggests activity across two different venues rather than one. Two of the four data sources queried came back empty, which limits how much can be said about dealer positioning or short interest here. This is a description of what co-occurred, not a prediction of FLUX's future price and not a trade recommendation."
+}

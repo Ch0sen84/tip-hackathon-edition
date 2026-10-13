@@ -1,0 +1,22 @@
+{
+  "ticker": "ZYNC",
+  "simulated": true,
+  "simulated_label": "Simulated agent walkthrough -- not live UW data, not a real AI call",
+  "tools_used": ["get_flow_alerts", "get_dark_pool_trades", "get_short_data_by_ticker"],
+  "observed_facts": [
+    {"fact": "Two flagged option sweeps on ZYNC today: $3,250,000 total premium (ask-side $3,100,000 / bid-side $150,000) at 14:31 UTC, and $1,180,000 total premium (ask-side $1,120,000) at 14:47 UTC. Both flagged has_sweep=true, is_call=true.", "source_tool": "get_flow_alerts"},
+    {"fact": "No dark-pool prints were returned for ZYNC in the lookback window.", "source_tool": "get_dark_pool_trades"},
+    {"fact": "Short interest data for ZYNC was unavailable in this simulated run (endpoint returned no data).", "source_tool": "get_short_data_by_ticker"}
+  ],
+  "supporting_evidence": [
+    "Both flagged option trades are call-side and ask-side-dominant (ask premium >> bid premium), consistent with aggressive buying rather than aggressive selling of calls."
+  ],
+  "conflicting_observations": [
+    "The options flow is one-sided and sweep-flagged, but there is no corresponding dark-pool print to corroborate large underlying-share activity alongside it."
+  ],
+  "limitations": [
+    "Only two flow-alert rows and zero dark-pool rows were available in this lookback window -- this is a small sample, not a full day's picture.",
+    "No greek-exposure, insider, institutional-ownership, or analyst-rating data was requested in this investigation, so those angles are unexamined here."
+  ],
+  "ai_interpretation": "The two option trades share a consistent profile (call-side, ask-dominant, sweep-flagged), which is the kind of pattern options-flow trackers often highlight as 'aggressive call buying.' Taken alone, two trades is a thin sample, and the absence of dark-pool corroboration means this is options-market activity only, not confirmed by an underlying-share signal. This description is not a prediction of where the stock will trade next and is not a recommendation to take any position."
+}
