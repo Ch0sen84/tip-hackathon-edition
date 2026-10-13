@@ -1,0 +1,168 @@
+{
+  "synthetic": true,
+  "ticker": "BRNX",
+  "scenario_name": "Options-only, bearish/put-side (distinct from ZYNC)",
+  "description": "Checked ZYNC before adding this: ZYNC is a single-gate options_flow_anomaly scenario (call-side, bullish-lean), but classify_confidence has NO dedicated branch for options_flow_anomaly passing alone -- the function falls through to the dark_pool-bootstrap low-confidence branch whenever there is no darkpool history, regardless of options_flow_anomaly's own passed=true. Verified this is the real, ported-verbatim production behavior (options flow alone is intentionally never an independently-qualifying signal in this engine -- it only counts toward multi_signal_confirmation or provides a price_confirmation direction lean), not a bug introduced in this repo; documenting rather than fixing it, per the no-threshold/no-logic-change instruction. This scenario demonstrates the SAME real behavior on the opposite (put/bearish) side for direction-agnostic coverage: a one-sided put sweep (ask_share ~8%, i.e. bid-dominant) drives direction_heuristic to 'bearish-lean', and because the stock genuinely fell -2.1% that session, price_confirmation.metrics.confirmed is True here (distinct from ZYNC, where the bullish lean was confirmed by a price RISE) -- same engine code path, opposite real-world direction, both correctly confirmed.",
+  "flow_alerts": [
+    {
+      "ticker_symbol": "BRNX",
+      "total_premium": 2400000,
+      "total_ask_premium": 200000,
+      "total_bid_premium": 2200000,
+      "has_sweep": true,
+      "has_multileg": false,
+      "is_call": false,
+      "is_put": true,
+      "underlying_price": 62.1,
+      "created_at": "2026-10-12T15:05:00Z"
+    }
+  ],
+  "darkpool_trades": [],
+  "stock_state": {
+    "ticker": "BRNX",
+    "last_price": 60.8,
+    "change_percent": -2.1
+  },
+  "ohlc": [
+    {
+      "date": "2026-09-23",
+      "open": 59.13,
+      "high": 59.78,
+      "low": 58.78,
+      "close": 59.61,
+      "volume": 1757773,
+      "market_time": "r",
+      "total_volume": 1757773
+    },
+    {
+      "date": "2026-09-24",
+      "open": 59.61,
+      "high": 60.05,
+      "low": 59.25,
+      "close": 59.66,
+      "volume": 1029145,
+      "market_time": "r",
+      "total_volume": 1029145
+    },
+    {
+      "date": "2026-09-25",
+      "open": 59.67,
+      "high": 59.95,
+      "low": 59.4,
+      "close": 59.78,
+      "volume": 843526,
+      "market_time": "r",
+      "total_volume": 843526
+    },
+    {
+      "date": "2026-09-28",
+      "open": 59.57,
+      "high": 60.01,
+      "low": 59.41,
+      "close": 60.01,
+      "volume": 1900520,
+      "market_time": "r",
+      "total_volume": 1900520
+    },
+    {
+      "date": "2026-09-29",
+      "open": 60.31,
+      "high": 60.43,
+      "low": 59.72,
+      "close": 60.24,
+      "volume": 2009210,
+      "market_time": "r",
+      "total_volume": 2009210
+    },
+    {
+      "date": "2026-09-30",
+      "open": 60.16,
+      "high": 60.46,
+      "low": 59.72,
+      "close": 60.21,
+      "volume": 2203231,
+      "market_time": "r",
+      "total_volume": 2203231
+    },
+    {
+      "date": "2026-10-01",
+      "open": 60.75,
+      "high": 60.98,
+      "low": 60.31,
+      "close": 60.65,
+      "volume": 1936981,
+      "market_time": "r",
+      "total_volume": 1936981
+    },
+    {
+      "date": "2026-10-02",
+      "open": 60.79,
+      "high": 61.05,
+      "low": 60.34,
+      "close": 60.57,
+      "volume": 1548058,
+      "market_time": "r",
+      "total_volume": 1548058
+    },
+    {
+      "date": "2026-10-05",
+      "open": 60.46,
+      "high": 61.12,
+      "low": 60.06,
+      "close": 60.7,
+      "volume": 934759,
+      "market_time": "r",
+      "total_volume": 934759
+    },
+    {
+      "date": "2026-10-06",
+      "open": 60.89,
+      "high": 61.05,
+      "low": 60.48,
+      "close": 61.05,
+      "volume": 1881746,
+      "market_time": "r",
+      "total_volume": 1881746
+    },
+    {
+      "date": "2026-10-07",
+      "open": 61.22,
+      "high": 61.58,
+      "low": 60.95,
+      "close": 60.95,
+      "volume": 1386223,
+      "market_time": "r",
+      "total_volume": 1386223
+    },
+    {
+      "date": "2026-10-08",
+      "open": 61.14,
+      "high": 61.65,
+      "low": 60.93,
+      "close": 61.04,
+      "volume": 1961771,
+      "market_time": "r",
+      "total_volume": 1961771
+    },
+    {
+      "date": "2026-10-09",
+      "open": 61.09,
+      "high": 61.72,
+      "low": 60.8,
+      "close": 61.65,
+      "volume": 1648529,
+      "market_time": "r",
+      "total_volume": 1648529
+    },
+    {
+      "date": "2026-10-12",
+      "open": 61.71,
+      "high": 61.98,
+      "low": 60.43,
+      "close": 60.8,
+      "volume": 2153725,
+      "market_time": "r",
+      "total_volume": 2153725
+    }
+  ]
+}

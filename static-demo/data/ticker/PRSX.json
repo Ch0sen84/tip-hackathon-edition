@@ -1,0 +1,142 @@
+{
+  "ticker": "PRSX",
+  "state": "CONFIRMED",
+  "previous_state": "CONFIRMED",
+  "transition_rule": "still_confirmed",
+  "confidence": "high",
+  "signal_type": "t1-baseline",
+  "confidence_reason": "Dark-pool anomaly vs baseline: 3.9x avg, z=11.7",
+  "qualifies": true,
+  "qualifying_days_count": 3,
+  "gates": {
+    "dark_pool_anomaly": {
+      "passed": true,
+      "metrics": {
+        "ratio": 3.92,
+        "z_score": 11.68,
+        "bootstrap": false
+      }
+    },
+    "options_flow_anomaly": {
+      "passed": false,
+      "metrics": {
+        "reason": "no flow alerts this scan"
+      }
+    },
+    "historical_percentile": {
+      "passed": false,
+      "metrics": {
+        "passed": false,
+        "percentile": 0.9,
+        "window_days": 30,
+        "synthetic": true,
+        "ticker": "PRSX",
+        "today_premium": 9800000.0,
+        "note": "synthetic baseline, not the production historical-percentile model"
+      }
+    },
+    "persistence": {
+      "passed": false,
+      "metrics": {
+        "tier2_qualifying_prints": 0,
+        "tier2_max_pct": 0.0,
+        "is_new_qualifying_day": false
+      }
+    },
+    "price_confirmation": {
+      "passed": false,
+      "metrics": {
+        "price_move_pct": 0.9,
+        "direction_heuristic": null,
+        "confirmed": null
+      }
+    },
+    "multi_signal_confirmation": {
+      "passed": false,
+      "metrics": {
+        "contributing_gates": [
+          "dark_pool_anomaly"
+        ]
+      }
+    },
+    "catalyst_identified": {
+      "passed": false,
+      "metrics": {
+        "note": "not auto-computed -- set explicitly when a real catalyst is found"
+      }
+    },
+    "data_quality": {
+      "passed": true,
+      "metrics": {
+        "api_errors": 0,
+        "bootstrap": false
+      }
+    }
+  },
+  "headline": "Dark pool ~3.9x recent average (short history)",
+  "current_read": "Dark-pool activity well above normal; no corresponding price response.",
+  "evidence": [
+    {
+      "family": "dark_pool",
+      "text": "Dark pool ~3.9x its recent average; short history",
+      "key": true,
+      "short": "Dark pool ~3.9x recent average (short history)"
+    },
+    {
+      "family": "lifecycle",
+      "text": "TIP signal state CONFIRMED",
+      "key": false,
+      "short": "TIP signal state CONFIRMED"
+    },
+    {
+      "family": "price",
+      "text": "Price +0.9% at 38.55",
+      "key": true,
+      "short": "Price +0.9% at 38.55"
+    }
+  ],
+  "stock_state": {
+    "ticker": "PRSX",
+    "last_price": 38.55,
+    "change_percent": 0.9
+  },
+  "history": [
+    {
+      "scan_date": "2026-10-11",
+      "any_gate_passed": true,
+      "state": "NEW",
+      "created_at": "2026-10-13 15:51:07"
+    },
+    {
+      "scan_date": "2026-10-12",
+      "any_gate_passed": true,
+      "state": "BUILDING",
+      "created_at": "2026-10-13 15:51:07"
+    },
+    {
+      "scan_date": "2026-10-13",
+      "any_gate_passed": true,
+      "state": "CONFIRMED",
+      "created_at": "2026-10-13 15:51:07"
+    },
+    {
+      "scan_date": "2026-10-13",
+      "any_gate_passed": true,
+      "state": "CONFIRMED",
+      "created_at": "2026-10-13 15:51:07"
+    }
+  ],
+  "raw": {
+    "flow_alerts": [],
+    "darkpool_trades": [
+      {
+        "ticker": "PRSX",
+        "premium": 9800000,
+        "size": 118000,
+        "price": 38.4,
+        "executed_at": "2026-10-13T11:15:00Z",
+        "avg_premium_baseline": 2500000
+      }
+    ]
+  }
+}

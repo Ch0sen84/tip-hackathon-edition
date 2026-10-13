@@ -58,6 +58,15 @@ class SyntheticDataAdapter(UWDataAdapter):
         scenario = self._scenarios.get(ticker.upper())
         return dict(scenario["stock_state"]) if scenario and scenario.get("stock_state") else None
 
+    def get_catalyst_identified(self, ticker: str) -> bool:
+        """Reads an optional, manually-curated \"catalyst_identified\" key
+        from the fixture (see fixtures/scenario_catalyst_identified.json).
+        Absent on every other fixture -> defaults to False, same as the
+        base class. This is a fixture-authored demonstration value, never
+        computed by this adapter."""
+        scenario = self._scenarios.get(ticker.upper())
+        return bool(scenario.get("catalyst_identified")) if scenario else False
+
     def get_ohlc(self, ticker: str, timeframe: str = "1d", limit: int = 180) -> dict:
         """Returns the scenario's pre-authored `ohlc` series, if the fixture
         has one. No synthesis happens here -- a scenario fixture with no

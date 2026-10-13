@@ -96,6 +96,17 @@ def get_store() -> QualifyingDaysStore:
     global _store
     if _store is None:
         _store = QualifyingDaysStore(settings.db_path)
+        # Backfill the one demo scenario (PRSX) that needs genuinely
+        # distinct historical scan_date rows to show a real multi-day
+        # BUILDING -> CONFIRMED trajectory -- see seed_demo_history.py's
+        # module docstring. Idempotent, non-fatal (demo-only convenience;
+        # never block app startup on it), and runs on real fixture data
+        # through the real scan_service, not a hardcoded state.
+        try:
+            from .seed_demo_history import seed_persistence_progression
+            seed_persistence_progression(_store, settings.fixtures_dir)
+        except Exception:
+            pass
     return _store
 
 
@@ -121,6 +132,7 @@ def _run_scan(adapter: UWDataAdapter, store: QualifyingDaysStore, ticker: str) -
         current_state=current_state,
         qualifying_days_count=qualifying_days,
         price_move_pct=_price_move_pct(stock_state),
+        catalyst_identified=adapter.get_catalyst_identified(ticker),
     )
     any_gate_passed = len(result["gates_passed"]) > 0
     store.record_scan(ticker, any_gate_passed, result["state"])

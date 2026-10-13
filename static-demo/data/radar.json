@@ -1,1 +1,341 @@
-{"highest":[{"ticker":"FLUX","name":null,"families":["dark_pool","options"],"evidence":[{"family":"dark_pool","text":"Dark pool ~3.8x its recent average; short history","key":true,"short":"Dark pool ~3.8x recent average (short history)"},{"family":"lifecycle","text":"TIP signal state CONFIRMED","key":false,"short":"TIP signal state CONFIRMED"},{"family":"price","text":"Price +2.1% at 214.10","key":true,"short":"Price +2.1% at 214.10"}],"current_read":"Dark-pool activity well above normal; stock rose 2.1%.","headline":"Dark pool ~3.8x recent average (short history) · Options flow anomaly","label":"MULTI-SOURCE","categories":["dark_pool","options"],"index_context":false,"question":null,"research":[],"enriched":true,"confidence":"high","signal_type":"multi-signal","qualifying_days_count":1}],"other":[{"ticker":"QRVX","name":null,"families":["dark_pool"],"evidence":[{"family":"dark_pool","text":"Dark pool ~6.4x its recent average; short history","key":true,"short":"Dark pool ~6.4x recent average (short history)"},{"family":"lifecycle","text":"TIP signal state CONFIRMED","key":false,"short":"TIP signal state CONFIRMED"},{"family":"price","text":"Price +0.3% at 70.40","key":true,"short":"Price +0.3% at 70.40"}],"current_read":"Dark-pool activity well above normal; no corresponding price response.","headline":"Dark pool ~6.4x recent average (short history)","label":"DARK POOL","categories":["dark_pool"],"index_context":false,"question":null,"research":[],"enriched":true,"confidence":"high","signal_type":"multi-signal","qualifying_days_count":1},{"ticker":"ZYNC","name":null,"families":["options"],"evidence":[{"family":"lifecycle","text":"TIP signal state BUILDING","key":false,"short":"TIP signal state BUILDING"},{"family":"price","text":"Price +1.4% at 84.95","key":true,"short":"Price +1.4% at 84.95"}],"current_read":"Unusual options volume; stock rose 1.4%.","headline":"Options flow anomaly","label":"OPTIONS","categories":["options"],"index_context":false,"question":null,"research":[],"enriched":true,"confidence":"low","signal_type":"t1-bootstrap","qualifying_days_count":1}],"scanned":5}
+{
+  "highest": [
+    {
+      "ticker": "FLUX",
+      "name": null,
+      "families": [
+        "dark_pool",
+        "options"
+      ],
+      "evidence": [
+        {
+          "family": "dark_pool",
+          "text": "Dark pool ~3.8x its recent average; short history",
+          "key": true,
+          "short": "Dark pool ~3.8x recent average (short history)"
+        },
+        {
+          "family": "lifecycle",
+          "text": "TIP signal state NEW",
+          "key": false,
+          "short": "TIP signal state NEW"
+        },
+        {
+          "family": "price",
+          "text": "Price +2.1% at 214.10",
+          "key": true,
+          "short": "Price +2.1% at 214.10"
+        }
+      ],
+      "current_read": "Dark-pool activity well above normal; stock rose 2.1%.",
+      "headline": "Dark pool ~3.8x recent average (short history) \u00b7 Options flow anomaly",
+      "label": "MULTI-SOURCE",
+      "categories": [
+        "dark_pool",
+        "options"
+      ],
+      "index_context": false,
+      "question": null,
+      "research": [],
+      "enriched": true,
+      "confidence": "high",
+      "signal_type": "multi-signal",
+      "qualifying_days_count": 0
+    },
+    {
+      "ticker": "VOLX",
+      "name": null,
+      "families": [
+        "dark_pool",
+        "options"
+      ],
+      "evidence": [
+        {
+          "family": "lifecycle",
+          "text": "TIP signal state NEW",
+          "key": false,
+          "short": "TIP signal state NEW"
+        },
+        {
+          "family": "price",
+          "text": "Price +1.9% at 155.10",
+          "key": true,
+          "short": "Price +1.9% at 155.10"
+        }
+      ],
+      "current_read": "Dark-pool activity well above normal; stock rose 1.9%.",
+      "headline": "Dark-pool activity above normal \u00b7 Options flow anomaly",
+      "label": "MULTI-SOURCE",
+      "categories": [
+        "dark_pool",
+        "options"
+      ],
+      "index_context": false,
+      "question": null,
+      "research": [],
+      "enriched": true,
+      "confidence": "high",
+      "signal_type": "multi-signal",
+      "qualifying_days_count": 0
+    }
+  ],
+  "other": [
+    {
+      "ticker": "PRSX",
+      "name": null,
+      "families": [
+        "dark_pool"
+      ],
+      "evidence": [
+        {
+          "family": "dark_pool",
+          "text": "Dark pool ~3.9x its recent average; short history",
+          "key": true,
+          "short": "Dark pool ~3.9x recent average (short history)"
+        },
+        {
+          "family": "lifecycle",
+          "text": "TIP signal state CONFIRMED",
+          "key": false,
+          "short": "TIP signal state CONFIRMED"
+        },
+        {
+          "family": "price",
+          "text": "Price +0.9% at 38.55",
+          "key": true,
+          "short": "Price +0.9% at 38.55"
+        }
+      ],
+      "current_read": "Dark-pool activity well above normal; no corresponding price response.",
+      "headline": "Dark pool ~3.9x recent average (short history)",
+      "label": "DARK POOL",
+      "categories": [
+        "dark_pool"
+      ],
+      "index_context": false,
+      "question": null,
+      "research": [],
+      "enriched": true,
+      "confidence": "high",
+      "signal_type": "t1-baseline",
+      "qualifying_days_count": 2
+    },
+    {
+      "ticker": "QRVX",
+      "name": null,
+      "families": [
+        "dark_pool"
+      ],
+      "evidence": [
+        {
+          "family": "dark_pool",
+          "text": "Dark pool ~6.4x its recent average; short history",
+          "key": true,
+          "short": "Dark pool ~6.4x recent average (short history)"
+        },
+        {
+          "family": "lifecycle",
+          "text": "TIP signal state NEW",
+          "key": false,
+          "short": "TIP signal state NEW"
+        },
+        {
+          "family": "price",
+          "text": "Price +0.3% at 70.40",
+          "key": true,
+          "short": "Price +0.3% at 70.40"
+        }
+      ],
+      "current_read": "Dark-pool activity well above normal; no corresponding price response.",
+      "headline": "Dark pool ~6.4x recent average (short history)",
+      "label": "DARK POOL",
+      "categories": [
+        "dark_pool"
+      ],
+      "index_context": false,
+      "question": null,
+      "research": [],
+      "enriched": true,
+      "confidence": "high",
+      "signal_type": "multi-signal",
+      "qualifying_days_count": 0
+    },
+    {
+      "ticker": "TEPID",
+      "name": null,
+      "families": [
+        "dark_pool"
+      ],
+      "evidence": [
+        {
+          "family": "dark_pool",
+          "text": "Dark pool ~5.0x its recent average; short history",
+          "key": true,
+          "short": "Dark pool ~5.0x recent average (short history)"
+        },
+        {
+          "family": "lifecycle",
+          "text": "TIP signal state NEW",
+          "key": false,
+          "short": "TIP signal state NEW"
+        },
+        {
+          "family": "price",
+          "text": "Price +1.6% at 20.18",
+          "key": true,
+          "short": "Price +1.6% at 20.18"
+        }
+      ],
+      "current_read": "Dark-pool activity well above normal; stock rose 1.6%.",
+      "headline": "Dark pool ~5.0x recent average (short history)",
+      "label": "DARK POOL",
+      "categories": [
+        "dark_pool"
+      ],
+      "index_context": false,
+      "question": null,
+      "research": [],
+      "enriched": true,
+      "confidence": "high",
+      "signal_type": "t1-baseline",
+      "qualifying_days_count": 0
+    },
+    {
+      "ticker": "BRNX",
+      "name": null,
+      "families": [
+        "options"
+      ],
+      "evidence": [
+        {
+          "family": "lifecycle",
+          "text": "TIP signal state NEW",
+          "key": false,
+          "short": "TIP signal state NEW"
+        },
+        {
+          "family": "price",
+          "text": "Price -2.1% at 60.80",
+          "key": true,
+          "short": "Price -2.1% at 60.80"
+        }
+      ],
+      "current_read": "Unusual options volume; stock fell 2.1%.",
+      "headline": "Options flow anomaly",
+      "label": "OPTIONS",
+      "categories": [
+        "options"
+      ],
+      "index_context": false,
+      "question": null,
+      "research": [],
+      "enriched": true,
+      "confidence": "low",
+      "signal_type": "t1-bootstrap",
+      "qualifying_days_count": 0
+    },
+    {
+      "ticker": "CATX",
+      "name": null,
+      "families": [
+        "options"
+      ],
+      "evidence": [
+        {
+          "family": "lifecycle",
+          "text": "TIP signal state NEW",
+          "key": false,
+          "short": "TIP signal state NEW"
+        },
+        {
+          "family": "price",
+          "text": "Price +2.4% at 28.05",
+          "key": true,
+          "short": "Price +2.4% at 28.05"
+        }
+      ],
+      "current_read": "Unusual options volume; stock rose 2.4%.",
+      "headline": "Options flow anomaly",
+      "label": "OPTIONS",
+      "categories": [
+        "options"
+      ],
+      "index_context": false,
+      "question": null,
+      "research": [],
+      "enriched": true,
+      "confidence": "low",
+      "signal_type": "t1-bootstrap",
+      "qualifying_days_count": 0
+    },
+    {
+      "ticker": "CONFL",
+      "name": null,
+      "families": [
+        "options"
+      ],
+      "evidence": [
+        {
+          "family": "lifecycle",
+          "text": "TIP signal state NEW",
+          "key": false,
+          "short": "TIP signal state NEW"
+        },
+        {
+          "family": "price",
+          "text": "Price -1.8% at 44.95",
+          "key": true,
+          "short": "Price -1.8% at 44.95"
+        }
+      ],
+      "current_read": "Unusual options volume; stock fell 1.8%.",
+      "headline": "Options flow anomaly",
+      "label": "OPTIONS",
+      "categories": [
+        "options"
+      ],
+      "index_context": false,
+      "question": null,
+      "research": [],
+      "enriched": true,
+      "confidence": "low",
+      "signal_type": "t1-bootstrap",
+      "qualifying_days_count": 0
+    },
+    {
+      "ticker": "ZYNC",
+      "name": null,
+      "families": [
+        "options"
+      ],
+      "evidence": [
+        {
+          "family": "lifecycle",
+          "text": "TIP signal state NEW",
+          "key": false,
+          "short": "TIP signal state NEW"
+        },
+        {
+          "family": "price",
+          "text": "Price +1.4% at 84.95",
+          "key": true,
+          "short": "Price +1.4% at 84.95"
+        }
+      ],
+      "current_read": "Unusual options volume; stock rose 1.4%.",
+      "headline": "Options flow anomaly",
+      "label": "OPTIONS",
+      "categories": [
+        "options"
+      ],
+      "index_context": false,
+      "question": null,
+      "research": [],
+      "enriched": true,
+      "confidence": "low",
+      "signal_type": "t1-bootstrap",
+      "qualifying_days_count": 0
+    }
+  ],
+  "scanned": 11
+}

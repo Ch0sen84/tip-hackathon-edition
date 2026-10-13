@@ -1,0 +1,168 @@
+{
+  "synthetic": true,
+  "ticker": "VOLX",
+  "scenario_name": "Multi-signal confirmation (distinct gate pair from FLUX)",
+  "description": "FLUX already exercises multi_signal_confirmation via dark_pool_anomaly + options_flow_anomaly. Checked before adding this: classify_confidence's multi-signal branch always returns 'high' confidence regardless of WHICH two gates contributed, so no distinct confidence level is reachable for a second multi-signal scenario -- documenting that finding instead of fabricating a different confidence label. This scenario instead contributes a genuinely different PAIR of gates: options_flow_anomaly + historical_percentile, with ZERO dark-pool activity at all (darkpool_trades is empty, so dark_pool_anomaly is bootstrap/false here). A single large one-sided call sweep ($21M, ask_share ~96%) both clears the options_flow_anomaly one-sided+premium threshold AND, because historical_percentile's today_premium input sums dark-pool + options premium, pushes the synthetic percentile estimator to 0.98 (>=0.95 passes). Two of four gates passing (options_flow_anomaly, historical_percentile) trips multi_signal_confirmation even though dark_pool_anomaly itself never fires -- proving multi-signal confidence isn't just 'FLUX's specific combination' hardcoded elsewhere.",
+  "flow_alerts": [
+    {
+      "ticker_symbol": "VOLX",
+      "total_premium": 21000000,
+      "total_ask_premium": 20200000,
+      "total_bid_premium": 800000,
+      "has_sweep": true,
+      "has_multileg": false,
+      "is_call": true,
+      "is_put": false,
+      "underlying_price": 152.3,
+      "created_at": "2026-10-12T14:00:00Z"
+    }
+  ],
+  "darkpool_trades": [],
+  "stock_state": {
+    "ticker": "VOLX",
+    "last_price": 155.1,
+    "change_percent": 1.9
+  },
+  "ohlc": [
+    {
+      "date": "2026-09-23",
+      "open": 144.94,
+      "high": 146.79,
+      "low": 144.23,
+      "close": 145.35,
+      "volume": 2206327,
+      "market_time": "r",
+      "total_volume": 2206327
+    },
+    {
+      "date": "2026-09-24",
+      "open": 145.77,
+      "high": 147.5,
+      "low": 145.01,
+      "close": 146.74,
+      "volume": 1146439,
+      "market_time": "r",
+      "total_volume": 1146439
+    },
+    {
+      "date": "2026-09-25",
+      "open": 146.53,
+      "high": 147.3,
+      "low": 145.93,
+      "close": 146.71,
+      "volume": 1461413,
+      "market_time": "r",
+      "total_volume": 1461413
+    },
+    {
+      "date": "2026-09-28",
+      "open": 148.29,
+      "high": 148.63,
+      "low": 147.02,
+      "close": 147.75,
+      "volume": 1377537,
+      "market_time": "r",
+      "total_volume": 1377537
+    },
+    {
+      "date": "2026-09-29",
+      "open": 148.78,
+      "high": 149.76,
+      "low": 147.47,
+      "close": 148.37,
+      "volume": 941566,
+      "market_time": "r",
+      "total_volume": 941566
+    },
+    {
+      "date": "2026-09-30",
+      "open": 149.84,
+      "high": 150.18,
+      "low": 147.84,
+      "close": 148.77,
+      "volume": 1815873,
+      "market_time": "r",
+      "total_volume": 1815873
+    },
+    {
+      "date": "2026-10-01",
+      "open": 150.53,
+      "high": 151.5,
+      "low": 148.59,
+      "close": 149.77,
+      "volume": 2378843,
+      "market_time": "r",
+      "total_volume": 2378843
+    },
+    {
+      "date": "2026-10-02",
+      "open": 150.95,
+      "high": 151.94,
+      "low": 149.24,
+      "close": 149.76,
+      "volume": 860807,
+      "market_time": "r",
+      "total_volume": 860807
+    },
+    {
+      "date": "2026-10-05",
+      "open": 150.25,
+      "high": 151.62,
+      "low": 149.95,
+      "close": 150.68,
+      "volume": 1236804,
+      "market_time": "r",
+      "total_volume": 1236804
+    },
+    {
+      "date": "2026-10-06",
+      "open": 151.85,
+      "high": 153.04,
+      "low": 151.2,
+      "close": 151.2,
+      "volume": 2009827,
+      "market_time": "r",
+      "total_volume": 2009827
+    },
+    {
+      "date": "2026-10-07",
+      "open": 152.1,
+      "high": 152.96,
+      "low": 151.34,
+      "close": 152.74,
+      "volume": 1338870,
+      "market_time": "r",
+      "total_volume": 1338870
+    },
+    {
+      "date": "2026-10-08",
+      "open": 153.39,
+      "high": 154.45,
+      "low": 152.43,
+      "close": 153.32,
+      "volume": 2411164,
+      "market_time": "r",
+      "total_volume": 2411164
+    },
+    {
+      "date": "2026-10-09",
+      "open": 154.0,
+      "high": 154.98,
+      "low": 153.25,
+      "close": 153.57,
+      "volume": 2176316,
+      "market_time": "r",
+      "total_volume": 2176316
+    },
+    {
+      "date": "2026-10-12",
+      "open": 154.29,
+      "high": 156.28,
+      "low": 152.01,
+      "close": 155.1,
+      "volume": 1241505,
+      "market_time": "r",
+      "total_volume": 1241505
+    }
+  ]
+}

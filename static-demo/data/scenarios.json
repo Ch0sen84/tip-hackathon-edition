@@ -1,1 +1,59 @@
-{"scenarios":[{"ticker":"DRFT","scenario_name":"Fading signal","description":"This scan has no qualifying activity at all for a ticker whose current_state (seeded separately in tests/demo seed data) is CONFIRMED. Used to exercise the CONFIRMED -> FADING transition rule (no_gate_passed_while_confirmed), not the NEW path."},{"ticker":"FLUX","scenario_name":"Multi-signal confirmation","description":"Dark-pool anomaly AND one-sided options flow anomaly fire in the same scan. Exercises multi_signal_confirmation -> classify_confidence returns 'high' via the multi-signal path (not the single-gate paths)."},{"ticker":"NADA","scenario_name":"Quiet control (negative case)","description":"Ordinary low-premium flow and a dark-pool print near its own baseline. No gate should pass. Exercises the NEW ticker with zero qualifying gates -> proves the engine does not always say yes."},{"ticker":"QRVX","scenario_name":"Dark-pool print anomaly","description":"Single large dark-pool print at ~6.4x its (fabricated) trailing average baseline. Exercises the dark_pool_anomaly gate alone, with a strong ratio pushing confidence to 'high'."},{"ticker":"ZYNC","scenario_name":"Large call-side sweep","description":"One-sided ask-side call sweep with no corresponding dark-pool activity. Exercises the options_flow_anomaly gate alone (single-signal, not multi-signal)."}]}
+{
+  "scenarios": [
+    {
+      "ticker": "BRNX",
+      "scenario_name": "Options-only, bearish/put-side (distinct from ZYNC)",
+      "description": "Checked ZYNC before adding this: ZYNC is a single-gate options_flow_anomaly scenario (call-side, bullish-lean), but classify_confidence has NO dedicated branch for options_flow_anomaly passing alone -- the function falls through to the dark_pool-bootstrap low-confidence branch whenever there is no darkpool history, regardless of options_flow_anomaly's own passed=true. Verified this is the real, ported-verbatim production behavior (options flow alone is intentionally never an independently-qualifying signal in this engine -- it only counts toward multi_signal_confirmation or provides a price_confirmation direction lean), not a bug introduced in this repo; documenting rather than fixing it, per the no-threshold/no-logic-change instruction. This scenario demonstrates the SAME real behavior on the opposite (put/bearish) side for direction-agnostic coverage: a one-sided put sweep (ask_share ~8%, i.e. bid-dominant) drives direction_heuristic to 'bearish-lean', and because the stock genuinely fell -2.1% that session, price_confirmation.metrics.confirmed is True here (distinct from ZYNC, where the bullish lean was confirmed by a price RISE) -- same engine code path, opposite real-world direction, both correctly confirmed."
+    },
+    {
+      "ticker": "CATX",
+      "scenario_name": "Manually curated catalyst_identified (demonstration only)",
+      "description": "signal_engine.py's own gate docstring for catalyst_identified says: 'not auto-computed -- set explicitly when a real catalyst is found'. Verified that is true end-to-end: backend/app/core/scan_service.py previously hardcoded catalyst_identified=False with no way for any adapter to supply a different value. This scenario adds the plumbing (fixtures/*.json may now carry an optional top-level \"catalyst_identified\": true/false field; SyntheticDataAdapter.get_catalyst_identified() reads it, LiveUWAdapter inherits the base class's default False since the engine never auto-detects catalysts live either) and sets it to true here purely to demonstrate the gate rendering as a passed DATA_LIMITATION-category entry (per frontend/app.core.js's classification rule: catalyst_identified is provenance/curation metadata, not a market observation, so it belongs in DATA_LIMITATION regardless of pass/fail) -- this field is MANUALLY CURATED for this one demo fixture, never auto-detected by the engine, and must never be described as an auto-detection capability anywhere in submission materials. The scenario also carries a real one-sided bullish call sweep (options_flow_anomaly passes) with price confirmation passing, so catalyst_identified=true appears alongside genuine SUPPORTING evidence rather than in isolation."
+    },
+    {
+      "ticker": "CONFL",
+      "scenario_name": "Conflicting price confirmation",
+      "description": "Bullish-lean one-sided call sweep (ask_share ~97%, total_premium $1.8M) fires options_flow_anomaly -- but the stock FELL -1.8% in the same session. price_confirmation.metrics.confirmed is explicitly False (a genuine directional mismatch between the options lean and the realized price move), not merely an unevaluated/no-data gate. This is the first scenario in this repo's history built specifically to make gates.price_confirmation.metrics.confirmed === false happen for real (flagged as an unverified gap across three prior sessions) -- it must be visually confirmed rendering under the CONFLICTING evidence-classification bucket in Ticker Analysis (frontend/app.core.js's GATE_CATEGORY.CONFLICTING branch), not just asserted by a unit test. No darkpool activity is included so the scenario isolates the options-vs-price conflict without a second signal muddying the picture; this also means dark_pool_anomaly is bootstrap (no history), same as other no-darkpool scenarios in this set."
+    },
+    {
+      "ticker": "DRFT",
+      "scenario_name": "Fading signal",
+      "description": "This scan has no qualifying activity at all for a ticker whose current_state (seeded separately in tests/demo seed data) is CONFIRMED. Used to exercise the CONFIRMED -> FADING transition rule (no_gate_passed_while_confirmed), not the NEW path."
+    },
+    {
+      "ticker": "FLUX",
+      "scenario_name": "Multi-signal confirmation",
+      "description": "Dark-pool anomaly AND one-sided options flow anomaly fire in the same scan. Exercises multi_signal_confirmation -> classify_confidence returns 'high' via the multi-signal path (not the single-gate paths)."
+    },
+    {
+      "ticker": "NADA",
+      "scenario_name": "Quiet control (negative case)",
+      "description": "Ordinary low-premium flow and a dark-pool print near its own baseline. No gate should pass. Exercises the NEW ticker with zero qualifying gates -> proves the engine does not always say yes."
+    },
+    {
+      "ticker": "PRSX",
+      "scenario_name": "Multi-day persistence progression (NEW -> BUILDING -> CONFIRMED)",
+      "description": "Single dark-pool-anomaly signal (ratio ~3.9x baseline, kept deliberately below the historical_percentile 10M-premium bucket so this stays single-signal, not multi-signal -- an earlier draft of this fixture used a larger premium that accidentally ALSO tripped historical_percentile, making PRSX multi-signal and reaching CONFIRMED a day too early; caught by this scenario's own test and fixed by lowering the premium, not by touching any threshold), used to demonstrate a REAL multi-day lifecycle trajectory rather than a single-scan snapshot relabeled. backend/app/seed_demo_history.py backfills two real, distinct scan_date entries (today-2, today-1) into the local SQLite scan log at process startup, using this exact fixture data run through the real scan_service.evaluate_ticker_scan on each backdated day (current_state threaded forward exactly as backend/app/main.py does for a live scan) -- NOT a hardcoded state label. Day 1 (current_state=None) computes NEW. Day 2 (current_state=NEW, qualifying_days_count=1) computes BUILDING. When this ticker is then scanned live (today, via the normal /api/ticker/PRSX or /api/radar route), current_state=BUILDING and qualifying_days_count=2 are read back from that real backfilled history, and the REAL determine_transition() computes CONFIRMED via its existing 'qualifying_days_count>=2' rule -- the exact same rule a live-mode ticker would hit after two genuinely separate calendar-day scans. Known limitation, documented plainly: the named 'persistence' GATE itself (tier2_hit/is_new_qualifying_day) is still always False through backend/app/core/scan_service.py's build_gate_inputs (those two inputs are hardcoded there, unrelated to this scenario) -- this scenario demonstrates the qualifying_days_count persistence MECHANIC in determine_transition, which is what actually drives BUILDING->CONFIRMED multi-day progression in this engine, not the separately-named 'persistence' gate."
+    },
+    {
+      "ticker": "QRVX",
+      "scenario_name": "Dark-pool print anomaly",
+      "description": "Single large dark-pool print at ~6.4x its (fabricated) trailing average baseline. Exercises the dark_pool_anomaly gate alone, with a strong ratio pushing confidence to 'high'."
+    },
+    {
+      "ticker": "TEPID",
+      "scenario_name": "Dark-pool-only with an evaluated price confirmation (distinct from QRVX)",
+      "description": "Checked QRVX before adding this: QRVX has zero flow_alerts, so direction_heuristic is always None there and price_confirmation never evaluates (metrics.confirmed stays null -- a DATA_LIMITATION, not a result). This scenario keeps the same single dark-pool-anomaly shape (strong ratio ~5.0x baseline, bootstrap=false, high confidence via t1-baseline) but adds a SMALL options flow alert ($480K total premium -- below the $1M options_flow_anomaly threshold, so that gate still correctly fails/stays single-signal) purely to supply a directional lean (ask_share ~90% -> bullish-lean) that price_confirmation can act on. The stock rose +1.6% that session, matching the lean, so price_confirmation.metrics.confirmed is True here -- demonstrating price_confirmation operates independently of whether options_flow_anomaly itself qualifies. Dark-pool premium was kept below the historical_percentile's 10M-premium (0.95) bucket on purpose (today_premium = darkpool + options ~= $8.48M) so this stays a genuine single-gate dark-pool-only scenario and does not accidentally become multi-signal."
+    },
+    {
+      "ticker": "VOLX",
+      "scenario_name": "Multi-signal confirmation (distinct gate pair from FLUX)",
+      "description": "FLUX already exercises multi_signal_confirmation via dark_pool_anomaly + options_flow_anomaly. Checked before adding this: classify_confidence's multi-signal branch always returns 'high' confidence regardless of WHICH two gates contributed, so no distinct confidence level is reachable for a second multi-signal scenario -- documenting that finding instead of fabricating a different confidence label. This scenario instead contributes a genuinely different PAIR of gates: options_flow_anomaly + historical_percentile, with ZERO dark-pool activity at all (darkpool_trades is empty, so dark_pool_anomaly is bootstrap/false here). A single large one-sided call sweep ($21M, ask_share ~96%) both clears the options_flow_anomaly one-sided+premium threshold AND, because historical_percentile's today_premium input sums dark-pool + options premium, pushes the synthetic percentile estimator to 0.98 (>=0.95 passes). Two of four gates passing (options_flow_anomaly, historical_percentile) trips multi_signal_confirmation even though dark_pool_anomaly itself never fires -- proving multi-signal confidence isn't just 'FLUX's specific combination' hardcoded elsewhere."
+    },
+    {
+      "ticker": "ZYNC",
+      "scenario_name": "Large call-side sweep",
+      "description": "One-sided ask-side call sweep with no corresponding dark-pool activity. Exercises the options_flow_anomaly gate alone (single-signal, not multi-signal)."
+    }
+  ]
+}

@@ -22,3 +22,4 @@ if [ -x backend/.venv_run/bin/python ]; then
   PY=backend/.venv_run/bin/python
 fi
 "$PY" tools/capture_static_ohlc.py
+"$PY" tools/capture_static_demo_data.py

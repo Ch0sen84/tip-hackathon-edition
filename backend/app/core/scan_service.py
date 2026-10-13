@@ -108,7 +108,8 @@ def _direction_heuristic(options_metrics: dict, darkpool_metrics: dict) -> Optio
 def build_gate_inputs(ticker: str, flow_alerts: list, darkpool_trades: list,
                        price_move_pct: Optional[float] = None,
                        is_new_qualifying_day: bool = False,
-                       api_errors: int = 0) -> dict:
+                       api_errors: int = 0,
+                       catalyst_identified: bool = False) -> dict:
     """Pure transform: raw UW-shaped lists -> the keyword arguments
     signal_engine.evaluate_gates expects. Exposed separately from
     evaluate_ticker_scan so tests can assert on the intermediate shape."""
@@ -125,7 +126,7 @@ def build_gate_inputs(ticker: str, flow_alerts: list, darkpool_trades: list,
         today_premium=today_premium if today_premium > 0 else None,
         is_new_qualifying_day=is_new_qualifying_day,
         price_move_pct=price_move_pct, direction_heuristic=direction,
-        catalyst_identified=False, api_errors=api_errors,
+        catalyst_identified=catalyst_identified, api_errors=api_errors,
     )
 
 
@@ -134,6 +135,7 @@ def evaluate_ticker_scan(ticker: str, flow_alerts: list, darkpool_trades: list,
                           price_move_pct: Optional[float] = None,
                           is_new_qualifying_day: bool = False,
                           api_errors: int = 0,
+                          catalyst_identified: bool = False,
                           percentile_gate_fn=None) -> dict:
     """End-to-end: raw adapter data -> gates -> confidence -> state
     transition. Returns everything the API layer needs to render both
@@ -141,7 +143,8 @@ def evaluate_ticker_scan(ticker: str, flow_alerts: list, darkpool_trades: list,
     inputs = build_gate_inputs(ticker, flow_alerts, darkpool_trades,
                                 price_move_pct=price_move_pct,
                                 is_new_qualifying_day=is_new_qualifying_day,
-                                api_errors=api_errors)
+                                api_errors=api_errors,
+                                catalyst_identified=catalyst_identified)
     direction = inputs["direction_heuristic"]
     gates = se.evaluate_gates(percentile_gate_fn=percentile_gate_fn, **inputs)
     confidence, signal_type, reason, qualifies = se.classify_confidence(gates)

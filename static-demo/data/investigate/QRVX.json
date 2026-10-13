@@ -1,1 +1,35 @@
-{"ticker":"QRVX","simulated":true,"simulated_label":"Simulated agent walkthrough -- not live UW data, not a real AI call","tools_used":["get_dark_pool_trades","get_flow_alerts","get_institutional_ownership_by_ticker"],"observed_facts":[{"fact":"A single dark-pool print for QRVX was recorded with premium and size well above this ticker's typical recent range (see raw adapter data in Ticker Analysis for exact figures).","source_tool":"get_dark_pool_trades"},{"fact":"No flagged option sweeps were returned for QRVX in the same window.","source_tool":"get_flow_alerts"},{"fact":"Institutional ownership data for QRVX was unavailable in this simulated run (endpoint returned no data).","source_tool":"get_institutional_ownership_by_ticker"}],"supporting_evidence":["An unusually large dark-pool print with no accompanying options-flow signal is a single-signal pattern (dark-pool anomaly alone), not a multi-signal confirmation."],"conflicting_observations":["No conflicting observations were produced across the tools actually called this run."],"limitations":["Dark-pool prints do not identify the counterparties or their intent -- only size, price, and timing are observable.","Institutional ownership data could not be retrieved in this simulated run, so a 13F-level cross-check is missing."],"ai_interpretation":"A single outsized dark-pool print without corroborating options flow is consistent with what Market Radar already flagged as a dark-pool-only anomaly. On its own, one large print does not establish a trend, and nothing here identifies who executed it or why. This is a description of the retrieved data, not a forecast of QRVX's price and not a trade recommendation."}
+{
+  "ticker": "QRVX",
+  "simulated": true,
+  "simulated_label": "Simulated agent walkthrough -- not live UW data, not a real AI call",
+  "tools_used": [
+    "get_dark_pool_trades",
+    "get_flow_alerts",
+    "get_institutional_ownership_by_ticker"
+  ],
+  "observed_facts": [
+    {
+      "fact": "A single dark-pool print for QRVX was recorded with premium and size well above this ticker's typical recent range (see raw adapter data in Ticker Analysis for exact figures).",
+      "source_tool": "get_dark_pool_trades"
+    },
+    {
+      "fact": "No flagged option sweeps were returned for QRVX in the same window.",
+      "source_tool": "get_flow_alerts"
+    },
+    {
+      "fact": "Institutional ownership data for QRVX was unavailable in this simulated run (endpoint returned no data).",
+      "source_tool": "get_institutional_ownership_by_ticker"
+    }
+  ],
+  "supporting_evidence": [
+    "An unusually large dark-pool print with no accompanying options-flow signal is a single-signal pattern (dark-pool anomaly alone), not a multi-signal confirmation."
+  ],
+  "conflicting_observations": [
+    "No conflicting observations were produced across the tools actually called this run."
+  ],
+  "limitations": [
+    "Dark-pool prints do not identify the counterparties or their intent -- only size, price, and timing are observable.",
+    "Institutional ownership data could not be retrieved in this simulated run, so a 13F-level cross-check is missing."
+  ],
+  "ai_interpretation": "A single outsized dark-pool print without corroborating options flow is consistent with what Market Radar already flagged as a dark-pool-only anomaly. On its own, one large print does not establish a trend, and nothing here identifies who executed it or why. This is a description of the retrieved data, not a forecast of QRVX's price and not a trade recommendation."
+}

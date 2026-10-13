@@ -1,0 +1,169 @@
+{
+  "synthetic": true,
+  "ticker": "CATX",
+  "scenario_name": "Manually curated catalyst_identified (demonstration only)",
+  "description": "signal_engine.py's own gate docstring for catalyst_identified says: 'not auto-computed -- set explicitly when a real catalyst is found'. Verified that is true end-to-end: backend/app/core/scan_service.py previously hardcoded catalyst_identified=False with no way for any adapter to supply a different value. This scenario adds the plumbing (fixtures/*.json may now carry an optional top-level \"catalyst_identified\": true/false field; SyntheticDataAdapter.get_catalyst_identified() reads it, LiveUWAdapter inherits the base class's default False since the engine never auto-detects catalysts live either) and sets it to true here purely to demonstrate the gate rendering as a passed DATA_LIMITATION-category entry (per frontend/app.core.js's classification rule: catalyst_identified is provenance/curation metadata, not a market observation, so it belongs in DATA_LIMITATION regardless of pass/fail) -- this field is MANUALLY CURATED for this one demo fixture, never auto-detected by the engine, and must never be described as an auto-detection capability anywhere in submission materials. The scenario also carries a real one-sided bullish call sweep (options_flow_anomaly passes) with price confirmation passing, so catalyst_identified=true appears alongside genuine SUPPORTING evidence rather than in isolation.",
+  "catalyst_identified": true,
+  "flow_alerts": [
+    {
+      "ticker_symbol": "CATX",
+      "total_premium": 1350000,
+      "total_ask_premium": 1270000,
+      "total_bid_premium": 80000,
+      "has_sweep": true,
+      "has_multileg": false,
+      "is_call": true,
+      "is_put": false,
+      "underlying_price": 27.4,
+      "created_at": "2026-10-12T13:50:00Z"
+    }
+  ],
+  "darkpool_trades": [],
+  "stock_state": {
+    "ticker": "CATX",
+    "last_price": 28.05,
+    "change_percent": 2.4
+  },
+  "ohlc": [
+    {
+      "date": "2026-09-23",
+      "open": 29.2,
+      "high": 29.42,
+      "low": 29.0,
+      "close": 29.09,
+      "volume": 1993976,
+      "market_time": "r",
+      "total_volume": 1993976
+    },
+    {
+      "date": "2026-09-24",
+      "open": 28.96,
+      "high": 29.15,
+      "low": 28.82,
+      "close": 29.01,
+      "volume": 1175001,
+      "market_time": "r",
+      "total_volume": 1175001
+    },
+    {
+      "date": "2026-09-25",
+      "open": 29.01,
+      "high": 29.24,
+      "low": 28.81,
+      "close": 29.01,
+      "volume": 1532744,
+      "market_time": "r",
+      "total_volume": 1532744
+    },
+    {
+      "date": "2026-09-28",
+      "open": 28.88,
+      "high": 28.99,
+      "low": 28.74,
+      "close": 28.74,
+      "volume": 2340885,
+      "market_time": "r",
+      "total_volume": 2340885
+    },
+    {
+      "date": "2026-09-29",
+      "open": 28.56,
+      "high": 28.92,
+      "low": 28.46,
+      "close": 28.79,
+      "volume": 2170475,
+      "market_time": "r",
+      "total_volume": 2170475
+    },
+    {
+      "date": "2026-09-30",
+      "open": 28.67,
+      "high": 28.8,
+      "low": 28.46,
+      "close": 28.59,
+      "volume": 1126172,
+      "market_time": "r",
+      "total_volume": 1126172
+    },
+    {
+      "date": "2026-10-01",
+      "open": 28.29,
+      "high": 28.66,
+      "low": 28.08,
+      "close": 28.54,
+      "volume": 1458677,
+      "market_time": "r",
+      "total_volume": 1458677
+    },
+    {
+      "date": "2026-10-02",
+      "open": 28.18,
+      "high": 28.47,
+      "low": 28.1,
+      "close": 28.4,
+      "volume": 1892854,
+      "market_time": "r",
+      "total_volume": 1892854
+    },
+    {
+      "date": "2026-10-05",
+      "open": 28.24,
+      "high": 28.35,
+      "low": 28.15,
+      "close": 28.29,
+      "volume": 2481816,
+      "market_time": "r",
+      "total_volume": 2481816
+    },
+    {
+      "date": "2026-10-06",
+      "open": 27.98,
+      "high": 28.24,
+      "low": 27.77,
+      "close": 27.99,
+      "volume": 2117281,
+      "market_time": "r",
+      "total_volume": 2117281
+    },
+    {
+      "date": "2026-10-07",
+      "open": 27.84,
+      "high": 28.18,
+      "low": 27.75,
+      "close": 27.9,
+      "volume": 2369958,
+      "market_time": "r",
+      "total_volume": 2369958
+    },
+    {
+      "date": "2026-10-08",
+      "open": 27.77,
+      "high": 27.93,
+      "low": 27.68,
+      "close": 27.82,
+      "volume": 1698149,
+      "market_time": "r",
+      "total_volume": 1698149
+    },
+    {
+      "date": "2026-10-09",
+      "open": 27.65,
+      "high": 27.79,
+      "low": 27.48,
+      "close": 27.79,
+      "volume": 2323539,
+      "market_time": "r",
+      "total_volume": 2323539
+    },
+    {
+      "date": "2026-10-12",
+      "open": 27.82,
+      "high": 28.05,
+      "low": 27.28,
+      "close": 28.05,
+      "volume": 2292251,
+      "market_time": "r",
+      "total_volume": 2292251
+    }
+  ]
+}

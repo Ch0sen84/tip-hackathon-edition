@@ -46,5 +46,19 @@ class UWDataAdapter(ABC):
         series -- so callers degrade gracefully instead of guessing."""
         raise NotImplementedError
 
+    def get_catalyst_identified(self, ticker: str) -> bool:
+        """Whether a real catalyst has been explicitly identified for this
+        ticker. NOT abstract -- defaults to False for every adapter,
+        because signal_engine.py's catalyst_identified gate is, by its own
+        docstring, 'not auto-computed -- set explicitly when a real
+        catalyst is found'. Neither SyntheticDataAdapter's fixtures nor
+        LiveUWAdapter's real UW calls can auto-detect a catalyst; only
+        SyntheticDataAdapter overrides this (reading an optional,
+        manually-curated fixture field) to demonstrate the gate at all.
+        LiveUWAdapter inherits this default (always False) until/unless a
+        real editorial catalyst-flagging workflow is added -- never fabricate
+        auto-detection here."""
+        return False
+
     def health(self) -> dict:
         return {"mode": getattr(self, "mode", "unknown")}

@@ -1,0 +1,164 @@
+{
+  "synthetic": true,
+  "ticker": "PRSX",
+  "scenario_name": "Multi-day persistence progression (NEW -> BUILDING -> CONFIRMED)",
+  "description": "Single dark-pool-anomaly signal (ratio ~3.9x baseline, kept deliberately below the historical_percentile 10M-premium bucket so this stays single-signal, not multi-signal -- an earlier draft of this fixture used a larger premium that accidentally ALSO tripped historical_percentile, making PRSX multi-signal and reaching CONFIRMED a day too early; caught by this scenario's own test and fixed by lowering the premium, not by touching any threshold), used to demonstrate a REAL multi-day lifecycle trajectory rather than a single-scan snapshot relabeled. backend/app/seed_demo_history.py backfills two real, distinct scan_date entries (today-2, today-1) into the local SQLite scan log at process startup, using this exact fixture data run through the real scan_service.evaluate_ticker_scan on each backdated day (current_state threaded forward exactly as backend/app/main.py does for a live scan) -- NOT a hardcoded state label. Day 1 (current_state=None) computes NEW. Day 2 (current_state=NEW, qualifying_days_count=1) computes BUILDING. When this ticker is then scanned live (today, via the normal /api/ticker/PRSX or /api/radar route), current_state=BUILDING and qualifying_days_count=2 are read back from that real backfilled history, and the REAL determine_transition() computes CONFIRMED via its existing 'qualifying_days_count>=2' rule -- the exact same rule a live-mode ticker would hit after two genuinely separate calendar-day scans. Known limitation, documented plainly: the named 'persistence' GATE itself (tier2_hit/is_new_qualifying_day) is still always False through backend/app/core/scan_service.py's build_gate_inputs (those two inputs are hardcoded there, unrelated to this scenario) -- this scenario demonstrates the qualifying_days_count persistence MECHANIC in determine_transition, which is what actually drives BUILDING->CONFIRMED multi-day progression in this engine, not the separately-named 'persistence' gate.",
+  "flow_alerts": [],
+  "darkpool_trades": [
+    {
+      "ticker": "PRSX",
+      "premium": 9800000,
+      "size": 118000,
+      "price": 38.4,
+      "executed_at": "2026-10-13T11:15:00Z",
+      "avg_premium_baseline": 2500000
+    }
+  ],
+  "stock_state": {
+    "ticker": "PRSX",
+    "last_price": 38.55,
+    "change_percent": 0.9
+  },
+  "ohlc": [
+    {
+      "date": "2026-09-24",
+      "open": 40.26,
+      "high": 40.57,
+      "low": 40.0,
+      "close": 40.31,
+      "volume": 1788602,
+      "market_time": "r",
+      "total_volume": 1788602
+    },
+    {
+      "date": "2026-09-25",
+      "open": 39.83,
+      "high": 40.19,
+      "low": 39.51,
+      "close": 39.94,
+      "volume": 2095429,
+      "market_time": "r",
+      "total_volume": 2095429
+    },
+    {
+      "date": "2026-09-28",
+      "open": 39.79,
+      "high": 40.14,
+      "low": 39.49,
+      "close": 39.87,
+      "volume": 1118660,
+      "market_time": "r",
+      "total_volume": 1118660
+    },
+    {
+      "date": "2026-09-29",
+      "open": 39.74,
+      "high": 39.96,
+      "low": 39.54,
+      "close": 39.78,
+      "volume": 1585226,
+      "market_time": "r",
+      "total_volume": 1585226
+    },
+    {
+      "date": "2026-09-30",
+      "open": 39.43,
+      "high": 39.74,
+      "low": 39.16,
+      "close": 39.74,
+      "volume": 962604,
+      "market_time": "r",
+      "total_volume": 962604
+    },
+    {
+      "date": "2026-10-01",
+      "open": 39.32,
+      "high": 39.7,
+      "low": 39.01,
+      "close": 39.35,
+      "volume": 922926,
+      "market_time": "r",
+      "total_volume": 922926
+    },
+    {
+      "date": "2026-10-02",
+      "open": 39.54,
+      "high": 39.72,
+      "low": 39.1,
+      "close": 39.25,
+      "volume": 2450423,
+      "market_time": "r",
+      "total_volume": 2450423
+    },
+    {
+      "date": "2026-10-05",
+      "open": 39.05,
+      "high": 39.27,
+      "low": 38.75,
+      "close": 39.27,
+      "volume": 2146833,
+      "market_time": "r",
+      "total_volume": 2146833
+    },
+    {
+      "date": "2026-10-06",
+      "open": 38.83,
+      "high": 39.14,
+      "low": 38.56,
+      "close": 39.04,
+      "volume": 1126543,
+      "market_time": "r",
+      "total_volume": 1126543
+    },
+    {
+      "date": "2026-10-07",
+      "open": 39.05,
+      "high": 39.11,
+      "low": 38.65,
+      "close": 38.8,
+      "volume": 1539152,
+      "market_time": "r",
+      "total_volume": 1539152
+    },
+    {
+      "date": "2026-10-08",
+      "open": 38.95,
+      "high": 39.02,
+      "low": 38.58,
+      "close": 38.74,
+      "volume": 1677115,
+      "market_time": "r",
+      "total_volume": 1677115
+    },
+    {
+      "date": "2026-10-09",
+      "open": 38.74,
+      "high": 38.9,
+      "low": 38.52,
+      "close": 38.75,
+      "volume": 2331963,
+      "market_time": "r",
+      "total_volume": 2331963
+    },
+    {
+      "date": "2026-10-12",
+      "open": 38.38,
+      "high": 38.61,
+      "low": 38.17,
+      "close": 38.44,
+      "volume": 1113628,
+      "market_time": "r",
+      "total_volume": 1113628
+    },
+    {
+      "date": "2026-10-13",
+      "open": 38.57,
+      "high": 39.19,
+      "low": 38.22,
+      "close": 38.55,
+      "volume": 1928350,
+      "market_time": "r",
+      "total_volume": 1928350
+    }
+  ]
+}

@@ -1,1 +1,107 @@
-{"ticker":"DRFT","state":"FADING","previous_state":"BUILDING","transition_rule":"no_gate_passed_while_building","confidence":"low","signal_type":"t1-bootstrap","confidence_reason":"Bootstrap-only, insufficient history -- not auto-qualified","qualifies":false,"qualifying_days_count":0,"gates":{"dark_pool_anomaly":{"passed":false,"metrics":{"ratio":null,"z_score":null,"bootstrap":true}},"options_flow_anomaly":{"passed":false,"metrics":{"reason":"no flow alerts this scan"}},"historical_percentile":{"passed":false,"metrics":{"reason":"not evaluated (no today_premium supplied)"}},"persistence":{"passed":false,"metrics":{"tier2_qualifying_prints":0,"tier2_max_pct":0.0,"is_new_qualifying_day":false}},"price_confirmation":{"passed":false,"metrics":{"price_move_pct":-0.2,"direction_heuristic":null,"confirmed":null}},"multi_signal_confirmation":{"passed":false,"metrics":{"contributing_gates":[]}},"catalyst_identified":{"passed":false,"metrics":{"note":"not auto-computed -- set explicitly when a real catalyst is found"}},"data_quality":{"passed":false,"metrics":{"api_errors":0,"bootstrap":true}}},"headline":"Unusual activity","current_read":"Unusual activity; stock little changed.","evidence":[{"family":"price","text":"Price -0.2% at 55.02","key":true,"short":"Price -0.2% at 55.02"}],"stock_state":{"ticker":"DRFT","last_price":55.02,"change_percent":-0.2},"history":[{"scan_date":"2026-10-13","any_gate_passed":false,"state":"NEW","created_at":"2026-10-13 02:45:55"},{"scan_date":"2026-10-13","any_gate_passed":false,"state":"BUILDING","created_at":"2026-10-13 03:04:09"},{"scan_date":"2026-10-13","any_gate_passed":false,"state":"FADING","created_at":"2026-10-13 03:04:10"}],"raw":{"flow_alerts":[],"darkpool_trades":[]}}
+{
+  "ticker": "DRFT",
+  "state": "BUILDING",
+  "previous_state": "NEW",
+  "transition_rule": "single_signal_reevaluated",
+  "confidence": "low",
+  "signal_type": "t1-bootstrap",
+  "confidence_reason": "Bootstrap-only, insufficient history -- not auto-qualified",
+  "qualifies": false,
+  "qualifying_days_count": 0,
+  "gates": {
+    "dark_pool_anomaly": {
+      "passed": false,
+      "metrics": {
+        "ratio": null,
+        "z_score": null,
+        "bootstrap": true
+      }
+    },
+    "options_flow_anomaly": {
+      "passed": false,
+      "metrics": {
+        "reason": "no flow alerts this scan"
+      }
+    },
+    "historical_percentile": {
+      "passed": false,
+      "metrics": {
+        "reason": "not evaluated (no today_premium supplied)"
+      }
+    },
+    "persistence": {
+      "passed": false,
+      "metrics": {
+        "tier2_qualifying_prints": 0,
+        "tier2_max_pct": 0.0,
+        "is_new_qualifying_day": false
+      }
+    },
+    "price_confirmation": {
+      "passed": false,
+      "metrics": {
+        "price_move_pct": -0.2,
+        "direction_heuristic": null,
+        "confirmed": null
+      }
+    },
+    "multi_signal_confirmation": {
+      "passed": false,
+      "metrics": {
+        "contributing_gates": []
+      }
+    },
+    "catalyst_identified": {
+      "passed": false,
+      "metrics": {
+        "note": "not auto-computed -- set explicitly when a real catalyst is found"
+      }
+    },
+    "data_quality": {
+      "passed": false,
+      "metrics": {
+        "api_errors": 0,
+        "bootstrap": true
+      }
+    }
+  },
+  "headline": "Unusual activity",
+  "current_read": "Unusual activity; stock little changed.",
+  "evidence": [
+    {
+      "family": "lifecycle",
+      "text": "TIP signal state BUILDING",
+      "key": false,
+      "short": "TIP signal state BUILDING"
+    },
+    {
+      "family": "price",
+      "text": "Price -0.2% at 55.02",
+      "key": true,
+      "short": "Price -0.2% at 55.02"
+    }
+  ],
+  "stock_state": {
+    "ticker": "DRFT",
+    "last_price": 55.02,
+    "change_percent": -0.2
+  },
+  "history": [
+    {
+      "scan_date": "2026-10-13",
+      "any_gate_passed": false,
+      "state": "NEW",
+      "created_at": "2026-10-13 15:51:07"
+    },
+    {
+      "scan_date": "2026-10-13",
+      "any_gate_passed": false,
+      "state": "BUILDING",
+      "created_at": "2026-10-13 15:51:07"
+    }
+  ],
+  "raw": {
+    "flow_alerts": [],
+    "darkpool_trades": []
+  }
+}

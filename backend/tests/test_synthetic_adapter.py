@@ -5,10 +5,16 @@ from app.adapters.synthetic_adapter import SyntheticDataAdapter
 FIXTURES_DIR = Path(__file__).resolve().parents[2] / "fixtures"
 
 
+EXPECTED_UNIVERSE = {
+    "ZYNC", "QRVX", "FLUX", "NADA", "DRFT",  # original 5 (P1/P2 pass), unchanged
+    "CONFL", "PRSX", "VOLX", "BRNX", "TEPID", "CATX",  # P4 expansion (Stage 1)
+}
+
+
 def test_loads_all_scenario_fixtures():
     adapter = SyntheticDataAdapter(str(FIXTURES_DIR))
     universe = adapter.get_universe()
-    assert set(universe) == {"ZYNC", "QRVX", "FLUX", "NADA", "DRFT"}
+    assert set(universe) == EXPECTED_UNIVERSE
 
 
 def test_get_flow_alerts_well_formed_for_call_sweep():

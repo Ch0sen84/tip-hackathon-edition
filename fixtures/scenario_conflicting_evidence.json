@@ -1,0 +1,168 @@
+{
+  "synthetic": true,
+  "ticker": "CONFL",
+  "scenario_name": "Conflicting price confirmation",
+  "description": "Bullish-lean one-sided call sweep (ask_share ~97%, total_premium $1.8M) fires options_flow_anomaly -- but the stock FELL -1.8% in the same session. price_confirmation.metrics.confirmed is explicitly False (a genuine directional mismatch between the options lean and the realized price move), not merely an unevaluated/no-data gate. This is the first scenario in this repo's history built specifically to make gates.price_confirmation.metrics.confirmed === false happen for real (flagged as an unverified gap across three prior sessions) -- it must be visually confirmed rendering under the CONFLICTING evidence-classification bucket in Ticker Analysis (frontend/app.core.js's GATE_CATEGORY.CONFLICTING branch), not just asserted by a unit test. No darkpool activity is included so the scenario isolates the options-vs-price conflict without a second signal muddying the picture; this also means dark_pool_anomaly is bootstrap (no history), same as other no-darkpool scenarios in this set.",
+  "flow_alerts": [
+    {
+      "ticker_symbol": "CONFL",
+      "total_premium": 1800000,
+      "total_ask_premium": 1750000,
+      "total_bid_premium": 50000,
+      "has_sweep": true,
+      "has_multileg": false,
+      "is_call": true,
+      "is_put": false,
+      "underlying_price": 45.8,
+      "created_at": "2026-10-12T13:20:00Z"
+    }
+  ],
+  "darkpool_trades": [],
+  "stock_state": {
+    "ticker": "CONFL",
+    "last_price": 44.95,
+    "change_percent": -1.8
+  },
+  "ohlc": [
+    {
+      "date": "2026-09-23",
+      "open": 43.44,
+      "high": 43.6,
+      "low": 43.08,
+      "close": 43.45,
+      "volume": 1557002,
+      "market_time": "r",
+      "total_volume": 1557002
+    },
+    {
+      "date": "2026-09-24",
+      "open": 43.47,
+      "high": 43.83,
+      "low": 43.3,
+      "close": 43.72,
+      "volume": 862308,
+      "market_time": "r",
+      "total_volume": 862308
+    },
+    {
+      "date": "2026-09-25",
+      "open": 43.53,
+      "high": 43.96,
+      "low": 43.31,
+      "close": 43.6,
+      "volume": 1570611,
+      "market_time": "r",
+      "total_volume": 1570611
+    },
+    {
+      "date": "2026-09-28",
+      "open": 43.87,
+      "high": 44.15,
+      "low": 43.76,
+      "close": 43.76,
+      "volume": 1882002,
+      "market_time": "r",
+      "total_volume": 1882002
+    },
+    {
+      "date": "2026-09-29",
+      "open": 43.95,
+      "high": 44.33,
+      "low": 43.66,
+      "close": 44.04,
+      "volume": 1910875,
+      "market_time": "r",
+      "total_volume": 1910875
+    },
+    {
+      "date": "2026-09-30",
+      "open": 44.31,
+      "high": 44.41,
+      "low": 44.0,
+      "close": 44.31,
+      "volume": 1409137,
+      "market_time": "r",
+      "total_volume": 1409137
+    },
+    {
+      "date": "2026-10-01",
+      "open": 44.54,
+      "high": 44.62,
+      "low": 44.18,
+      "close": 44.36,
+      "volume": 823659,
+      "market_time": "r",
+      "total_volume": 823659
+    },
+    {
+      "date": "2026-10-02",
+      "open": 44.75,
+      "high": 44.89,
+      "low": 44.47,
+      "close": 44.55,
+      "volume": 1749518,
+      "market_time": "r",
+      "total_volume": 1749518
+    },
+    {
+      "date": "2026-10-05",
+      "open": 44.5,
+      "high": 44.93,
+      "low": 44.29,
+      "close": 44.79,
+      "volume": 2390163,
+      "market_time": "r",
+      "total_volume": 2390163
+    },
+    {
+      "date": "2026-10-06",
+      "open": 44.94,
+      "high": 45.17,
+      "low": 44.71,
+      "close": 44.9,
+      "volume": 1740500,
+      "market_time": "r",
+      "total_volume": 1740500
+    },
+    {
+      "date": "2026-10-07",
+      "open": 45.28,
+      "high": 45.49,
+      "low": 44.81,
+      "close": 45.13,
+      "volume": 2345723,
+      "market_time": "r",
+      "total_volume": 2345723
+    },
+    {
+      "date": "2026-10-08",
+      "open": 45.02,
+      "high": 45.44,
+      "low": 44.95,
+      "close": 45.04,
+      "volume": 1337682,
+      "market_time": "r",
+      "total_volume": 1337682
+    },
+    {
+      "date": "2026-10-09",
+      "open": 45.36,
+      "high": 45.52,
+      "low": 45.08,
+      "close": 45.45,
+      "volume": 1958023,
+      "market_time": "r",
+      "total_volume": 1958023
+    },
+    {
+      "date": "2026-10-12",
+      "open": 45.52,
+      "high": 46.18,
+      "low": 45.19,
+      "close": 45.19,
+      "volume": 1458506,
+      "market_time": "r",
+      "total_volume": 1458506
+    }
+  ]
+}

@@ -1,0 +1,177 @@
+{
+  "synthetic": true,
+  "ticker": "TEPID",
+  "scenario_name": "Dark-pool-only with an evaluated price confirmation (distinct from QRVX)",
+  "description": "Checked QRVX before adding this: QRVX has zero flow_alerts, so direction_heuristic is always None there and price_confirmation never evaluates (metrics.confirmed stays null -- a DATA_LIMITATION, not a result). This scenario keeps the same single dark-pool-anomaly shape (strong ratio ~5.0x baseline, bootstrap=false, high confidence via t1-baseline) but adds a SMALL options flow alert ($480K total premium -- below the $1M options_flow_anomaly threshold, so that gate still correctly fails/stays single-signal) purely to supply a directional lean (ask_share ~90% -> bullish-lean) that price_confirmation can act on. The stock rose +1.6% that session, matching the lean, so price_confirmation.metrics.confirmed is True here -- demonstrating price_confirmation operates independently of whether options_flow_anomaly itself qualifies. Dark-pool premium was kept below the historical_percentile's 10M-premium (0.95) bucket on purpose (today_premium = darkpool + options ~= $8.48M) so this stays a genuine single-gate dark-pool-only scenario and does not accidentally become multi-signal.",
+  "flow_alerts": [
+    {
+      "ticker_symbol": "TEPID",
+      "total_premium": 480000,
+      "total_ask_premium": 430000,
+      "total_bid_premium": 50000,
+      "has_sweep": false,
+      "has_multileg": false,
+      "is_call": true,
+      "is_put": false,
+      "underlying_price": 19.85,
+      "created_at": "2026-10-12T12:40:00Z"
+    }
+  ],
+  "darkpool_trades": [
+    {
+      "ticker": "TEPID",
+      "premium": 8000000,
+      "size": 395000,
+      "price": 20.05,
+      "executed_at": "2026-10-12T11:50:00Z",
+      "avg_premium_baseline": 1600000
+    }
+  ],
+  "stock_state": {
+    "ticker": "TEPID",
+    "last_price": 20.18,
+    "change_percent": 1.6
+  },
+  "ohlc": [
+    {
+      "date": "2026-09-23",
+      "open": 21.03,
+      "high": 21.13,
+      "low": 20.78,
+      "close": 20.92,
+      "volume": 2130678,
+      "market_time": "r",
+      "total_volume": 2130678
+    },
+    {
+      "date": "2026-09-24",
+      "open": 20.77,
+      "high": 21.01,
+      "low": 20.65,
+      "close": 20.93,
+      "volume": 2165676,
+      "market_time": "r",
+      "total_volume": 2165676
+    },
+    {
+      "date": "2026-09-25",
+      "open": 20.79,
+      "high": 20.86,
+      "low": 20.72,
+      "close": 20.77,
+      "volume": 1633330,
+      "market_time": "r",
+      "total_volume": 1633330
+    },
+    {
+      "date": "2026-09-28",
+      "open": 20.7,
+      "high": 20.77,
+      "low": 20.56,
+      "close": 20.73,
+      "volume": 2321199,
+      "market_time": "r",
+      "total_volume": 2321199
+    },
+    {
+      "date": "2026-09-29",
+      "open": 20.68,
+      "high": 20.73,
+      "low": 20.56,
+      "close": 20.63,
+      "volume": 860399,
+      "market_time": "r",
+      "total_volume": 860399
+    },
+    {
+      "date": "2026-09-30",
+      "open": 20.47,
+      "high": 20.6,
+      "low": 20.33,
+      "close": 20.53,
+      "volume": 1461209,
+      "market_time": "r",
+      "total_volume": 1461209
+    },
+    {
+      "date": "2026-10-01",
+      "open": 20.55,
+      "high": 20.61,
+      "low": 20.37,
+      "close": 20.42,
+      "volume": 1229410,
+      "market_time": "r",
+      "total_volume": 1229410
+    },
+    {
+      "date": "2026-10-02",
+      "open": 20.47,
+      "high": 20.52,
+      "low": 20.33,
+      "close": 20.34,
+      "volume": 1129604,
+      "market_time": "r",
+      "total_volume": 1129604
+    },
+    {
+      "date": "2026-10-05",
+      "open": 20.43,
+      "high": 20.56,
+      "low": 20.28,
+      "close": 20.38,
+      "volume": 1415309,
+      "market_time": "r",
+      "total_volume": 1415309
+    },
+    {
+      "date": "2026-10-06",
+      "open": 20.26,
+      "high": 20.38,
+      "low": 20.2,
+      "close": 20.27,
+      "volume": 1487528,
+      "market_time": "r",
+      "total_volume": 1487528
+    },
+    {
+      "date": "2026-10-07",
+      "open": 20.11,
+      "high": 20.22,
+      "low": 20.06,
+      "close": 20.14,
+      "volume": 2452139,
+      "market_time": "r",
+      "total_volume": 2452139
+    },
+    {
+      "date": "2026-10-08",
+      "open": 20.02,
+      "high": 20.19,
+      "low": 19.98,
+      "close": 20.07,
+      "volume": 1058143,
+      "market_time": "r",
+      "total_volume": 1058143
+    },
+    {
+      "date": "2026-10-09",
+      "open": 19.95,
+      "high": 20.13,
+      "low": 19.87,
+      "close": 20.08,
+      "volume": 813844,
+      "market_time": "r",
+      "total_volume": 813844
+    },
+    {
+      "date": "2026-10-12",
+      "open": 20.14,
+      "high": 20.38,
+      "low": 19.74,
+      "close": 20.18,
+      "volume": 1656943,
+      "market_time": "r",
+      "total_volume": 1656943
+    }
+  ]
+}
