@@ -1,0 +1,66 @@
+"""Bounded, non-autonomous orchestration for the 'Investigate with AI'
+feature. Hard structure, no loop beyond this:
+
+  Round 1 (tool selection, ONE call): select_tools()
+  Execution (<= MAX_TOOLS_PER_INVESTIGATION real calls): execute_tool() per call
+  Round 2 (synthesis, the ONE allowed additional reasoning round): synthesize()
+
+`select_tools`, `execute_tool`, and `synthesize` are imported as plain
+names (not called via a class/module attribute chain) specifically so
+tests can `monkeypatch.setattr(orchestrator, "select_tools", fake)` etc.
+and assert each is invoked exactly once / at most four times -- see
+backend/tests/test_investigate.py.
+"""
+from __future__ import annotations
+
+import logging
+
+from ..adapters.live_uw_adapter import UWRestClient
+from .allowlist import MAX_TOOLS_PER_INVESTIGATION
+from .llm_provider import select_tools, synthesize  # noqa: F401  (re-exported for monkeypatching)
+from .rest_tool_client import execute_tool  # noqa: F401  (re-exported for monkeypatching)
+from .schemas import InvestigationResult, MalformedAIResponse, validate_investigation_result
+from .validation import ValidationError, validate_ticker, validate_tool_selection
+
+logger = logging.getLogger(__name__)
+
+
+class NoValidToolsSelectedError(ValueError):
+    pass
+
+
+def investigate(
+    ticker: str,
+    evidence: dict,
+    ai_provider: str,
+    ai_api_key: str,
+    uw_api_key: str,
+    uw_base_url: str,
+    uw_client_api_id: str = "",
+) -> InvestigationResult:
+    safe_ticker = validate_ticker(ticker)
+
+    # --- Round 1: tool selection (exactly one LLM call) -------------------
+    raw_selection = select_tools(safe_ticker, evidence, ai_provider, ai_api_key)
+    accepted_calls, rejected_selection = validate_tool_selection(raw_selection, safe_ticker)
+    if not accepted_calls:
+        raise NoValidToolsSelectedError(
+            "The AI did not select any valid read-only tools for this ticker; nothing to investigate."
+        )
+    accepted_calls = accepted_calls[:MAX_TOOLS_PER_INVESTIGATION]
+
+    # --- Execution: at most MAX_TOOLS_PER_INVESTIGATION real UW calls -----
+    client = UWRestClient(api_key=uw_api_key, base_url=uw_base_url, client_api_id=uw_client_api_id)
+    tool_results = [execute_tool(call["tool"], call["args"]["ticker"], call["args"], client) for call in accepted_calls]
+
+    # --- Round 2: synthesis (the one allowed additional reasoning round) --
+    called_tools = [r["tool"] for r in tool_results]
+    raw_synthesis = synthesize(safe_ticker, tool_results, ai_provider, ai_api_key)
+    if not isinstance(raw_synthesis, dict):
+        raise MalformedAIResponse(f"synthesis round did not return a JSON object (got {type(raw_synthesis).__name__})")
+    result = validate_investigation_result(raw_synthesis, safe_ticker, called_tools)
+    result.rejected_tool_selections = rejected_selection
+    return result
+
+
+__all__ = ["investigate", "NoValidToolsSelectedError", "MalformedAIResponse", "ValidationError"]
