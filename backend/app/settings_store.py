@@ -16,13 +16,29 @@ after that is controlled by this store, not the environment.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import time
 from pathlib import Path
 from threading import Lock
 from typing import Optional
 
-_FIELDS = ("mode", "uw_api_key", "ai_provider", "ai_api_key")
+_FIELDS = (
+    "mode",
+    "uw_api_key",
+    "ai_provider",
+    "ai_api_key",
+    # Live-mode activation gate (see main.py /api/settings/mode): a hash
+    # (never the raw key) of the LAST key that actually passed
+    # /api/settings/uw-key/test, plus when. Only a key whose hash matches
+    # this is allowed to be activated into "live" mode. Persisted (not the
+    # in-memory-only _last_uw_test_result main.py already had) so the gate
+    # survives process restarts, and keyed by hash so it is tied to the
+    # exact key tested, not just "a key exists".
+    "verified_uw_key_hash",
+    "verified_uw_key_at",
+)
 
 
 def _defaults() -> dict:
@@ -32,7 +48,18 @@ def _defaults() -> dict:
         "uw_api_key": None,
         "ai_provider": None,
         "ai_api_key": None,
+        "verified_uw_key_hash": None,
+        "verified_uw_key_at": None,
     }
+
+
+def hash_key(api_key: Optional[str]) -> Optional[str]:
+    """sha256 of a UW key for the verification record -- never store or
+    return the raw key itself. Returns None for a falsy key so "no key"
+    and "a hash of an empty string" are never confused."""
+    if not api_key:
+        return None
+    return hashlib.sha256(api_key.encode("utf-8")).hexdigest()
 
 
 class SettingsStore:
@@ -91,6 +118,16 @@ class SettingsStore:
         with self._lock:
             data = self._read()
             data["uw_api_key"] = api_key
+            # A newly-saved/replaced key has NOT itself passed Test
+            # Connection yet -- invalidate any prior verification record so
+            # live-mode activation requires a fresh test of THIS key. If
+            # the app was already in "live" mode on the old (verified) key,
+            # force it back to demo rather than silently keep running
+            # "live" against an unverified replacement credential.
+            data["verified_uw_key_hash"] = None
+            data["verified_uw_key_at"] = None
+            if data["mode"] == "live":
+                data["mode"] = "demo"
             self._write(data)
             return data
 
@@ -98,10 +135,37 @@ class SettingsStore:
         with self._lock:
             data = self._read()
             data["uw_api_key"] = None
+            data["verified_uw_key_hash"] = None
+            data["verified_uw_key_at"] = None
             if data["mode"] == "live":
                 data["mode"] = "demo"  # never leave the app pointed at "live" with no key
             self._write(data)
             return data
+
+    def record_verified_uw_key(self, api_key: str) -> dict:
+        """Call ONLY after a real Test Connection call succeeds (result ==
+        "success") for this exact key. Persists its hash + a timestamp so
+        /api/settings/mode can later confirm live-mode is being activated
+        for a credential that has actually passed Test Connection, not just
+        any key that happens to be present (and not just an in-memory flag
+        that forgets which key it was for)."""
+        with self._lock:
+            data = self._read()
+            data["verified_uw_key_hash"] = hash_key(api_key)
+            data["verified_uw_key_at"] = time.time()
+            self._write(data)
+            return data
+
+    def is_key_verified(self, api_key: Optional[str]) -> bool:
+        """True only if `api_key` is non-empty and its hash matches the
+        hash of the last key that passed Test Connection. Applies equally
+        to UI-saved and .env-sourced keys -- there is no "trusted by
+        default" source, every key must pass its own Test Connection."""
+        if not api_key:
+            return False
+        data = self.get_all()
+        stored = data.get("verified_uw_key_hash")
+        return stored is not None and stored == hash_key(api_key)
 
     def set_ai_key(self, provider: str, api_key: str) -> dict:
         with self._lock:

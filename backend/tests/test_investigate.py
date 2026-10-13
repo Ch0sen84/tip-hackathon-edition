@@ -267,6 +267,7 @@ def test_route_invalid_ticker_returns_400(app_main):
 def test_route_live_mode_without_ai_key_returns_clear_4xx(app_main):
     client = TestClient(app_main.app)
     client.post("/api/settings/uw-key", json={"api_key": "uwtest_FAKEFAKEFAKE1234"})
+    app_main._settings_store.record_verified_uw_key("uwtest_FAKEFAKEFAKE1234")
     client.post("/api/settings/mode", json={"mode": "live"})
     resp = client.post("/api/investigate/ZYNC")
     assert resp.status_code == 400
@@ -288,6 +289,7 @@ def test_route_live_mode_without_uw_key_returns_clear_4xx(app_main):
 def test_availability_reports_disabled_reason_without_ai_key_in_live_mode(app_main):
     client = TestClient(app_main.app)
     client.post("/api/settings/uw-key", json={"api_key": "uwtest_FAKEFAKEFAKE1234"})
+    app_main._settings_store.record_verified_uw_key("uwtest_FAKEFAKEFAKE1234")
     client.post("/api/settings/mode", json={"mode": "live"})
     resp = client.get("/api/investigate/availability")
     body = resp.json()
@@ -303,8 +305,9 @@ def test_route_live_mode_happy_path_uses_mocked_mcp_equivalent_and_llm(app_main,
 
     client = TestClient(app_main.app)
     client.post("/api/settings/uw-key", json={"api_key": "uwtest_FAKEFAKEFAKE1234"})
+    app_main._settings_store.record_verified_uw_key("uwtest_FAKEFAKEFAKE1234")
     client.post("/api/settings/mode", json={"mode": "live"})
-    client.post("/api/settings/ai-key", json={"provider": "anthropic", "api_key": "sk-fake-not-real"})
+    client.post("/api/settings/ai-key", json={"provider": "anthropic", "api_key": "«redacted:sk-…»"})
 
     monkeypatch.setattr(orch, "select_tools", lambda *a, **k: GOOD_SELECTION)
     monkeypatch.setattr(orch, "execute_tool", lambda tool, ticker, args, client: {"tool": tool, "ok": True, "data": {}, "error": None})

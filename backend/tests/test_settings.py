@@ -127,8 +127,10 @@ def test_uw_key_test_not_configured_when_no_key(app_main):
 
 def test_delete_uw_key_clears_and_forces_demo_mode(app_main, monkeypatch):
     monkeypatch.setattr(app_main, "UWRestClient", _FakeUWRestClient)
+    _FakeUWRestClient._RESULT = "success"
     client = TestClient(app_main.app)
     client.post("/api/settings/uw-key", json={"api_key": FAKE_UW_KEY})
+    client.post("/api/settings/uw-key/test")
     client.post("/api/settings/mode", json={"mode": "live"})
     assert client.get("/api/settings").json()["mode"] == "live"
 
@@ -148,17 +150,153 @@ def test_mode_switch_to_live_requires_a_key(app_main):
 
     client.post("/api/settings/uw-key", json={"api_key": FAKE_UW_KEY})
     resp = client.post("/api/settings/mode", json={"mode": "live"})
-    assert resp.status_code == 200
-    assert resp.json()["mode"] == "live"
+    assert resp.status_code == 400  # key present, but not yet Test-Connection-verified
 
 
-def test_mode_switch_back_to_demo_always_allowed(app_main):
+def test_mode_switch_to_live_requires_passed_test_connection(app_main, monkeypatch):
+    """Core security gate: a key that is merely SAVED is not enough --
+    live mode must be rejected (400) until that exact key has passed
+    /api/settings/uw-key/test, then allowed once it has."""
+    monkeypatch.setattr(app_main, "UWRestClient", _FakeUWRestClient)
+    _FakeUWRestClient._RESULT = "success"
     client = TestClient(app_main.app)
     client.post("/api/settings/uw-key", json={"api_key": FAKE_UW_KEY})
+
+    resp = client.post("/api/settings/mode", json={"mode": "live"})
+    assert resp.status_code == 400
+    assert "Test Connection" in resp.json()["detail"]
+
+    test_resp = client.post("/api/settings/uw-key/test")
+    assert test_resp.json()["result"] == "success"
+
+    resp = client.post("/api/settings/mode", json={"mode": "live"})
+    assert resp.status_code == 200
+    assert resp.json()["mode"] == "live"
+    assert client.get("/api/settings").json()["uw"]["verified"] is True
+
+
+def test_mode_switch_to_live_rejected_after_failed_test_connection(app_main, monkeypatch):
+    monkeypatch.setattr(app_main, "UWRestClient", _FakeUWRestClient)
+    _FakeUWRestClient._RESULT = "unauthorized"
+    client = TestClient(app_main.app)
+    client.post("/api/settings/uw-key", json={"api_key": FAKE_UW_KEY})
+    client.post("/api/settings/uw-key/test")
+
+    resp = client.post("/api/settings/mode", json={"mode": "live"})
+    assert resp.status_code == 400
+
+
+def test_replacing_verified_key_invalidates_verification_and_forces_demo(app_main, monkeypatch):
+    """Item 7: replacing a VERIFIED key with a new, unverified one must
+    invalidate the old verification record (old-verified-new-unverified
+    sequence rejected) and, if mode was already live, force it back to
+    demo rather than keep running live on the new unverified credential."""
+    monkeypatch.setattr(app_main, "UWRestClient", _FakeUWRestClient)
+    _FakeUWRestClient._RESULT = "success"
+    client = TestClient(app_main.app)
+    client.post("/api/settings/uw-key", json={"api_key": FAKE_UW_KEY})
+    client.post("/api/settings/uw-key/test")
+    client.post("/api/settings/mode", json={"mode": "live"})
+    assert client.get("/api/settings").json()["mode"] == "live"
+
+    other_key = "uwtest_sk_live_DIFFERENTKEY999999"
+    client.post("/api/settings/uw-key", json={"api_key": other_key})
+
+    status = client.get("/api/settings").json()
+    assert status["mode"] == "demo"  # forced back, same protection as clear_uw_key
+    assert status["uw"]["verified"] is False
+
+    resp = client.post("/api/settings/mode", json={"mode": "live"})
+    assert resp.status_code == 400  # new key hasn't passed its own Test Connection
+
+
+def test_clearing_key_invalidates_verification_and_forces_demo(app_main, monkeypatch):
+    monkeypatch.setattr(app_main, "UWRestClient", _FakeUWRestClient)
+    _FakeUWRestClient._RESULT = "success"
+    client = TestClient(app_main.app)
+    client.post("/api/settings/uw-key", json={"api_key": FAKE_UW_KEY})
+    client.post("/api/settings/uw-key/test")
+    client.post("/api/settings/mode", json={"mode": "live"})
+
+    client.delete("/api/settings/uw-key")
+    status = client.get("/api/settings").json()
+    assert status["mode"] == "demo"
+    assert status["uw"]["verified"] is False
+
+
+def test_env_sourced_key_also_requires_verification_before_live(app_main, monkeypatch):
+    """Item 8: an env-fallback key (TIP_MODE/UW_API_KEY) is not trusted by
+    default -- it must pass its own Test Connection before live-mode
+    activation, exactly like a UI-saved key."""
+    monkeypatch.setattr(app_main.settings, "uw_api_key", "env-only-key-7777")
+    monkeypatch.setattr(app_main, "UWRestClient", _FakeUWRestClient)
+    _FakeUWRestClient._RESULT = "success"
+    client = TestClient(app_main.app)
+
+    status = client.get("/api/settings").json()
+    assert status["uw"]["source"] == "env"
+    assert status["uw"]["configured"] is True
+    assert status["uw"]["verified"] is False
+
+    resp = client.post("/api/settings/mode", json={"mode": "live"})
+    assert resp.status_code == 400
+
+    client.post("/api/settings/uw-key/test")
+    resp = client.post("/api/settings/mode", json={"mode": "live"})
+    assert resp.status_code == 200
+
+
+def test_env_fallback_disclosed_after_removing_ui_key(app_main, monkeypatch):
+    """Item 10: after Remove Saved Key, if a .env key is still present,
+    Settings must say so explicitly instead of implying no credential
+    remains."""
+    monkeypatch.setattr(app_main.settings, "uw_api_key", "env-only-key-7777")
+    client = TestClient(app_main.app)
+    client.post("/api/settings/uw-key", json={"api_key": FAKE_UW_KEY})
+
+    status = client.get("/api/settings").json()
+    assert status["uw"]["env_fallback_disclosure"] is None  # UI key still present
+
+    client.delete("/api/settings/uw-key")
+    status = client.get("/api/settings").json()
+    assert status["uw"]["source"] == "env"
+    assert status["uw"]["env_fallback_present"] is True
+    assert "env-configured key is still present" in status["uw"]["env_fallback_disclosure"]
+
+
+def test_verified_failure_and_network_failure_are_distinguishable(app_main, monkeypatch):
+    """Item 11: a real 401/403 ('this key doesn't work') must be a
+    different result string than a transient/network failure ('try
+    again'), not collapsed into one generic 'test failed' state."""
+    monkeypatch.setattr(app_main, "UWRestClient", _FakeUWRestClient)
+    client = TestClient(app_main.app)
+    client.post("/api/settings/uw-key", json={"api_key": FAKE_UW_KEY})
+
+    _FakeUWRestClient._RESULT = "unauthorized"
+    unauthorized_result = client.post("/api/settings/uw-key/test").json()["result"]
+    _FakeUWRestClient._RESULT = "network_error"
+    network_result = client.post("/api/settings/uw-key/test").json()["result"]
+
+    assert unauthorized_result == "unauthorized"
+    assert network_result == "network_error"
+    assert unauthorized_result != network_result
+
+
+def test_mode_switch_back_to_demo_always_allowed(app_main, monkeypatch):
+    monkeypatch.setattr(app_main, "UWRestClient", _FakeUWRestClient)
+    _FakeUWRestClient._RESULT = "success"
+    client = TestClient(app_main.app)
+    client.post("/api/settings/uw-key", json={"api_key": FAKE_UW_KEY})
+    client.post("/api/settings/uw-key/test")
     client.post("/api/settings/mode", json={"mode": "live"})
     resp = client.post("/api/settings/mode", json={"mode": "demo"})
     assert resp.status_code == 200
     assert resp.json()["mode"] == "demo"
+    # demo<->live is freely reversible without re-verifying, as long as the
+    # key itself hasn't changed
+    assert client.get("/api/settings").json()["uw"]["verified"] is True
+    resp = client.post("/api/settings/mode", json={"mode": "live"})
+    assert resp.status_code == 200
 
 
 def test_invalid_mode_rejected(app_main):

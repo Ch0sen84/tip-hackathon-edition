@@ -187,6 +187,12 @@ def get_settings():
     data = _settings_store.get_all()
     uw_key, uw_source = _effective_uw_key(data)
     ai_key = data.get("ai_api_key")
+    # Disclosure for item 10: if the UI-saved key was removed but a
+    # .env-level key is still configured, the effective key silently
+    # becomes that env key -- say so explicitly rather than letting the
+    # user believe "Remove Saved Key" cleared all credentials.
+    env_key_present = bool(settings.uw_api_key)
+    ui_key_present = bool(data.get("uw_api_key"))
     return {
         "mode": data["mode"],
         "public_demo": settings.public_demo,
@@ -195,6 +201,13 @@ def get_settings():
             "source": uw_source,  # "ui" | "env" | "none"
             "last4": last4(uw_key),
             "last_test_result": _last_uw_test_result,
+            "verified": _settings_store.is_key_verified(uw_key),
+            "env_fallback_present": env_key_present,
+            "env_fallback_disclosure": (
+                "UI-saved key removed. A .env-configured key is still present and will be used."
+                if env_key_present and not ui_key_present
+                else None
+            ),
         },
         "ai": {
             "configured": bool(ai_key),
@@ -220,6 +233,19 @@ def set_mode(body: ModeBody):
             raise HTTPException(
                 status_code=400,
                 detail="Cannot switch to live mode: no UW API key is configured yet.",
+            )
+        # Real server-side gate (not just a disabled UI button): live mode
+        # may only be activated for a key that has ITSELF passed
+        # /api/settings/uw-key/test -- applies identically whether the key
+        # came from the UI store or the .env fallback (no source is
+        # "trusted by default"). A key merely being present is not enough.
+        if not _settings_store.is_key_verified(key):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Cannot switch to live mode: this UW API key has not passed "
+                    "Test Connection yet. Use Test Connection in Settings first."
+                ),
             )
     data = _settings_store.set_mode(requested)
     _reset_adapter_cache()
@@ -268,6 +294,12 @@ def test_uw_key():
     else:
         result, message = "success", "Connected to the Unusual Whales API."
     _last_uw_test_result = result
+    if result == "success":
+        # Persist a hash of THIS exact key as the one verified-live-capable
+        # credential. This is the only place that ever sets the record --
+        # a mere "key is present" never does. See settings_store.record_
+        # verified_uw_key / is_key_verified and the live-mode gate above.
+        _settings_store.record_verified_uw_key(key)
     return {"result": result, "message": message, "source": source}
 
 
