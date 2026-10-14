@@ -130,6 +130,50 @@ def test_anthropic_normal_completion_does_not_raise_truncation_error(monkeypatch
     assert text == '{"ai_interpretation": "complete"}'
 
 
+def test_anthropic_network_timeout_raises_llmcallerror_not_a_raw_exception(monkeypatch):
+    """REAL BUG FIX regression guard (2026-10-14): the actual NVDA HTTP 500
+    was requests.exceptions.ReadTimeout propagating completely unhandled
+    out of complete() -- FastAPI turned that into a raw 500 instead of the
+    structured LLMCallError -> HTTP 502 path every other failure mode
+    already used. complete() must now catch requests.RequestException."""
+    import requests as _requests
+
+    def fake_post(*a, **k):
+        raise _requests.exceptions.ReadTimeout("Read timed out. (read timeout=15)")
+
+    monkeypatch.setattr(llm_provider.requests, "post", fake_post)
+    try:
+        llm_provider.AnthropicProvider().complete("sys", "user", "fake-key")
+        assert False, "expected LLMCallError"
+    except llm_provider.LLMCallError as e:
+        assert "network error" in str(e) or "timed out" in str(e).lower()
+    except Exception as e:  # pragma: no cover
+        assert False, f"a raw {type(e).__name__} escaped complete() -- this is the exact original bug"
+
+
+def test_openai_network_timeout_raises_llmcallerror_not_a_raw_exception(monkeypatch):
+    import requests as _requests
+
+    def fake_post(*a, **k):
+        raise _requests.exceptions.ConnectionError("connection reset")
+
+    monkeypatch.setattr(llm_provider.requests, "post", fake_post)
+    try:
+        llm_provider.OpenAIProvider().complete("sys", "user", "fake-key")
+        assert False, "expected LLMCallError"
+    except llm_provider.LLMCallError:
+        pass
+    except Exception as e:  # pragma: no cover
+        assert False, f"a raw {type(e).__name__} escaped complete() -- this is the exact original bug"
+
+
+def test_request_timeout_is_generous_enough_for_a_real_mcp_fed_synthesis_call():
+    """Regression guard for the other half of the same real bug: 15s was
+    too tight for a genuine MCP-executed, multi-tool-result synthesis call
+    plus Sonnet 5.5's adaptive thinking overhead."""
+    assert llm_provider.REQUEST_TIMEOUT_S >= 45
+
+
 def test_anthropic_text_extraction_ignores_non_text_blocks():
     """Defensive check: a thinking-type content block (no "text" key, or a
     "text" key some other block type might coincidentally carry) must

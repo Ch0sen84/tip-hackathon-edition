@@ -88,6 +88,15 @@
     <section id="view-ticker" class="view">
       <div class="toolbar">
         <select id="tickerSelect"></select>
+        <!-- Manual ticker entry (Live Mode only -- hidden in Demo, where
+             fixtures genuinely only exist for the 11 named scenarios in
+             the dropdown above). Shown/hidden by loadSettings() in
+             app.live.js based on the real mode, not guessed client state.
+             REAL BUG FIX (2026-10-14): Live Mode previously had no way to
+             analyze any ticker outside the small fixed TIP_LIVE_WATCHLIST
+             dropdown at all. -->
+        <input type="text" id="tickerManualInput" placeholder="Or type any ticker (Live Mode)"
+               autocomplete="off" style="display:none" maxlength="7" />
         <button class="btn" id="loadTicker">Analyze</button>
       </div>
       <!-- investigateSection's container div is rendered INSIDE

@@ -461,12 +461,31 @@ def radar():
 @app.get("/api/ticker/{ticker}")
 def ticker_analysis(ticker: str):
     """Ticker Analysis: full evidence drill-down for one ticker -- gates,
-    confidence, state transition, and the tip_evidence explanation."""
+    confidence, state transition, and the tip_evidence explanation.
+
+    REAL BUG FIX (2026-10-14): this used to reject ANY ticker not already
+    in adapter.get_universe() -- for LiveUWAdapter that's exactly
+    TIP_LIVE_WATCHLIST (a short fixed list), so a live user could only
+    ever analyze whatever 4 tickers happened to be configured there, with
+    no way to type in a different real ticker. That watchlist exists to
+    scope Market Radar's proactive scanning, not to gate direct lookup --
+    UW's REST API will answer for any real ticker. Fix: the fixed-universe
+    check now applies ONLY to the synthetic/demo adapter (where it's
+    correct -- fixtures genuinely only exist for the 11 named scenarios);
+    Live Mode instead validates the SYMBOL FORMAT (same TICKER_RE already
+    used for AI Investigation) and lets the real UW call itself be the
+    source of truth on whether that ticker actually exists/has data."""
     adapter = get_adapter()
     store = get_store()
     ticker = ticker.upper()
-    if ticker not in adapter.get_universe():
-        raise HTTPException(status_code=404, detail=f"{ticker} is not in the current adapter universe")
+    if isinstance(adapter, SyntheticDataAdapter):
+        if ticker not in adapter.get_universe():
+            raise HTTPException(status_code=404, detail=f"{ticker} is not one of the demo scenarios")
+    else:
+        try:
+            ticker = _validate_ticker_for_route(ticker)
+        except AiValidationError as e:
+            raise HTTPException(status_code=400, detail=str(e))
 
     scan = _run_scan(adapter, store, ticker)
     item = _to_evidence_item(scan)
@@ -502,8 +521,19 @@ def ticker_ohlc(ticker: str, timeframe: str = "1d", limit: int = 180):
     nothing."""
     adapter = get_adapter()
     ticker = ticker.upper()
-    if ticker not in adapter.get_universe():
-        raise HTTPException(status_code=404, detail=f"{ticker} is not in the current adapter universe")
+    # Same real fix as ticker_analysis() above (2026-10-14): only the
+    # demo/synthetic adapter enforces a fixed ticker universe (fixtures
+    # genuinely only exist for the 11 named scenarios); Live Mode accepts
+    # any format-valid ticker and lets the real UW call decide if it has
+    # data, instead of hard-gating on TIP_LIVE_WATCHLIST.
+    if isinstance(adapter, SyntheticDataAdapter):
+        if ticker not in adapter.get_universe():
+            raise HTTPException(status_code=404, detail=f"{ticker} is not one of the demo scenarios")
+    else:
+        try:
+            ticker = _validate_ticker_for_route(ticker)
+        except AiValidationError as e:
+            raise HTTPException(status_code=400, detail=str(e))
     ohlc = adapter.get_ohlc(ticker, timeframe=timeframe, limit=limit)
     flow_alerts = adapter.get_flow_alerts(ticker)
     darkpool_trades = adapter.get_darkpool_trades(ticker)

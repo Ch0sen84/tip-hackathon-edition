@@ -130,7 +130,17 @@ function applyNavState(state, handlers, opts = {}) {
     return;
   }
   const known = handlers && handlers.getKnownTickers ? handlers.getKnownTickers() : null;
-  if (known && !known.includes(state.ticker)) {
+  // REAL BUG FIX (2026-10-14): `known` only ever contains Market Radar's
+  // scanned/scenario tickers -- it was never meant to be a hard allowlist
+  // for arbitrary Live Mode lookups (see the backend fix in main.py's
+  // ticker_analysis()/ticker_ohlc(), which already accepts any format-
+  // valid ticker in Live Mode). Without this, a manually-typed ticker
+  // worked on click but broke on refresh/deep-link, since this function
+  // runs on both. `isArbitraryTickerAllowed` (Live Mode only, set by
+  // app.live.js) lets a format-valid ticker through here the same way.
+  const allowArbitrary = handlers && handlers.isArbitraryTickerAllowed && handlers.isArbitraryTickerAllowed();
+  const formatValid = /^[A-Z]{1,5}(\.[A-Z])?$/.test(state.ticker || "");
+  if (known && !known.includes(state.ticker) && !(allowArbitrary && formatValid)) {
     setHistory("ticker", null);
     switchView("ticker");
     const el = document.getElementById("tickerDetail");
@@ -806,13 +816,29 @@ function dateOnly(ts) {
 // a non-trading day -- e.g. an alert timestamped intraday maps onto that
 // trading day's daily bar). Falls back to the first candle if the marker
 // predates the whole series, rather than silently dropping it.
+//
+// REAL BUG FIX (2026-10-14, reported live on NVDA): a marker dated AFTER
+// every fetched candle (e.g. today's real-time flow alerts/dark-pool
+// prints, timestamped today, while the daily OHLC series' last bar is
+// yesterday's close because today's session hasn't finished/finalized
+// yet) used to silently fall through this same loop and land on the
+// LAST candle -- every single out-of-range marker collapsing onto one
+// bar at the right edge, exactly the "stacked at the right boundary" bug.
+// The loop logic for "marker predates the series" (falling back to the
+// FIRST candle) was intentional and stays; "marker postdates the series"
+// must NOT get the same treatment -- there is no real candle that event
+// happened on. Returns null in that case so the caller excludes the
+// marker rather than inventing/clamping its position.
 function nearestBarTime(markerDate, sortedCandleDates) {
+  if (!sortedCandleDates.length) return null;
+  const lastCandle = sortedCandleDates[sortedCandleDates.length - 1];
+  if (markerDate > lastCandle) return null; // genuinely outside the fetched range -- do not clamp
   let best = null;
   for (const t of sortedCandleDates) {
     if (t <= markerDate) best = t;
     else break;
   }
-  return best || sortedCandleDates[0] || null;
+  return best || sortedCandleDates[0];
 }
 
 function renderChartUnavailable(reason) {
@@ -861,9 +887,13 @@ function mountCandlestickChart(containerId, ohlc) {
   series.setData(bars);
   const candleDates = bars.map((b) => b.time);
 
+  let excludedCount = 0;
   const markers = (ohlc.markers || []).map((m) => {
     const barTime = nearestBarTime(dateOnly(m.time), candleDates);
-    if (!barTime) return null;
+    if (!barTime) {
+      excludedCount += 1;
+      return null;
+    }
     const text = m.price != null
       ? `${m.label} @ ${Number(m.price).toFixed(2)}`
       : `${m.label} (time only -- no price field in source data)`;
@@ -877,6 +907,29 @@ function mountCandlestickChart(containerId, ohlc) {
   }).filter(Boolean);
   series.setMarkers(markers);
   chart.timeScale().fitContent();
+
+  // Honest disclosure (2026-10-14 fix) instead of silently clamping
+  // out-of-range markers onto the last candle: if any evidence events are
+  // dated after the chart's last fetched bar (e.g. today's real-time
+  // alerts while today's daily candle hasn't closed/finalized yet), say
+  // so plainly rather than hiding them without explanation or inventing a
+  // position for them.
+  // Remove any note left by a PRIOR call (this function re-renders in
+  // place on re-selection/mode-switch) before possibly adding a fresh one
+  // -- otherwise repeated calls would stack up duplicate notes as siblings
+  // of `root` (the note itself lives outside root, since root.innerHTML
+  // is cleared on every call and would otherwise wipe it immediately).
+  const existingNote = root.nextElementSibling;
+  if (existingNote && existingNote.classList.contains("chart-markers-excluded-note")) {
+    existingNote.remove();
+  }
+  if (excludedCount > 0) {
+    const note = document.createElement("div");
+    note.className = "muted chart-markers-excluded-note";
+    note.style.marginTop = "6px";
+    note.textContent = `${excludedCount} evidence marker(s) dated after this chart's most recent bar are not shown (no real candle exists yet for that date) -- not clamped or estimated.`;
+    root.after(note);
+  }
 
   root._tipChart = chart;
   if (!root._tipResizeObserverAttached && typeof ResizeObserver !== "undefined") {

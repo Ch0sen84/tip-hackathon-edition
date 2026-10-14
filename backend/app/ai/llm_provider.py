@@ -21,7 +21,23 @@ from .allowlist import ALLOWLIST, MAX_TOOLS_PER_INVESTIGATION
 
 logger = logging.getLogger(__name__)
 
-REQUEST_TIMEOUT_S = 15
+# ROOT-CAUSE FIX (2026-10-14, real NVDA HTTP 500 after enabling genuine
+# MCP transport): the actual exception was
+# urllib3.exceptions.ReadTimeoutError -> requests.exceptions.ReadTimeout
+# at api.anthropic.com after exactly 15s -- NOT a recurrence of the
+# earlier truncation bug. Two real problems, both fixed here:
+#   1. 15s was too tight. A real synthesis call fed by actual MCP-executed
+#      tool results (larger payload than any REST-fallback test used) plus
+#      Sonnet 5.5's adaptive thinking overhead can legitimately take longer
+#      than 15s to finish. Raised to 60s -- generous but still bounded
+#      (this is one call, not a retry loop).
+#   2. complete() had NO try/except around requests.post() at all, unlike
+#      test_provider_connection() below which already correctly catches
+#      requests.RequestException. A timeout (or any other connection
+#      failure) therefore propagated as a raw unhandled exception -> FastAPI
+#      500, instead of the structured LLMCallError -> HTTP 502 path every
+#      other failure mode already uses. Fixed in both complete() methods.
+REQUEST_TIMEOUT_S = 60
 
 
 class LLMCallError(RuntimeError):
@@ -77,22 +93,27 @@ class AnthropicProvider:
     max_output_tokens = 3000
 
     def complete(self, system: str, user: str, api_key: str) -> str:
-        resp = requests.post(
-            self.url,
-            headers={
-                "x-api-key": api_key,
-                "anthropic-version": "2023-06-01",
-                "content-type": "application/json",
-            },
-            json={
-                "model": self.model,
-                "max_tokens": self.max_output_tokens,
-                "thinking": {"type": self.thinking_mode},
-                "system": system,
-                "messages": [{"role": "user", "content": user}],
-            },
-            timeout=REQUEST_TIMEOUT_S,
-        )
+        try:
+            resp = requests.post(
+                self.url,
+                headers={
+                    "x-api-key": api_key,
+                    "anthropic-version": "2023-06-01",
+                    "content-type": "application/json",
+                },
+                json={
+                    "model": self.model,
+                    "max_tokens": self.max_output_tokens,
+                    "thinking": {"type": self.thinking_mode},
+                    "system": system,
+                    "messages": [{"role": "user", "content": user}],
+                },
+                timeout=REQUEST_TIMEOUT_S,
+            )
+        except requests.RequestException as e:
+            # FIX (2026-10-14): previously unhandled -- a timeout/connection
+            # failure here used to propagate as a raw exception -> HTTP 500.
+            raise LLMCallError(f"network error reaching Anthropic: {e}") from e
         if not resp.ok:
             raise LLMCallError(f"Anthropic API error {resp.status_code}: {resp.text[:300]}")
         body = resp.json()
@@ -136,17 +157,22 @@ class OpenAIProvider:
     max_output_tokens = 1500
 
     def complete(self, system: str, user: str, api_key: str) -> str:
-        resp = requests.post(
-            self.url,
-            headers={"Authorization": f"Bearer {api_key}", "content-type": "application/json"},
-            json={
-                "model": self.model,
-                "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
-                "response_format": {"type": "json_object"},
-                "max_tokens": self.max_output_tokens,
-            },
-            timeout=REQUEST_TIMEOUT_S,
-        )
+        try:
+            resp = requests.post(
+                self.url,
+                headers={"Authorization": f"Bearer {api_key}", "content-type": "application/json"},
+                json={
+                    "model": self.model,
+                    "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
+                    "response_format": {"type": "json_object"},
+                    "max_tokens": self.max_output_tokens,
+                },
+                timeout=REQUEST_TIMEOUT_S,
+            )
+        except requests.RequestException as e:
+            # FIX (2026-10-14): same missing-try/except bug as Anthropic's
+            # complete() above -- previously unhandled, propagated as 500.
+            raise LLMCallError(f"network error reaching OpenAI: {e}") from e
         if not resp.ok:
             raise LLMCallError(f"OpenAI API error {resp.status_code}: {resp.text[:300]}")
         body = resp.json()

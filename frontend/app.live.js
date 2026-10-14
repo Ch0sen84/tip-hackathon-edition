@@ -199,6 +199,13 @@ async function loadSettings() {
     const d = await apiGet("/api/settings");
     _currentMode = d.mode || "demo";
     renderModePill(d.mode, d.public_demo);
+    // REAL BUG FIX (2026-10-14): manual ticker entry only makes sense in
+    // Live Mode -- Demo's fixtures genuinely only exist for the dropdown's
+    // 11 named scenarios, so showing a free-text box there would just
+    // produce a confusing 404. Toggled here (not guessed) because this is
+    // exactly where the real, just-fetched mode becomes known.
+    const manualInput = document.getElementById("tickerManualInput");
+    if (manualInput) manualInput.style.display = _currentMode === "live" ? "" : "none";
     const { publicDemo } = renderSettingsView(d);
     document.getElementById("btnModeDemo").addEventListener("click", () => setMode("demo"));
     if (!publicDemo) {
@@ -392,6 +399,23 @@ document.querySelectorAll(".nav-item").forEach((b) => {
 });
 document.getElementById("refreshRadar").addEventListener("click", loadRadar);
 document.getElementById("loadTicker").addEventListener("click", () => {
+  // REAL BUG FIX (2026-10-14): prefer the manually-typed ticker (Live
+  // Mode only -- see loadSettings()'s visibility toggle above) over the
+  // fixed-watchlist dropdown, so a real UW ticker outside the configured
+  // TIP_LIVE_WATCHLIST can actually be analyzed. Basic client-side format
+  // check mirrors the backend's TICKER_RE (1-5 letters, optional .suffix)
+  // purely for an immediate, friendly error -- the backend's own
+  // validate_ticker() remains the real enforcement point.
+  const manualInput = document.getElementById("tickerManualInput");
+  const manualRaw = manualInput ? manualInput.value.trim().toUpperCase() : "";
+  if (manualRaw) {
+    if (!/^[A-Z]{1,5}(\.[A-Z])?$/.test(manualRaw)) {
+      alert(`"${manualRaw}" doesn't look like a valid ticker symbol (1-5 letters, optional .suffix like BRK.A).`);
+      return;
+    }
+    navigateToTicker(manualRaw, loadTickerDetail);
+    return;
+  }
   const t = document.getElementById("tickerSelect").value;
   if (t) navigateToTicker(t, loadTickerDetail);
 });
@@ -402,7 +426,15 @@ document.getElementById("loadTicker").addEventListener("click", () => {
 // browser refresh. Radar is always loaded first regardless of the target
 // view because it's what populates _knownTickers (needed to validate a
 // URL-supplied ticker) and the <select> options Ticker Analysis uses.
-window.TIP_NAV_HANDLERS = { loadTickerDetail, getKnownTickers: () => _knownTickers };
+window.TIP_NAV_HANDLERS = {
+  loadTickerDetail,
+  getKnownTickers: () => _knownTickers,
+  // REAL BUG FIX (2026-10-14): lets applyNavState's refresh/deep-link
+  // path accept a manually-typed, format-valid Live Mode ticker the same
+  // way the Analyze button's click handler already does -- otherwise a
+  // ticker outside TIP_LIVE_WATCHLIST worked once, then broke on refresh.
+  isArbitraryTickerAllowed: () => _currentMode === "live",
+};
 wireHistoryHandling();
 (async function bootstrap() {
   await loadSettings();
