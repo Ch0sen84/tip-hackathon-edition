@@ -29,6 +29,14 @@ services:
       # explicitly inside the already-mounted volume fixes this for real,
       # not just for this one redeploy.
       TIP_SETTINGS_PATH: /srv/data/settings.json
+      # APPROVED 2026-10-14: real MCP-protocol transport for Investigate
+      # with AI's tool execution (see mcp_tool_client.py). Default stays
+      # "rest" for anyone else cloning the repo -- zero behavior change
+      # for them; N5's own .env overrides this to "mcp" for the genuine
+      # end-to-end verification test. NOT the same thing as the always-
+      # genuine-MCP standalone "Test UW MCP Connection" button in
+      # Settings, which never depended on this variable.
+      INVESTIGATE_TRANSPORT: ${INVESTIGATE_TRANSPORT:-rest}
     volumes:
       - tip-data:/srv/data
 
