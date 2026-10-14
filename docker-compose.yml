@@ -17,6 +17,18 @@ services:
       UW_BASE_URL: ${UW_BASE_URL:-https://api.unusualwhales.com}
       UW_CLIENT_API_ID: ${UW_CLIENT_API_ID:-}
       TIP_LIVE_WATCHLIST: ${TIP_LIVE_WATCHLIST:-SPY,QQQ,NVDA,TSLA}
+      # REAL BUG FIX (2026-10-14): settings_store.py defaults
+      # TIP_SETTINGS_PATH to "./data/settings.json", resolved relative to
+      # the app's /srv/backend working directory -- i.e. /srv/backend/
+      # data/settings.json. The volume below has ALWAYS been mounted at
+      # /srv/data, a completely separate sibling directory. Settings
+      # (saved UW/AI keys, live-mode activation, verification state) have
+      # never actually survived a container recreation on this
+      # deployment -- discovered when a routine code-fix redeploy wiped a
+      # real hand-configured Live Mode setup. Pointing the settings file
+      # explicitly inside the already-mounted volume fixes this for real,
+      # not just for this one redeploy.
+      TIP_SETTINGS_PATH: /srv/data/settings.json
     volumes:
       - tip-data:/srv/data
 
