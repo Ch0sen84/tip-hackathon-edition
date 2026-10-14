@@ -13,11 +13,25 @@ backend/app/core/tip_evidence.py for display. No business logic lives here.
 """
 from __future__ import annotations
 
+import logging
 import os
 from datetime import date, timedelta
 from typing import Optional
 
 from pathlib import Path
+
+# REAL BUG FIX (2026-10-14): discovered while diagnosing the NVDA/PLTR
+# synthesis-truncation report -- app.ai.orchestrator's and
+# app.ai.llm_provider's logger.info(...) diagnostic lines (tool-selection
+# round completed, tool execution N/M succeeded, etc.) were being
+# silently swallowed. Nothing in this app ever called logging.basicConfig,
+# so those loggers had no handler and fell back to Python's "last resort"
+# handler, which only shows WARNING and above -- the exact INFO-level
+# lines needed to diagnose which round/stage failed were invisible in
+# `docker logs`. uvicorn's own request-logging keeps working either way;
+# this just makes our OWN app loggers actually emit INFO to the same
+# stream uvicorn already writes to stdout.
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware

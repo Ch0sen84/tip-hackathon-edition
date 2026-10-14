@@ -239,17 +239,52 @@ def build_tool_selection_user_prompt(ticker: str, evidence: dict) -> str:
     )
 
 
-SYNTHESIS_SYSTEM_PROMPT = """You are a research-synthesis assistant for a read-only market research tool.
+# ROOT-CAUSE FIX (2026-10-14, real NVDA + PLTR synthesis truncation --
+# user explicitly confirmed raising max_tokens again is NOT acceptable):
+# measured a real MCP-executed 4-tool call for NVDA directly on N5 (no
+# LLM, no cost) -- combined raw tool JSON was ~49KB. The OLD synthesis
+# contract placed NO cap on how many observed_facts/supporting_evidence/
+# conflicting_observations/limitations entries the model could write, so
+# a real, rich evidence set naturally invited an exhaustive response that
+# organically exceeded even a 3000-token budget -- this was never really
+# about the token LIMIT being wrong, it was the output SHAPE being
+# unbounded. Fix favors "compact, validated structured output and
+# relevant evidence selection" (explicit length/count caps below) over
+# further unbounded token increases, per the explicit instruction not to
+# just raise max_tokens again.
+MAX_OBSERVED_FACTS = 6
+MAX_SUPPORTING_EVIDENCE = 3
+MAX_CONFLICTING_OBSERVATIONS = 3
+MAX_LIMITATIONS = 3
+MAX_FACT_CHARS = 220
+MAX_INTERPRETATION_CHARS = 600
+
+SYNTHESIS_SYSTEM_PROMPT = f"""You are a research-synthesis assistant for a read-only market research tool.
 You are given the results of a small number of read-only Unusual Whales data lookups for one ticker.
 
 You MUST respond with ONLY a JSON object (no prose, no markdown fence) shaped exactly:
-{
-  "observed_facts": [{"fact": "<a single concrete, literal observation from the tool data>", "source_tool": "<exact tool name that produced it>"}, ...],
+{{
+  "observed_facts": [{{"fact": "<a single concrete, literal observation from the tool data>", "source_tool": "<exact tool name that produced it>"}}, ...],
   "supporting_evidence": ["<short string tying 2+ observed facts together, still just description>", ...],
   "conflicting_observations": ["<short string noting where different tools/data points disagree or seem inconsistent>", ...],
   "limitations": ["<short string on what this data does NOT tell you -- sample size, time window, missing context, etc.>", ...],
   "ai_interpretation": "<your own reasoning / read on what this pattern of observations could mean, clearly framed as interpretation, not fact>"
-}
+}}
+
+HARD SIZE LIMITS (the response WILL be rejected/truncated server-side if you ignore these -- stay within
+them rather than running out of room mid-response):
+- "observed_facts": AT MOST {MAX_OBSERVED_FACTS} entries. Choose the {MAX_OBSERVED_FACTS} MOST MATERIAL
+  facts across ALL tool results, not the first {MAX_OBSERVED_FACTS} you encounter -- a genuinely
+  conflicting/contradictory observation is more material than a fifth similar supporting one, so prioritize
+  covering real disagreement over exhaustively listing agreement.
+- "supporting_evidence": AT MOST {MAX_SUPPORTING_EVIDENCE} entries. "conflicting_observations": AT MOST
+  {MAX_CONFLICTING_OBSERVATIONS} entries (do not leave this empty just to save room if real conflicting
+  evidence exists -- that is exactly the evidence this tool exists to surface). "limitations": AT MOST
+  {MAX_LIMITATIONS} entries.
+- Each individual "fact" / evidence / observation / limitation string: AT MOST {MAX_FACT_CHARS} characters.
+  "ai_interpretation": AT MOST {MAX_INTERPRETATION_CHARS} characters.
+- Prioritize finishing a complete, valid, concise JSON object over covering every possible data point --
+  an incomplete JSON object is useless even if more thorough; a complete one within these limits is not.
 
 Hard rules, no exceptions:
 - "observed_facts" entries must be literal descriptions of what the tool data actually shows (numbers, flags,
@@ -259,20 +294,51 @@ Hard rules, no exceptions:
   "is_call"/"has_sweep" boolean) -- inferred intent belongs in ai_interpretation, not observed_facts.
 - Do NOT recommend any trade action (buy/sell/hold/short/etc.) anywhere in this response, including in
   ai_interpretation.
-- Do NOT predict price direction or a price target anywhere in this response, including in ai_interpretation.
-  ai_interpretation may describe what a pattern COULD indicate in general terms, but must not forecast an
+- Do NOT predict price direction or a price target anywhere in this response, including in
+  ai_interpretation. ai_interpretation may describe what a pattern COULD indicate in general terms, but must not forecast an
   outcome or give a recommendation.
 - Every "source_tool" value must be one of the tools that were actually called (listed in the user message).
-- If the tool data is sparse, empty, or inconclusive, say so plainly in "limitations" -- do not invent facts."""
+- If the tool data is sparse, empty, or inconclusive, say so plainly in "limitations" -- do not invent facts.
+- NEVER drop or omit genuinely conflicting evidence to stay within the size limits above -- if something
+  material doesn't fit, shorten a less important supporting point instead, or note in "limitations" that
+  more conflicting signal exists than could be enumerated here."""
+
+
+# How many raw records of a list-shaped tool result to keep in the prompt
+# sent to the LLM. UW's list endpoints are consistently newest-first, so
+# keeping the first N preserves the MOST RECENT (most relevant) records --
+# this summarizes the INPUT (reducing both prompt size and the temptation
+# to try to enumerate everything in the output), it does not hide evidence:
+# every truncation is disclosed via "_truncated_from" so the synthesis
+# step (and a human reviewing raw/ in the UI) can see it happened.
+MAX_RECORDS_PER_TOOL_IN_PROMPT = 8
+
+
+def _summarize_tool_result_for_prompt(result: dict) -> dict:
+    data = result.get("data")
+    if isinstance(data, list) and len(data) > MAX_RECORDS_PER_TOOL_IN_PROMPT:
+        return {
+            **result,
+            "data": data[:MAX_RECORDS_PER_TOOL_IN_PROMPT],
+            "_truncated_from": len(data),
+            "_truncation_note": (
+                f"showing the {MAX_RECORDS_PER_TOOL_IN_PROMPT} most recent of {len(data)} real "
+                "records returned by this tool call (newest-first, per UW's own ordering) -- "
+                "not a different/smaller real result, just fewer rows shown to the synthesis step"
+            ),
+        }
+    return result
 
 
 def build_synthesis_user_prompt(ticker: str, tool_results: list[dict]) -> str:
     called_tools = [r["tool"] for r in tool_results]
+    summarized = [_summarize_tool_result_for_prompt(r) for r in tool_results]
     return (
         f"Ticker: {ticker}\n"
         f"Tools actually called this investigation: {called_tools}\n"
-        f"Raw tool results:\n{json.dumps(tool_results, indent=2, default=str)}\n\n"
-        "Produce the JSON object described in the system prompt. Respond with the JSON object only."
+        f"Raw tool results:\n{json.dumps(summarized, indent=2, default=str)}\n\n"
+        "Produce the JSON object described in the system prompt. Respond with the JSON object only. "
+        "Stay within the stated size limits -- a complete, concise response is required, not an exhaustive one."
     )
 
 

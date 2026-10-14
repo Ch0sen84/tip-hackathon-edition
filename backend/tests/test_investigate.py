@@ -11,7 +11,21 @@ from fastapi.testclient import TestClient
 
 from app.ai import orchestrator
 from app.ai.allowlist import MAX_TOOLS_PER_INVESTIGATION
-from app.ai.schemas import MalformedAIResponse, validate_investigation_result
+from app.ai.llm_provider import (
+    MAX_RECORDS_PER_TOOL_IN_PROMPT,
+    build_synthesis_user_prompt,
+    _summarize_tool_result_for_prompt,
+)
+from app.ai.schemas import (
+    MAX_CONFLICTING_OBSERVATIONS,
+    MAX_FACT_CHARS,
+    MAX_INTERPRETATION_CHARS,
+    MAX_LIMITATIONS,
+    MAX_OBSERVED_FACTS,
+    MAX_SUPPORTING_EVIDENCE,
+    MalformedAIResponse,
+    validate_investigation_result,
+)
 from app.ai.validation import ValidationError, validate_tool_selection
 
 GOOD_SELECTION = [
@@ -346,3 +360,112 @@ def test_route_live_mode_happy_path_uses_mocked_mcp_equivalent_and_llm(app_main,
     assert set(body.keys()) >= {
         "observed_facts", "supporting_evidence", "conflicting_observations", "limitations", "ai_interpretation",
     }
+
+
+# ---------------------------------------------------------------------------
+# ROOT-CAUSE FIX regression guards (2026-10-14): real NVDA + PLTR synthesis
+# truncation at the 3000-token limit. Root cause was an UNBOUNDED output
+# contract meeting a REAL, rich evidence set (measured ~49KB combined raw
+# JSON for a real 4-tool NVDA call on N5, no LLM involved) -- not a wrong
+# token limit. These tests use realistically large/verbose payloads, not
+# toy ones, because the bug only reproduces at realistic scale.
+# ---------------------------------------------------------------------------
+
+def _big_realistic_tool_result(tool="get_flow_alerts", n_records=120):
+    """Shaped like a real UW list response: many records, several fields
+    each, long-ish string values -- mirrors the ~24KB measured for a real
+    get_flow_alerts(limit=20) call scaled up to show the summarization
+    actually bounds size regardless of how much real data comes back."""
+    return {
+        "tool": tool,
+        "ok": True,
+        "data": [
+            {
+                "ticker": "NVDA",
+                "created_at": f"2026-10-{10 + (i % 5):02d}T{9 + (i % 7):02d}:{i % 60:02d}:00Z",
+                "premium": 1_000_000 + i * 1234,
+                "sentiment": "bullish" if i % 2 == 0 else "bearish",
+                "description": (
+                    f"Large options sweep #{i} across multiple exchanges, size {i * 37} contracts, "
+                    f"strike {100 + i} expiring in {i % 90} days, flagged as unusual relative to "
+                    "30-day average volume for this contract."
+                ),
+            }
+            for i in range(n_records)
+        ],
+    }
+
+
+def test_summarize_tool_result_caps_records_but_discloses_the_truncation():
+    big = _big_realistic_tool_result(n_records=120)
+    summarized = _summarize_tool_result_for_prompt(big)
+    assert len(summarized["data"]) == MAX_RECORDS_PER_TOOL_IN_PROMPT
+    assert summarized["_truncated_from"] == 120
+    assert "_truncation_note" in summarized
+    # newest-first preserved: the first N records kept, not a random sample
+    assert summarized["data"][0] == big["data"][0]
+
+
+def test_summarize_tool_result_leaves_small_results_untouched():
+    small = _big_realistic_tool_result(n_records=3)
+    summarized = _summarize_tool_result_for_prompt(small)
+    assert summarized == small
+    assert "_truncated_from" not in summarized
+
+
+def test_build_synthesis_user_prompt_stays_bounded_even_with_a_real_scale_4_tool_payload():
+    """The actual real-world scenario: 4 tools, each with a realistically
+    large result (mirrors the measured ~49KB NVDA case scaled up to make
+    sure the cap, not luck, is what keeps this bounded)."""
+    tool_results = [
+        _big_realistic_tool_result(tool=t, n_records=120)
+        for t in ["get_flow_alerts", "get_dark_pool_trades", "get_option_trades", "get_insider_activity_by_ticker"]
+    ]
+    prompt = build_synthesis_user_prompt("NVDA", tool_results)
+    # 8 records/tool x 4 tools, not 120 x 4 -- this is the actual fix.
+    assert prompt.count('"created_at"') <= MAX_RECORDS_PER_TOOL_IN_PROMPT * 4
+    assert len(prompt) < 20_000  # well below the ~49KB that triggered the real bug
+
+
+def test_server_side_caps_truncate_an_oversized_llm_response_rather_than_crash_or_pass_through_raw():
+    """Defense in depth: even if the model ignores the prompt's size
+    limits, the validator must cap -- not reject outright, not silently
+    accept -- and must say so via server_truncated=True."""
+    raw = {
+        "observed_facts": [
+            {"fact": f"Observed fact number {i} with a fairly long description. " * 3, "source_tool": "get_flow_alerts"}
+            for i in range(20)  # way over MAX_OBSERVED_FACTS
+        ],
+        "supporting_evidence": [f"supporting point {i} " * 10 for i in range(10)],
+        "conflicting_observations": [f"conflicting point {i} " * 10 for i in range(10)],
+        "limitations": [f"limitation {i} " * 10 for i in range(10)],
+        "ai_interpretation": "A very long interpretation. " * 60,
+    }
+    result = validate_investigation_result(raw, "NVDA", called_tools=["get_flow_alerts"])
+    assert result.server_truncated is True
+    assert len(result.observed_facts) == MAX_OBSERVED_FACTS
+    assert len(result.supporting_evidence) == MAX_SUPPORTING_EVIDENCE
+    assert len(result.conflicting_observations) == MAX_CONFLICTING_OBSERVATIONS
+    assert len(result.limitations) == MAX_LIMITATIONS
+    assert len(result.ai_interpretation) <= MAX_INTERPRETATION_CHARS
+    for f in result.observed_facts:
+        assert len(f.fact) <= MAX_FACT_CHARS
+
+
+def test_server_side_caps_leave_a_compact_realistic_response_completely_untouched():
+    """The common/intended case: a response that already respects the
+    stated limits must NOT be flagged or altered at all."""
+    raw = {
+        "observed_facts": [
+            {"fact": "NVDA saw 42 bullish flow alerts totaling $12.4M premium in the last session.", "source_tool": "get_flow_alerts"},
+            {"fact": "Dark pool volume was 2.1M shares, above the 10-day average of 1.4M.", "source_tool": "get_dark_pool_trades"},
+        ],
+        "supporting_evidence": ["Elevated bullish flow aligns with above-average dark pool volume."],
+        "conflicting_observations": ["Short interest rose 3% over the same window, which doesn't fit a purely bullish read."],
+        "limitations": ["Only the most recent 20 flow alerts were available; longer-term context is missing."],
+        "ai_interpretation": "Taken together, this pattern could reflect accumulation, but the short-interest rise is a real counter-signal worth weighing.",
+    }
+    result = validate_investigation_result(raw, "NVDA", called_tools=["get_flow_alerts", "get_dark_pool_trades"])
+    assert result.server_truncated is False
+    assert len(result.observed_facts) == 2
+    assert result.ai_interpretation == raw["ai_interpretation"]

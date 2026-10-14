@@ -21,7 +21,7 @@ const BASE = process.argv[2] || "http://127.0.0.1:8899";
 
 // --- minimal DOM stub -------------------------------------------------
 class FakeEl {
-  constructor(id) { this.id = id; this._html = ""; this._value = ""; this._style = {}; this.children = []; this.listeners = {}; }
+  constructor(id) { this.id = id; this._html = ""; this._value = ""; this._style = {}; this.children = []; this.listeners = {}; this._nextSibling = null; }
   set innerHTML(v) { this._html = v; }
   get innerHTML() { return this._html; }
   set value(v) { this._value = v; }
@@ -30,7 +30,27 @@ class FakeEl {
   addEventListener(ev, fn) { (this.listeners[ev] = this.listeners[ev] || []).push(fn); }
   querySelectorAll() { return []; }
   querySelector() { return null; }
-  classList = { add() {}, remove() {}, toggle() {} };
+  classList = { add() {}, remove() {}, toggle() {}, contains: (c) => (this._html || "").includes(`class="${c}"`) };
+  // Minimal real-DOM-shaped sibling support (2026-10-14): mountCandlestickChart
+  // now attaches an info panel via root.after(el) / reads root.nextElementSibling
+  // to remove a stale one on re-render. A plain object stand-in (not a real
+  // FakeEl) is enough -- the code under test only reads .classList.contains
+  // and .remove() on it.
+  get nextElementSibling() { return this._nextSibling; }
+  after(node) {
+    node.remove = () => { if (this._nextSibling === node) this._nextSibling = null; };
+    this._nextSibling = node;
+  }
+}
+
+// document.createElement stub -- mountCandlestickChart's info panel creates
+// a plain div via this, sets className/innerHTML, then attaches it with
+// root.after(). Needs classList.contains for the de-dup check on re-render.
+function fakeCreateElement() {
+  const node = { className: "", _html: "", style: {} };
+  Object.defineProperty(node, "innerHTML", { set(v) { this._html = v; }, get() { return this._html; } });
+  node.classList = { contains: (c) => node.className.split(/\s+/).includes(c) };
+  return node;
 }
 
 const elements = new Map();
@@ -49,6 +69,7 @@ global.document = {
   // properties of null", which is exactly the failure this harness hit
   // before this fix -- not a bug in the app code under test).
   querySelector: (sel) => el(sel),
+  createElement: () => fakeCreateElement(),
 };
 global.history = { replaceState: () => {}, pushState: () => {} };
 global.location = { pathname: "/", search: "", hash: "" };

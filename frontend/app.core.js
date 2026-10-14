@@ -887,48 +887,97 @@ function mountCandlestickChart(containerId, ohlc) {
   series.setData(bars);
   const candleDates = bars.map((b) => b.time);
 
+  // REAL BUG FIX (2026-10-14, re-reported live on NVDA + PLTR -- the
+  // previous fix did NOT resolve this): measured directly against N5,
+  // real live NVDA evidence returned 600 markers, every single one
+  // dated on the SAME single most-recent candle (today -- real, high
+  // flow-alert volume, not a bug in itself). The previous fix correctly
+  // stopped markers landing on the WRONG day; it did nothing for many
+  // markers correctly landing on the SAME day, which is exactly what
+  // produces a visual vertical stack -- lightweight-charts does not
+  // offset multiple markers sharing one x-position, so N real markers
+  // on one bar render as N literally-overlapping circles. Root cause
+  // was volume, not timestamp mapping.
+  //
+  // Fix: GROUP markers by (bar, kind) into ONE chart marker per group,
+  // labeled with a real count ("23 flow alerts, latest $187.20") instead
+  // of plotting every individual event -- this is honest aggregation,
+  // not hiding evidence: every underlying event is still listed in the
+  // "Evidence on this chart" detail table rendered below (see
+  // renderMarkerDetailTable), so nothing is dropped, just not each
+  // individually plotted as a separate overlapping dot.
   let excludedCount = 0;
-  const markers = (ohlc.markers || []).map((m) => {
+  const groups = new Map(); // key: `${barTime}|${kind}` -> { barTime, kind, events: [...] }
+  for (const m of ohlc.markers || []) {
     const barTime = nearestBarTime(dateOnly(m.time), candleDates);
     if (!barTime) {
       excludedCount += 1;
-      return null;
+      continue;
     }
-    const text = m.price != null
-      ? `${m.label} @ ${Number(m.price).toFixed(2)}`
-      : `${m.label} (time only -- no price field in source data)`;
+    const key = `${barTime}|${m.kind}`;
+    if (!groups.has(key)) groups.set(key, { barTime, kind: m.kind, events: [] });
+    groups.get(key).events.push(m);
+  }
+  const allEvents = []; // flat list for the detail table, newest-first within each group preserved
+  const markers = Array.from(groups.values()).map((g) => {
+    allEvents.push(...g.events);
+    const n = g.events.length;
+    const withPrice = g.events.filter((e) => e.price != null);
+    const latestPrice = withPrice.length ? Number(withPrice[withPrice.length - 1].price) : null;
+    const kindLabel = g.kind === "darkpool_trade" ? "dark-pool trade" : "flow alert";
+    const text = n === 1
+      ? (g.events[0].price != null ? `${g.events[0].label} @ ${Number(g.events[0].price).toFixed(2)}` : g.events[0].label)
+      : `${n} ${kindLabel}${n === 1 ? "" : "s"}${latestPrice != null ? ` (latest ${latestPrice.toFixed(2)})` : ""}`;
     return {
-      time: barTime,
-      position: m.kind === "darkpool_trade" ? "belowBar" : "aboveBar",
-      color: m.kind === "darkpool_trade" ? "#60a5fa" : "#f59e0b",
+      time: g.barTime,
+      position: g.kind === "darkpool_trade" ? "belowBar" : "aboveBar",
+      color: g.kind === "darkpool_trade" ? "#60a5fa" : "#f59e0b",
       shape: "circle",
       text,
     };
-  }).filter(Boolean);
+  });
   series.setMarkers(markers);
   chart.timeScale().fitContent();
 
-  // Honest disclosure (2026-10-14 fix) instead of silently clamping
-  // out-of-range markers onto the last candle: if any evidence events are
-  // dated after the chart's last fetched bar (e.g. today's real-time
-  // alerts while today's daily candle hasn't closed/finalized yet), say
-  // so plainly rather than hiding them without explanation or inventing a
-  // position for them.
-  // Remove any note left by a PRIOR call (this function re-renders in
-  // place on re-selection/mode-switch) before possibly adding a fresh one
-  // -- otherwise repeated calls would stack up duplicate notes as siblings
-  // of `root` (the note itself lives outside root, since root.innerHTML
-  // is cleared on every call and would otherwise wipe it immediately).
-  const existingNote = root.nextElementSibling;
-  if (existingNote && existingNote.classList.contains("chart-markers-excluded-note")) {
-    existingNote.remove();
+  // Info panel below the chart (2026-10-14 fix): both the excluded-marker
+  // disclosure AND the full, ungrouped event list. Grouping markers on
+  // the chart above (into one dot per bar+kind, with a count) fixes the
+  // visual stacking bug, but every real event must still be genuinely
+  // visible somewhere -- this is that "somewhere", not a cosmetic extra.
+  // Lives OUTSIDE `root` as a single sibling container (root.innerHTML is
+  // cleared on every call, which would otherwise wipe it immediately);
+  // removed and rebuilt wholesale each render so repeated calls never
+  // accumulate duplicate siblings.
+  const existingInfo = root.nextElementSibling;
+  if (existingInfo && existingInfo.classList.contains("chart-markers-info")) {
+    existingInfo.remove();
   }
-  if (excludedCount > 0) {
-    const note = document.createElement("div");
-    note.className = "muted chart-markers-excluded-note";
-    note.style.marginTop = "6px";
-    note.textContent = `${excludedCount} evidence marker(s) dated after this chart's most recent bar are not shown (no real candle exists yet for that date) -- not clamped or estimated.`;
-    root.after(note);
+  if (excludedCount > 0 || allEvents.length > 0) {
+    const info = document.createElement("div");
+    info.className = "chart-markers-info";
+    info.style.marginTop = "6px";
+    let html = "";
+    if (excludedCount > 0) {
+      html += `<div class="muted">${excludedCount} evidence marker(s) dated after this chart's most recent bar are not shown (no real candle exists yet for that date) -- not clamped or estimated.</div>`;
+    }
+    if (allEvents.length > 0) {
+      const sorted = [...allEvents].sort((a, b) => (a.time < b.time ? 1 : -1)); // newest first
+      const rows = sorted.map((e) => `
+        <tr>
+          <td>${esc(e.time)}</td>
+          <td>${esc(e.kind === "darkpool_trade" ? "Dark-pool trade" : "Flow alert")}</td>
+          <td>${esc(e.label || "")}</td>
+          <td>${e.price != null ? Number(e.price).toFixed(2) : "--"}</td>
+        </tr>`).join("");
+      html += `
+        <details class="chart-markers-detail">
+          <summary class="muted">Evidence on this chart (${allEvents.length} event${allEvents.length === 1 ? "" : "s"}, grouped above by day/kind -- every individual event below)</summary>
+          <table class="chart-markers-table"><thead><tr><th>Time</th><th>Kind</th><th>Label</th><th>Price</th></tr></thead>
+          <tbody>${rows}</tbody></table>
+        </details>`;
+    }
+    info.innerHTML = html;
+    root.after(info);
   }
 
   root._tipChart = chart;

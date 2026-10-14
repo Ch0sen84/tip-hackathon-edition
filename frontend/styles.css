@@ -251,6 +251,13 @@ pre.raw { background: var(--panel3); padding: 12px; border-radius: 8px; overflow
 }
 .muted { color: var(--muted); font-size: 12px; }
 
+/* --- Chart evidence markers (2026-10-14 fix) ------------------------- */
+.chart-markers-info { font-size: 12px; }
+.chart-markers-detail summary { cursor: pointer; padding: 4px 0; }
+.chart-markers-table { width: 100%; border-collapse: collapse; margin-top: 6px; font-size: 12px; max-height: 320px; }
+.chart-markers-table th, .chart-markers-table td { text-align: left; padding: 3px 8px; border-bottom: 1px solid rgba(255,255,255,0.08); }
+.chart-markers-table thead th { color: var(--muted); font-weight: 600; }
+
 /* --- Investigate with AI -------------------------------------------- */
 .ai-card {
   border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--panel);

@@ -1,20 +1,25 @@
 """Fixed, read-only tool allowlist for the bounded AI investigation feature.
 
 These are the 10 tool names given to us as a verified starting point for
-Unusual Whales's official hosted MCP server. We did NOT end up connecting to
-that live MCP server at all (see README.md "Investigate with AI" section
-for why -- short version: the installed `mcp` Python SDK's dependency
-pins conflicted with this project's FastAPI/Starlette version in a way that
-either broke the whole app's test suite or required downgrading to an `mcp`
-release with published HIGH-severity security advisories; neither was an
-acceptable bounded-effort tradeoff). Execution instead goes through
-rest_tool_client.py, which maps each of these exact tool names onto a
-plain REST call against the already-working UW REST API (same host
-LiveUWAdapter already talks to). The tool *names* below are preserved
-exactly as given; only the transport underneath changed from MCP to REST.
+Unusual Whales's official hosted MCP server.
+
+STALE-DOCSTRING FIX (2026-10-14): this file used to claim genuine MCP was
+never wired up at all because of a dependency conflict, with execution
+always going through rest_tool_client.py's REST mapping instead. That
+was true early on, but is NOT current reality and the comment was never
+updated when it changed -- this is exactly the kind of stale internal
+doc that actively misleads whoever reads it next. As of INVESTIGATE_TRANSPORT
+support (mcp_tool_client.py + the isolated mcp_isolated/ venv, see
+INSTALL_AGENT.md / README.md), genuine MCP-protocol calls against UW's
+hosted server DO run for real when INVESTIGATE_TRANSPORT=mcp -- verified
+multiple times against N5. rest_tool_client.py's REST mapping remains in
+place ONLY as the default/fallback transport (INVESTIGATE_TRANSPORT=rest
+or unset), not as the sole execution path. The tool *names* below are
+identical across both transports; only which one executes them differs.
 
 This allowlist is intentionally the ONLY set of tool names the orchestrator
-will ever execute. Never add a write/order/account tool here.
+will ever execute, regardless of transport. Never add a write/order/account
+tool here.
 """
 from __future__ import annotations
 
