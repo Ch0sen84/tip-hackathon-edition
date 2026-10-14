@@ -17,7 +17,7 @@ import logging
 
 from ..adapters.live_uw_adapter import UWRestClient
 from .allowlist import MAX_TOOLS_PER_INVESTIGATION
-from .llm_provider import select_tools, synthesize  # noqa: F401  (re-exported for monkeypatching)
+from .llm_provider import LLMCallError, select_tools, synthesize  # noqa: F401  (re-exported for monkeypatching)
 from .mcp_tool_client import execute_tools_mcp  # noqa: F401  (re-exported for monkeypatching)
 from .rest_tool_client import execute_tool  # noqa: F401  (re-exported for monkeypatching)
 from .schemas import InvestigationResult, MalformedAIResponse, validate_investigation_result
@@ -52,7 +52,19 @@ def investigate(
     safe_ticker = validate_ticker(ticker)
 
     # --- Round 1: tool selection (exactly one LLM call) -------------------
-    raw_selection = select_tools(safe_ticker, evidence, ai_provider, ai_api_key)
+    # Round-boundary logging + error re-raising below exist specifically
+    # because of a real diagnosed gap: a failed investigation previously
+    # gave NO indication of which of the two rounds (tool selection vs
+    # synthesis) actually failed -- it had to be inferred after the fact
+    # from the length of the error text. Nothing here logs prompt/response
+    # content, only which round and whether it succeeded.
+    try:
+        raw_selection = select_tools(safe_ticker, evidence, ai_provider, ai_api_key)
+    except LLMCallError as e:
+        logger.warning("tool-selection round (round 1) failed for %s: %s", safe_ticker, e)
+        raise type(e)(f"tool-selection round failed: {e}") from e
+    logger.info("tool-selection round (round 1) completed for %s", safe_ticker)
+
     accepted_calls, rejected_selection = validate_tool_selection(raw_selection, safe_ticker)
     if not accepted_calls:
         raise NoValidToolsSelectedError(
@@ -66,10 +78,20 @@ def investigate(
     else:
         client = UWRestClient(api_key=uw_api_key, base_url=uw_base_url, client_api_id=uw_client_api_id)
         tool_results = [execute_tool(call["tool"], call["args"]["ticker"], call["args"], client) for call in accepted_calls]
+    succeeded = sum(1 for r in tool_results if r.get("ok"))
+    logger.info(
+        "tool execution (transport=%s) completed for %s: %d/%d calls succeeded",
+        transport, safe_ticker, succeeded, len(tool_results),
+    )
 
     # --- Round 2: synthesis (the one allowed additional reasoning round) --
     called_tools = [r["tool"] for r in tool_results]
-    raw_synthesis = synthesize(safe_ticker, tool_results, ai_provider, ai_api_key)
+    try:
+        raw_synthesis = synthesize(safe_ticker, tool_results, ai_provider, ai_api_key)
+    except LLMCallError as e:
+        logger.warning("synthesis round (round 2) failed for %s: %s", safe_ticker, e)
+        raise type(e)(f"synthesis round failed: {e}") from e
+    logger.info("synthesis round (round 2) completed for %s", safe_ticker)
     if not isinstance(raw_synthesis, dict):
         raise MalformedAIResponse(f"synthesis round did not return a JSON object (got {type(raw_synthesis).__name__})")
     result = validate_investigation_result(raw_synthesis, safe_ticker, called_tools)

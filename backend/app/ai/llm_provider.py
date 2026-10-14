@@ -28,7 +28,19 @@ class LLMCallError(RuntimeError):
     pass
 
 
+class LLMTruncatedOutputError(LLMCallError):
+    """Raised specifically when the provider's own stop_reason confirms the
+    response was cut off before finishing (Anthropic stop_reason ==
+    "max_tokens", OpenAI finish_reason == "length") -- as opposed to any
+    other parse failure. Callers can give a much more specific, actionable
+    message for this case than a generic "not valid JSON"."""
+
+
 class _Provider(Protocol):
+    name: str
+    url: str
+    model: str
+
     def complete(self, system: str, user: str, api_key: str) -> str: ...
 
 
@@ -42,6 +54,27 @@ class AnthropicProvider:
     # in/out, well inside this feature's 2-call bound. Pin it explicitly
     # here (not an alias) so behavior/pricing doesn't drift silently.
     model = "claude-sonnet-5-5"
+    # ROOT-CAUSE FIX (2026-10-14, real NVDA investigation failure: "LLM
+    # response was not valid JSON: Unterminated string..."): per Anthropic's
+    # own migration guide for this model (platform.claude.com/docs/en/
+    # models/sonnet-5-5/migration-guide, fetched 2026-10-13), Sonnet 5.5 has
+    # ADAPTIVE THINKING ON BY DEFAULT, and `thinking: {"type": "disabled"}`
+    # is explicitly documented to return a 400 error for this model -- the
+    # vendor-supported way to minimize it is `{"type": "between_tools"}`.
+    # Anthropic's `max_tokens` is a hard ceiling over the ENTIRE response
+    # (thinking tokens + visible text), so leaving thinking fully adaptive
+    # with no token headroom for it is the most likely explanation for a
+    # JSON string getting cut off mid-way through a verbose synthesis
+    # response: thinking consumed part of the 1500-token budget before the
+    # model even started writing the user-visible JSON.
+    thinking_mode = "between_tools"
+    # Raised from 1500 -> 3000: still cheap ($2/$10 per MTok -> <=$0.03 for
+    # this one call) but gives real headroom for a live, multi-tool-result
+    # synthesis response (several evidence strings + an interpretation
+    # paragraph) on top of whatever thinking tokens still occur. This is a
+    # justified, bounded increase tied to the above root cause -- not an
+    # unexamined bump.
+    max_output_tokens = 3000
 
     def complete(self, system: str, user: str, api_key: str) -> str:
         resp = requests.post(
@@ -53,7 +86,8 @@ class AnthropicProvider:
             },
             json={
                 "model": self.model,
-                "max_tokens": 1500,
+                "max_tokens": self.max_output_tokens,
+                "thinking": {"type": self.thinking_mode},
                 "system": system,
                 "messages": [{"role": "user", "content": user}],
             },
@@ -62,10 +96,26 @@ class AnthropicProvider:
         if not resp.ok:
             raise LLMCallError(f"Anthropic API error {resp.status_code}: {resp.text[:300]}")
         body = resp.json()
+        # Diagnostic capture (2026-10-14 fix): previously NOTHING from this
+        # response besides the text content was ever inspected, so a real
+        # truncation failure could only be guessed at from the shape of the
+        # resulting JSONDecodeError message, never confirmed. stop_reason
+        # and usage contain no prompt/response content -- safe to log.
+        stop_reason = body.get("stop_reason")
+        usage = body.get("usage") or {}
+        logger.info(
+            "Anthropic call finished: stop_reason=%s input_tokens=%s output_tokens=%s",
+            stop_reason, usage.get("input_tokens"), usage.get("output_tokens"),
+        )
         parts = body.get("content") or []
-        text = "".join(p.get("text", "") for p in parts if isinstance(p, dict))
+        text = "".join(p.get("text", "") for p in parts if isinstance(p, dict) and p.get("type") == "text")
         if not text:
             raise LLMCallError("Anthropic response contained no text content")
+        if stop_reason == "max_tokens":
+            raise LLMTruncatedOutputError(
+                f"Anthropic cut off its response at the {self.max_output_tokens}-token limit "
+                f"before finishing (stop_reason=max_tokens) -- the output was truncated, not malformed."
+            )
         return text
 
 
@@ -198,6 +248,57 @@ def build_synthesis_user_prompt(ticker: str, tool_results: list[dict]) -> str:
         f"Raw tool results:\n{json.dumps(tool_results, indent=2, default=str)}\n\n"
         "Produce the JSON object described in the system prompt. Respond with the JSON object only."
     )
+
+
+def test_provider_connection(provider: str, api_key: str) -> dict:
+    """Minimal, bounded AI-provider connectivity test (Phase 4B): exactly
+    ONE short call, tiny token cap, a trivial prompt with no tool-
+    selection/synthesis system prompt at all -- NOT part of the 2-call
+    investigation budget, and never called automatically; only from the
+    explicit, user-clicked /api/settings/ai-key/test route (main.py),
+    which itself requires confirm=true. A successful result here proves
+    ONLY that the credential+model answer a request -- it is not evidence
+    that MCP or any tool execution works; callers must not conflate the
+    two (see /api/settings/mcp/test's separate, LLM-free test).
+    Returns {"ok": bool, "model": str, "error": str|None}. Never raises --
+    every failure mode (bad key, network, rate limit) comes back as
+    ok=False with a message, same crash-proof contract as the rest of this
+    module's provider calls.
+    """
+    p = _get_provider(provider)
+    try:
+        if p.name == "anthropic":
+            resp = requests.post(
+                p.url,
+                headers={
+                    "x-api-key": api_key,
+                    "anthropic-version": "2023-06-01",
+                    "content-type": "application/json",
+                },
+                json={
+                    "model": p.model,
+                    "max_tokens": 16,
+                    "thinking": {"type": "between_tools"},
+                    "messages": [{"role": "user", "content": "Reply with exactly one word: OK"}],
+                },
+                timeout=REQUEST_TIMEOUT_S,
+            )
+        else:
+            resp = requests.post(
+                p.url,
+                headers={"Authorization": f"Bearer {api_key}", "content-type": "application/json"},
+                json={
+                    "model": p.model,
+                    "max_tokens": 16,
+                    "messages": [{"role": "user", "content": "Reply with exactly one word: OK"}],
+                },
+                timeout=REQUEST_TIMEOUT_S,
+            )
+    except requests.RequestException as e:
+        return {"ok": False, "model": p.model, "error": f"network error reaching {p.name}: {e}"}
+    if not resp.ok:
+        return {"ok": False, "model": p.model, "error": f"{p.name} API error {resp.status_code}: {resp.text[:200]}"}
+    return {"ok": True, "model": p.model, "error": None}
 
 
 def select_tools(ticker: str, evidence: dict, provider: str, api_key: str) -> object:

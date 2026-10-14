@@ -28,7 +28,9 @@ from .adapters.base import UWDataAdapter
 from .adapters.live_uw_adapter import ERROR, UNAUTHORIZED, UNAVAILABLE, LiveUWAdapter, UWRestClient
 from .adapters.synthetic_adapter import SyntheticDataAdapter
 from .ai import orchestrator as ai_orchestrator
-from .ai.llm_provider import LLMCallError
+from .ai import llm_provider as ai_llm_provider
+from .ai import mcp_tool_client as ai_mcp_tool_client
+from .ai.llm_provider import LLMCallError, LLMTruncatedOutputError
 from .ai.mcp_tool_client import MCPSubprocessError
 from .ai.schemas import MalformedAIResponse
 from .ai.simulated import get_simulated_transcript
@@ -195,6 +197,15 @@ class AiKeyBody(BaseModel):
     api_key: str
 
 
+class ConfirmBody(BaseModel):
+    # Phase 4B: AI provider test is a REAL, individually-billed API call
+    # (unlike MCP test, which is UW-quota-only) -- confirm=true is a
+    # structural guard against it ever firing from anything but an
+    # explicit user click that has already seen the cost disclosure in
+    # the UI, not just a disabled-by-default frontend button.
+    confirm: bool = False
+
+
 @app.get("/api/settings")
 def get_settings():
     data = _settings_store.get_all()
@@ -343,6 +354,56 @@ def save_ai_key(body: AiKeyBody):
 def delete_ai_key():
     _settings_store.clear_ai_key()
     return {"configured": False}
+
+
+@app.post("/api/settings/ai-key/test")
+def test_ai_key(body: ConfirmBody):
+    """Phase 4B: minimal, bounded connectivity test for the SAVED AI
+    provider key -- one short request, tiny token cap, no tool-selection
+    or synthesis prompt. This is a REAL, individually-billed API call
+    (unlike the UW/MCP test below), so it requires confirm=true from an
+    explicit user action that has already seen the cost disclosure --
+    never fired automatically. A success here proves ONLY that the
+    credential+model answer a request; it is NOT evidence that MCP or any
+    tool execution works (see /api/settings/mcp/test, which is separate
+    and LLM-free) -- the response is intentionally plain so the frontend
+    cannot accidentally conflate the two."""
+    if settings.public_demo:
+        raise HTTPException(status_code=403, detail="Credential testing is not available in the public demo build.")
+    if not body.confirm:
+        raise HTTPException(
+            status_code=400,
+            detail="confirm=true is required -- this makes one real, individually-billed request to the configured AI provider.",
+        )
+    data = _settings_store.get_all()
+    provider = data.get("ai_provider")
+    key = data.get("ai_api_key")
+    if not provider or not key:
+        raise HTTPException(status_code=400, detail="No AI provider key is configured yet. Save one first.")
+    result = ai_llm_provider.test_provider_connection(provider, key)
+    return {**result, "provider": provider, "proves_mcp_works": False}
+
+
+@app.post("/api/settings/mcp/test")
+def test_mcp():
+    """Phase 4B: standalone genuine MCP-protocol connectivity test
+    (connect, authenticate, tool discovery, ONE bounded read-only tool
+    call against a fixed test ticker) -- NO LLM call of any kind, so this
+    does not touch your AI provider key or incur any AI provider cost; it
+    does use one real, bounded UW API call against your existing UW key.
+    A success here proves ONLY that MCP transport + UW auth work; it is
+    NOT evidence that AI-directed tool selection/synthesis works (see
+    /api/settings/ai-key/test, which is separate) -- the response is
+    intentionally plain so the frontend cannot accidentally conflate the
+    two."""
+    if settings.public_demo:
+        raise HTTPException(status_code=403, detail="Connectivity testing is not available in the public demo build.")
+    data = _settings_store.get_all()
+    uw_key, _source = _effective_uw_key(data)
+    if not uw_key:
+        raise HTTPException(status_code=400, detail="No UW API key is configured yet. Save and test one first.")
+    result = ai_mcp_tool_client.test_mcp_connection(uw_key)
+    return {**result, "proves_ai_synthesis_works": False}
 
 
 @app.get("/api/radar")
@@ -545,6 +606,14 @@ def investigate_ticker(ticker: str):
         raise HTTPException(status_code=400, detail=str(e))
     except MalformedAIResponse as e:
         raise HTTPException(status_code=502, detail=f"AI returned a malformed response: {e}")
+    except LLMTruncatedOutputError as e:
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                f"AI provider response was cut off before it finished (token limit reached), not malformed: {e} "
+                "Try again -- if this keeps happening, the response needed more room than the bounded limit allows."
+            ),
+        )
     except LLMCallError as e:
         raise HTTPException(status_code=502, detail=f"AI provider call failed: {e}")
     except MCPSubprocessError as e:

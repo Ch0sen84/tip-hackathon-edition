@@ -114,6 +114,78 @@ class MCPSubprocessError(RuntimeError):
     as rest_tool_client.execute_tool never raising for a single bad call."""
 
 
+# Fixed, harmless test subject for /api/settings/mcp/test (Phase 4B) --
+# deliberately NOT whatever ticker the user happens to be investigating,
+# so this standalone connectivity test is reproducible and independent of
+# Market Radar/Ticker Analysis state.
+MCP_TEST_TOOL = "get_company_info"
+MCP_TEST_TICKER = "AAPL"
+
+
+def test_mcp_connection(uw_api_key: str, timeout_s: int = DEFAULT_SUBPROCESS_TIMEOUT_S) -> dict:
+    """Standalone MCP connectivity test (Phase 4B): a genuine MCP-protocol
+    handshake (connect, auth, tools/list as mcp_investigate.py's own
+    safety check already does) plus ONE bounded read-only tool call --
+    NO LLM call of any kind, so a successful result here proves MCP
+    transport + UW auth work, and NOTHING about whether AI-directed tool
+    selection/synthesis works (see llm_provider.test_provider_connection
+    for that, separately). Never raises -- every failure mode comes back
+    as ok=False with a message.
+
+    Returns:
+      {"ok": bool,                 # subprocess ran and parsed a response at all
+       "server_info": dict|None,   # the real MCP server's self-reported name/version
+       "tool_ok": bool|None,       # did the one bounded tool call itself succeed
+       "error": str|None}
+    """
+    if not MCP_VENV_PYTHON.exists():
+        return {
+            "ok": False, "server_info": None, "tool_ok": None,
+            "error": f"mcp_isolated venv not found at {MCP_VENV_PYTHON}",
+        }
+
+    env = dict(os.environ)
+    env["UW_API_KEY"] = uw_api_key  # subprocess env ONLY -- never argv, never a file
+    payload = {"calls": [{"tool": MCP_TEST_TOOL, "args": {"ticker": MCP_TEST_TICKER}}]}
+
+    try:
+        proc = subprocess.run(
+            [str(MCP_VENV_PYTHON), str(MCP_SCRIPT)],
+            input=json.dumps(payload),
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=timeout_s,
+        )
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "server_info": None, "tool_ok": None, "error": f"subprocess timed out after {timeout_s}s"}
+    except OSError as exc:
+        return {"ok": False, "server_info": None, "tool_ok": None, "error": f"failed to launch mcp_isolated subprocess: {exc}"}
+
+    try:
+        parsed = json.loads(proc.stdout)
+    except json.JSONDecodeError:
+        return {
+            "ok": False, "server_info": None, "tool_ok": None,
+            "error": f"unparseable response (exit {proc.returncode}): {proc.stderr[:300]!r}",
+        }
+
+    if not parsed.get("ok", False):
+        return {
+            "ok": False, "server_info": parsed.get("server_info"), "tool_ok": None,
+            "error": parsed.get("error", "MCP connection/handshake failed"),
+        }
+
+    results = parsed.get("results") or []
+    tool_result = results[0] if results else None
+    return {
+        "ok": True,
+        "server_info": parsed.get("server_info"),
+        "tool_ok": bool(tool_result and tool_result.get("ok")),
+        "error": (tool_result.get("error") if tool_result and not tool_result.get("ok") else None),
+    }
+
+
 def execute_tools_mcp(
     calls: list[dict],
     uw_api_key: str,

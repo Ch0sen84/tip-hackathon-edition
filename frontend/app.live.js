@@ -208,6 +208,10 @@ async function loadSettings() {
       document.getElementById("disconnectUwKeyBtn").addEventListener("click", disconnectUwKey);
       document.getElementById("saveAiKeyBtn").addEventListener("click", saveAiKey);
       document.getElementById("disconnectAiKeyBtn").addEventListener("click", disconnectAiKey);
+      const testAiBtn = document.getElementById("testAiKeyBtn");
+      if (testAiBtn) testAiBtn.addEventListener("click", testAiKey);
+      const testMcpBtn = document.getElementById("testMcpBtn");
+      if (testMcpBtn) testMcpBtn.addEventListener("click", testMcpConnection);
     }
     return d;
   } catch (err) {
@@ -261,14 +265,34 @@ async function saveUwKey() {
 }
 
 async function testUwKey() {
+  // FIX (real user-reported bug, 2026-10-14): Test Connection previously
+  // tested whatever key was already "effective" server-side (UI-saved, or
+  // the .env fallback) WITHOUT saving whatever the user had just typed
+  // into the input first. Combined with the input always rendering empty
+  // after any Settings re-render (by design -- a saved key is never
+  // echoed back), this made it look like "I pasted a key, clicked Test,
+  // it passed, the box is now empty" meant the TYPED key was saved and
+  // verified -- when it may actually have tested a DIFFERENT, already-
+  // stored key while the just-typed one was silently never saved. Fix:
+  // if there's text in the box, Save it first (so Test always verifies
+  // what's actually in the box), then Test, with an explicit status
+  // message distinguishing "Saved + tested" from "tested the already-
+  // saved key" so no step is ever implied without having actually run.
+  const input = document.getElementById("uwKeyInput");
   const statusEl = document.getElementById("uwKeyStatus");
-  statusEl.textContent = "Testing connection...";
+  const typed = input.value.trim();
   let message = null;
   try {
+    if (typed) {
+      statusEl.textContent = "Saving key...";
+      await apiPost("/api/settings/uw-key", { api_key: typed });
+      input.value = "";
+    }
+    statusEl.textContent = typed ? "Saved. Testing connection..." : "Testing connection (using the already-saved key)...";
     const d = await apiPost("/api/settings/uw-key/test", {});
-    message = `Test result: ${d.result} — ${d.message}`;
+    message = `${typed ? "Saved, then " : ""}Test result: ${d.result} — ${d.message}`;
   } catch (err) {
-    message = `Test failed: ${err.message}`;
+    message = `${typed ? "Save/test" : "Test"} failed: ${err.message}`;
   }
   // Re-render Settings FIRST so the Activate Live Mode button's disabled
   // state (and the "verified" status line) reflect the just-updated
@@ -314,6 +338,52 @@ async function disconnectAiKey() {
     await loadSettings();
   } catch (err) {
     alert(`Disconnect failed: ${err.message}`);
+  }
+}
+
+async function testAiKey() {
+  // Real, individually-billed API call -- requires an explicit confirm()
+  // dialog with the cost disclosure BEFORE the request fires, on top of
+  // the backend's own confirm=true requirement. Never triggered except by
+  // this direct user click.
+  const statusEl = document.getElementById("aiTestStatus");
+  const proceed = confirm(
+    "This sends one short, real request to your configured AI provider to confirm the credential works.\n\n" +
+    "This WILL incur a small, real API charge (typically a few cents, bounded to a tiny response).\n\n" +
+    "It does NOT call Unusual Whales or MCP at all -- a pass here only confirms the AI provider credential, " +
+    "nothing about MCP/tool execution.\n\nProceed?"
+  );
+  if (!proceed) {
+    statusEl.textContent = "Cancelled -- no request was sent.";
+    return;
+  }
+  statusEl.textContent = "Testing AI provider connection (real, billed request in progress)...";
+  try {
+    const d = await apiPost("/api/settings/ai-key/test", { confirm: true });
+    statusEl.textContent = d.ok
+      ? `OK -- ${d.provider} (${d.model}) responded successfully. This does not test MCP/tool execution.`
+      : `Failed -- ${d.error}`;
+  } catch (err) {
+    statusEl.textContent = `Test failed: ${err.message}`;
+  }
+}
+
+async function testMcpConnection() {
+  // UW-quota-only, no LLM/AI provider involved -- still a real network
+  // call, so still gated behind an explicit click, but no paid-charge
+  // confirm dialog since there is no AI provider cost here.
+  const statusEl = document.getElementById("mcpTestStatus");
+  statusEl.textContent = "Testing MCP connection (real, bounded UW call in progress)...";
+  try {
+    const d = await apiPost("/api/settings/mcp/test", {});
+    if (d.ok) {
+      const serverInfo = d.server_info ? `${d.server_info.name} v${d.server_info.version}` : "unknown server";
+      statusEl.textContent = `OK -- connected to ${serverInfo}. Test tool call: ${d.tool_ok ? "succeeded" : `failed (${d.error || "no detail"})`}. This does not test AI-directed synthesis.`;
+    } else {
+      statusEl.textContent = `Failed -- ${d.error}`;
+    }
+  } catch (err) {
+    statusEl.textContent = `Test failed: ${err.message}`;
   }
 }
 

@@ -42,11 +42,14 @@ def test_anthropic_request_has_a_max_tokens_bound(monkeypatch):
 
     def fake_post(url, headers=None, json=None, timeout=None):
         captured["json"] = json
-        return _mock_response({"content": [{"type": "text", "text": "ok"}]})
+        return _mock_response({"stop_reason": "end_turn", "usage": {}, "content": [{"type": "text", "text": "ok"}]})
 
     monkeypatch.setattr(llm_provider.requests, "post", fake_post)
     llm_provider.AnthropicProvider().complete("sys", "user", "fake-key")
-    assert captured["json"]["max_tokens"] == 1500
+    # Raised 1500 -> 3000 on 2026-10-14 (see root-cause section below) --
+    # still a bound, still cheap, just no longer the value that was too
+    # tight once Sonnet 5.5's default adaptive thinking is accounted for.
+    assert captured["json"]["max_tokens"] == 3000
     assert captured["json"]["model"] == "claude-sonnet-5-5"
 
 
@@ -65,3 +68,86 @@ def test_openai_request_now_has_a_max_tokens_bound_regression_guard(monkeypatch)
     assert "max_tokens" in captured["json"], "OpenAI request must set an output-token cap"
     assert captured["json"]["max_tokens"] == 1500
     assert captured["json"]["model"] == "gpt-6-astra"
+
+
+# --- Root-cause fix for the real NVDA investigation failure ------------
+# ("LLM response was not valid JSON: Unterminated string starting at line
+# 1 column 3404") -- Anthropic's Sonnet 5.5 has adaptive thinking ON by
+# default, and max_tokens is a hard ceiling over thinking + visible text
+# combined, so a verbose synthesis response could get cut off mid-JSON.
+
+
+def test_anthropic_request_sets_between_tools_thinking_mode(monkeypatch):
+    captured = {}
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        captured["json"] = json
+        return _mock_response({
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 10, "output_tokens": 20},
+            "content": [{"type": "text", "text": "{}"}],
+        })
+
+    monkeypatch.setattr(llm_provider.requests, "post", fake_post)
+    llm_provider.AnthropicProvider().complete("sys", "user", "fake-key")
+    assert captured["json"]["thinking"] == {"type": "between_tools"}
+    assert captured["json"]["max_tokens"] == 3000
+
+
+def test_anthropic_stop_reason_max_tokens_raises_specific_truncation_error(monkeypatch):
+    """This is the exact signature the real failed investigation should
+    have surfaced: a response that DID come back HTTP-ok, DID contain
+    some text, but was cut off by the token limit -- must raise
+    LLMTruncatedOutputError, not a generic/ambiguous LLMCallError."""
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        return _mock_response({
+            "stop_reason": "max_tokens",
+            "usage": {"input_tokens": 500, "output_tokens": 3000},
+            "content": [{"type": "text", "text": '{"ai_interpretation": "cut off mid-stri'}],
+        })
+
+    monkeypatch.setattr(llm_provider.requests, "post", fake_post)
+    try:
+        llm_provider.AnthropicProvider().complete("sys", "user", "fake-key")
+        assert False, "expected LLMTruncatedOutputError"
+    except llm_provider.LLMTruncatedOutputError as e:
+        assert "max_tokens" in str(e) or "cut off" in str(e)
+    except llm_provider.LLMCallError:
+        assert False, "must raise the specific LLMTruncatedOutputError subclass, not the generic base class"
+
+
+def test_anthropic_normal_completion_does_not_raise_truncation_error(monkeypatch):
+    def fake_post(url, headers=None, json=None, timeout=None):
+        return _mock_response({
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 500, "output_tokens": 200},
+            "content": [{"type": "text", "text": '{"ai_interpretation": "complete"}'}],
+        })
+
+    monkeypatch.setattr(llm_provider.requests, "post", fake_post)
+    text = llm_provider.AnthropicProvider().complete("sys", "user", "fake-key")
+    assert text == '{"ai_interpretation": "complete"}'
+
+
+def test_anthropic_text_extraction_ignores_non_text_blocks():
+    """Defensive check: a thinking-type content block (no "text" key, or a
+    "text" key some other block type might coincidentally carry) must
+    never be concatenated into the parsed output -- only type=="text"
+    blocks are real visible output."""
+    import types
+
+    fake_body = {
+        "stop_reason": "end_turn",
+        "usage": {},
+        "content": [
+            {"type": "thinking", "thinking": "internal reasoning, not the answer"},
+            {"type": "text", "text": "the real answer"},
+        ],
+    }
+    resp = types.SimpleNamespace(ok=True, status_code=200, json=lambda: fake_body, text="")
+    import unittest.mock as mock
+    with mock.patch.object(llm_provider.requests, "post", return_value=resp):
+        text = llm_provider.AnthropicProvider().complete("sys", "user", "fake-key")
+    assert text == "the real answer"
+    assert "internal reasoning" not in text

@@ -1274,6 +1274,24 @@ function renderSettingsView(d) {
           <button class="btn" id="disconnectAiKeyBtn">Disconnect</button>
         </div>
         <div id="aiKeyStatus" class="muted" style="margin-top:6px"></div>
+        <hr class="settings-divider" />
+        <p class="muted"><strong>Test AI Provider</strong> -- makes ONE short, real request to the saved
+          provider+model to confirm the credential works. <strong>This is a real, individually-billed API
+          call</strong> (a few cents at most, bounded to a tiny response) -- it does NOT call UW or MCP at
+          all, so a pass here is <em>not</em> proof that MCP/tool execution works.</p>
+        <div class="settings-row">
+          <button class="btn" id="testAiKeyBtn" ${ai.configured ? "" : "disabled"}>Test AI Provider (incurs a small charge)</button>
+        </div>
+        <div id="aiTestStatus" class="muted" style="margin-top:6px"></div>
+        <hr class="settings-divider" />
+        <p class="muted"><strong>Test UW MCP Connection</strong> -- a genuine MCP-protocol handshake
+          (connect, authenticate, discover tools) plus one bounded read-only tool call against your saved UW
+          key. <strong>No LLM/AI provider is called at all</strong> -- it only uses your existing UW API
+          quota, so a pass here is <em>not</em> proof that AI-directed investigation works end-to-end.</p>
+        <div class="settings-row">
+          <button class="btn" id="testMcpBtn" ${uw.configured ? "" : "disabled"}>Test UW MCP Connection</button>
+        </div>
+        <div id="mcpTestStatus" class="muted" style="margin-top:6px"></div>
       </div>`;
 
   root.innerHTML = `${banner}${modeSection}${uwSection}${aiSection}`;
