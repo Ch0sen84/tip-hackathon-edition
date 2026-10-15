@@ -3,10 +3,10 @@
   "state": "BUILDING",
   "previous_state": "NEW",
   "transition_rule": "single_signal_reevaluated",
-  "confidence": "low",
-  "signal_type": "t1-bootstrap",
-  "confidence_reason": "Bootstrap-only, insufficient history -- not auto-qualified",
-  "qualifies": false,
+  "confidence": "medium",
+  "signal_type": "single-signal-options-flow",
+  "confidence_reason": "Single-category options-flow anomaly only -- not independently corroborated by a 2nd category",
+  "qualifies": true,
   "qualifying_days_count": 1,
   "gates": {
     "dark_pool_anomaly": {
@@ -56,18 +56,23 @@
         "confirmed": true
       }
     },
+    "catalyst_identified": {
+      "passed": false,
+      "metrics": {
+        "note": "not auto-computed -- set explicitly when a real catalyst is found"
+      }
+    },
     "multi_signal_confirmation": {
       "passed": false,
       "metrics": {
         "contributing_gates": [
           "options_flow_anomaly"
+        ],
+        "excluded_from_tally": [
+          "historical_percentile",
+          "persistence",
+          "price_confirmation"
         ]
-      }
-    },
-    "catalyst_identified": {
-      "passed": false,
-      "metrics": {
-        "note": "not auto-computed -- set explicitly when a real catalyst is found"
       }
     },
     "data_quality": {
@@ -79,7 +84,7 @@
     }
   },
   "headline": "Options flow anomaly",
-  "current_read": "Unusual options volume; stock fell 2.1%.",
+  "current_read": "Unusual options volume; stock fell 2.1%; no second independent category corroborates this yet.",
   "evidence": [
     {
       "family": "lifecycle",
@@ -104,13 +109,13 @@
       "scan_date": "2026-10-15",
       "any_gate_passed": true,
       "state": "NEW",
-      "created_at": "2026-10-15 13:25:28"
+      "created_at": "2026-10-15 17:07:22"
     },
     {
       "scan_date": "2026-10-15",
       "any_gate_passed": true,
       "state": "BUILDING",
-      "created_at": "2026-10-15 13:25:28"
+      "created_at": "2026-10-15 17:07:22"
     }
   ],
   "raw": {

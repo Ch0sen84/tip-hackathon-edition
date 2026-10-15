@@ -56,16 +56,21 @@
         "confirmed": null
       }
     },
-    "multi_signal_confirmation": {
-      "passed": false,
-      "metrics": {
-        "contributing_gates": []
-      }
-    },
     "catalyst_identified": {
       "passed": false,
       "metrics": {
         "note": "not auto-computed -- set explicitly when a real catalyst is found"
+      }
+    },
+    "multi_signal_confirmation": {
+      "passed": false,
+      "metrics": {
+        "contributing_gates": [],
+        "excluded_from_tally": [
+          "historical_percentile",
+          "persistence",
+          "price_confirmation"
+        ]
       }
     },
     "data_quality": {
@@ -102,13 +107,13 @@
       "scan_date": "2026-10-15",
       "any_gate_passed": false,
       "state": "NEW",
-      "created_at": "2026-10-15 13:25:28"
+      "created_at": "2026-10-15 17:07:22"
     },
     {
       "scan_date": "2026-10-15",
       "any_gate_passed": false,
       "state": "BUILDING",
-      "created_at": "2026-10-15 13:25:28"
+      "created_at": "2026-10-15 17:07:22"
     }
   ],
   "raw": {

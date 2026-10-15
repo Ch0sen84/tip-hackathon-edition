@@ -18,7 +18,7 @@
         {
           "family": "synthetic_baseline",
           "text": "Synthetic baseline estimate: 98% (static premium-size model, not real historical data) -- this is a static estimator built into this demo build, not a real trailing-history comparison.",
-          "key": true,
+          "key": false,
           "short": "Synthetic baseline estimate: 98% (static premium-size model, not real historical data)"
         },
         {
@@ -34,12 +34,11 @@
           "short": "Price +2.1% at 214.10"
         }
       ],
-      "current_read": "Dark-pool activity well above normal and a synthetic baseline estimate flagged elevated premium (not a real historical comparison); stock rose 2.1%.",
-      "headline": "Dark pool ~3.8x recent average (short history) \u00b7 Synthetic baseline estimate: 98% (static premium-size model, not real historical data) \u00b7 Options flow anomaly",
+      "current_read": "Dark-pool activity well above normal; stock rose 2.1%; a synthetic baseline estimate also flagged elevated premium, but it carries no decision weight.",
+      "headline": "Dark pool ~3.8x recent average (short history) \u00b7 Options flow anomaly \u00b7 Synthetic baseline estimate: 98% (static premium-size model, not real historical data)",
       "label": "MULTI-SOURCE",
       "categories": [
         "dark_pool",
-        "synthetic_baseline",
         "options"
       ],
       "index_context": false,
@@ -57,76 +56,18 @@
       "history_states": []
     },
     {
-      "ticker": "VOLX",
+      "ticker": "CATX",
       "name": null,
       "families": [
-        "synthetic_baseline",
-        "options"
+        "options",
+        "catalyst"
       ],
       "evidence": [
         {
-          "family": "synthetic_baseline",
-          "text": "Synthetic baseline estimate: 98% (static premium-size model, not real historical data) -- this is a static estimator built into this demo build, not a real trailing-history comparison.",
+          "family": "catalyst",
+          "text": "Catalyst identified -- manually curated for this ticker, never auto-detected by TIP from any UW feed.",
           "key": true,
-          "short": "Synthetic baseline estimate: 98% (static premium-size model, not real historical data)"
-        },
-        {
-          "family": "lifecycle",
-          "text": "TIP signal state CONFIRMED",
-          "key": false,
-          "short": "TIP signal state CONFIRMED"
-        },
-        {
-          "family": "price",
-          "text": "Price +1.9% at 155.10",
-          "key": true,
-          "short": "Price +1.9% at 155.10"
-        }
-      ],
-      "current_read": "A synthetic baseline estimate flagged elevated premium (not a real historical comparison); stock rose 1.9%.",
-      "headline": "Synthetic baseline estimate: 98% (static premium-size model, not real historical data) \u00b7 Options flow anomaly",
-      "label": "MULTI-SOURCE",
-      "categories": [
-        "synthetic_baseline",
-        "options"
-      ],
-      "index_context": false,
-      "question": null,
-      "research": [],
-      "enriched": true,
-      "price": {
-        "chg_pct": 1.9,
-        "last": 155.1
-      },
-      "state": "CONFIRMED",
-      "confidence": "high",
-      "signal_type": "multi-signal",
-      "qualifying_days_count": 2,
-      "history_states": [
-        "NEW",
-        "CONFIRMED",
-        "CONFIRMED"
-      ]
-    },
-    {
-      "ticker": "QRVX",
-      "name": null,
-      "families": [
-        "dark_pool",
-        "synthetic_baseline"
-      ],
-      "evidence": [
-        {
-          "family": "dark_pool",
-          "text": "Dark pool ~6.4x its recent average; short history",
-          "key": true,
-          "short": "Dark pool ~6.4x recent average (short history)"
-        },
-        {
-          "family": "synthetic_baseline",
-          "text": "Synthetic baseline estimate: 98% (static premium-size model, not real historical data) -- this is a static estimator built into this demo build, not a real trailing-history comparison.",
-          "key": true,
-          "short": "Synthetic baseline estimate: 98% (static premium-size model, not real historical data)"
+          "short": "Catalyst identified (manually curated, not auto-detected)"
         },
         {
           "family": "lifecycle",
@@ -136,25 +77,25 @@
         },
         {
           "family": "price",
-          "text": "Price +0.3% at 70.40",
+          "text": "Price +2.4% at 28.05",
           "key": true,
-          "short": "Price +0.3% at 70.40"
+          "short": "Price +2.4% at 28.05"
         }
       ],
-      "current_read": "Dark-pool activity well above normal and a synthetic baseline estimate flagged elevated premium (not a real historical comparison); no corresponding price response.",
-      "headline": "Dark pool ~6.4x recent average (short history) \u00b7 Synthetic baseline estimate: 98% (static premium-size model, not real historical data)",
+      "current_read": "A manually-identified catalyst; stock rose 2.4%.",
+      "headline": "Options flow anomaly \u00b7 Catalyst identified (manually curated, not auto-detected)",
       "label": "MULTI-SOURCE",
       "categories": [
-        "dark_pool",
-        "synthetic_baseline"
+        "options",
+        "catalyst"
       ],
       "index_context": false,
       "question": null,
       "research": [],
       "enriched": true,
       "price": {
-        "chg_pct": 0.3,
-        "last": 70.4
+        "chg_pct": 2.4,
+        "last": 28.05
       },
       "state": "NEW",
       "confidence": "high",
@@ -179,9 +120,9 @@
         },
         {
           "family": "lifecycle",
-          "text": "TIP signal state CONFIRMED",
+          "text": "TIP signal state BUILDING",
           "key": false,
-          "short": "TIP signal state CONFIRMED"
+          "short": "TIP signal state BUILDING"
         },
         {
           "family": "price",
@@ -190,7 +131,7 @@
           "short": "Price +0.9% at 38.55"
         }
       ],
-      "current_read": "Dark-pool activity well above normal; no corresponding price response.",
+      "current_read": "Dark-pool activity well above normal; no corresponding price response; no second independent category corroborates this yet.",
       "headline": "Dark pool ~3.9x recent average (short history)",
       "label": "DARK POOL",
       "categories": [
@@ -204,15 +145,119 @@
         "chg_pct": 0.9,
         "last": 38.55
       },
-      "state": "CONFIRMED",
-      "confidence": "high",
-      "signal_type": "t1-baseline",
+      "state": "BUILDING",
+      "confidence": "medium",
+      "signal_type": "single-signal-dark-pool",
       "qualifying_days_count": 2,
       "history_states": [
         "NEW",
         "BUILDING",
-        "CONFIRMED"
+        "BUILDING"
       ]
+    },
+    {
+      "ticker": "VOLX",
+      "name": null,
+      "families": [
+        "synthetic_baseline",
+        "options"
+      ],
+      "evidence": [
+        {
+          "family": "synthetic_baseline",
+          "text": "Synthetic baseline estimate: 98% (static premium-size model, not real historical data) -- this is a static estimator built into this demo build, not a real trailing-history comparison.",
+          "key": false,
+          "short": "Synthetic baseline estimate: 98% (static premium-size model, not real historical data)"
+        },
+        {
+          "family": "lifecycle",
+          "text": "TIP signal state BUILDING",
+          "key": false,
+          "short": "TIP signal state BUILDING"
+        },
+        {
+          "family": "price",
+          "text": "Price +1.9% at 155.10",
+          "key": true,
+          "short": "Price +1.9% at 155.10"
+        }
+      ],
+      "current_read": "Unusual options volume; stock rose 1.9%; a synthetic baseline estimate also flagged elevated premium, but it carries no decision weight; no second independent category corroborates this yet.",
+      "headline": "Options flow anomaly \u00b7 Synthetic baseline estimate: 98% (static premium-size model, not real historical data)",
+      "label": "OPTIONS",
+      "categories": [
+        "options"
+      ],
+      "index_context": false,
+      "question": null,
+      "research": [],
+      "enriched": true,
+      "price": {
+        "chg_pct": 1.9,
+        "last": 155.1
+      },
+      "state": "BUILDING",
+      "confidence": "medium",
+      "signal_type": "single-signal-options-flow",
+      "qualifying_days_count": 2,
+      "history_states": [
+        "NEW",
+        "BUILDING",
+        "BUILDING"
+      ]
+    },
+    {
+      "ticker": "QRVX",
+      "name": null,
+      "families": [
+        "dark_pool",
+        "synthetic_baseline"
+      ],
+      "evidence": [
+        {
+          "family": "dark_pool",
+          "text": "Dark pool ~6.4x its recent average; short history",
+          "key": true,
+          "short": "Dark pool ~6.4x recent average (short history)"
+        },
+        {
+          "family": "synthetic_baseline",
+          "text": "Synthetic baseline estimate: 98% (static premium-size model, not real historical data) -- this is a static estimator built into this demo build, not a real trailing-history comparison.",
+          "key": false,
+          "short": "Synthetic baseline estimate: 98% (static premium-size model, not real historical data)"
+        },
+        {
+          "family": "lifecycle",
+          "text": "TIP signal state NEW",
+          "key": false,
+          "short": "TIP signal state NEW"
+        },
+        {
+          "family": "price",
+          "text": "Price +0.3% at 70.40",
+          "key": true,
+          "short": "Price +0.3% at 70.40"
+        }
+      ],
+      "current_read": "Dark-pool activity well above normal; no corresponding price response; a synthetic baseline estimate also flagged elevated premium, but it carries no decision weight; no second independent category corroborates this yet.",
+      "headline": "Dark pool ~6.4x recent average (short history) \u00b7 Synthetic baseline estimate: 98% (static premium-size model, not real historical data)",
+      "label": "DARK POOL",
+      "categories": [
+        "dark_pool"
+      ],
+      "index_context": false,
+      "question": null,
+      "research": [],
+      "enriched": true,
+      "price": {
+        "chg_pct": 0.3,
+        "last": 70.4
+      },
+      "state": "NEW",
+      "confidence": "medium",
+      "signal_type": "single-signal-dark-pool",
+      "qualifying_days_count": 0,
+      "history_states": []
     },
     {
       "ticker": "TEPID",
@@ -240,7 +285,7 @@
           "short": "Price +1.6% at 20.18"
         }
       ],
-      "current_read": "Dark-pool activity well above normal; stock rose 1.6%.",
+      "current_read": "Dark-pool activity well above normal; stock rose 1.6%; no second independent category corroborates this yet.",
       "headline": "Dark pool ~5.0x recent average (short history)",
       "label": "DARK POOL",
       "categories": [
@@ -255,8 +300,8 @@
         "last": 20.18
       },
       "state": "NEW",
-      "confidence": "high",
-      "signal_type": "t1-baseline",
+      "confidence": "medium",
+      "signal_type": "single-signal-dark-pool",
       "qualifying_days_count": 0,
       "history_states": []
     },
@@ -280,7 +325,7 @@
           "short": "Price -2.1% at 60.80"
         }
       ],
-      "current_read": "Unusual options volume; stock fell 2.1%.",
+      "current_read": "Unusual options volume; stock fell 2.1%; no second independent category corroborates this yet.",
       "headline": "Options flow anomaly",
       "label": "OPTIONS",
       "categories": [
@@ -295,48 +340,8 @@
         "last": 60.8
       },
       "state": "NEW",
-      "confidence": "low",
-      "signal_type": "t1-bootstrap",
-      "qualifying_days_count": 0,
-      "history_states": []
-    },
-    {
-      "ticker": "CATX",
-      "name": null,
-      "families": [
-        "options"
-      ],
-      "evidence": [
-        {
-          "family": "lifecycle",
-          "text": "TIP signal state NEW",
-          "key": false,
-          "short": "TIP signal state NEW"
-        },
-        {
-          "family": "price",
-          "text": "Price +2.4% at 28.05",
-          "key": true,
-          "short": "Price +2.4% at 28.05"
-        }
-      ],
-      "current_read": "Unusual options volume; stock rose 2.4%.",
-      "headline": "Options flow anomaly",
-      "label": "OPTIONS",
-      "categories": [
-        "options"
-      ],
-      "index_context": false,
-      "question": null,
-      "research": [],
-      "enriched": true,
-      "price": {
-        "chg_pct": 2.4,
-        "last": 28.05
-      },
-      "state": "NEW",
-      "confidence": "low",
-      "signal_type": "t1-bootstrap",
+      "confidence": "medium",
+      "signal_type": "single-signal-options-flow",
       "qualifying_days_count": 0,
       "history_states": []
     },
@@ -360,7 +365,7 @@
           "short": "Price -1.8% at 44.95"
         }
       ],
-      "current_read": "Unusual options volume; stock fell 1.8%.",
+      "current_read": "Unusual options volume; stock fell 1.8%; no second independent category corroborates this yet.",
       "headline": "Options flow anomaly",
       "label": "OPTIONS",
       "categories": [
@@ -375,8 +380,8 @@
         "last": 44.95
       },
       "state": "NEW",
-      "confidence": "low",
-      "signal_type": "t1-bootstrap",
+      "confidence": "medium",
+      "signal_type": "single-signal-options-flow",
       "qualifying_days_count": 0,
       "history_states": []
     },
@@ -400,7 +405,7 @@
           "short": "Price +1.4% at 84.95"
         }
       ],
-      "current_read": "Unusual options volume; stock rose 1.4%.",
+      "current_read": "Unusual options volume; stock rose 1.4%; no second independent category corroborates this yet.",
       "headline": "Options flow anomaly",
       "label": "OPTIONS",
       "categories": [
@@ -415,13 +420,13 @@
         "last": 84.95
       },
       "state": "NEW",
-      "confidence": "low",
-      "signal_type": "t1-bootstrap",
+      "confidence": "medium",
+      "signal_type": "single-signal-options-flow",
       "qualifying_days_count": 0,
       "history_states": []
     }
   ],
   "scanned": 11,
   "scan_scope": "watchlist",
-  "last_scan_at": 1792070728.7504575
+  "last_scan_at": 1792084042.2388015
 }

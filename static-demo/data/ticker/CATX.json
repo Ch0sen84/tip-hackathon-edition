@@ -1,12 +1,12 @@
 {
   "ticker": "CATX",
-  "state": "BUILDING",
+  "state": "CONFIRMED",
   "previous_state": "NEW",
-  "transition_rule": "single_signal_reevaluated",
-  "confidence": "low",
-  "signal_type": "t1-bootstrap",
-  "confidence_reason": "Bootstrap-only, insufficient history -- not auto-qualified",
-  "qualifies": false,
+  "transition_rule": "multi_signal_confirmation_two_independent_categories",
+  "confidence": "high",
+  "signal_type": "multi-signal",
+  "confidence_reason": "Multi-signal confirmation (>=2 independent categories): options_flow_anomaly, catalyst_identified",
+  "qualifies": true,
   "qualifying_days_count": 1,
   "gates": {
     "dark_pool_anomaly": {
@@ -56,18 +56,24 @@
         "confirmed": true
       }
     },
-    "multi_signal_confirmation": {
-      "passed": false,
-      "metrics": {
-        "contributing_gates": [
-          "options_flow_anomaly"
-        ]
-      }
-    },
     "catalyst_identified": {
       "passed": true,
       "metrics": {
         "note": "not auto-computed -- set explicitly when a real catalyst is found"
+      }
+    },
+    "multi_signal_confirmation": {
+      "passed": true,
+      "metrics": {
+        "contributing_gates": [
+          "options_flow_anomaly",
+          "catalyst_identified"
+        ],
+        "excluded_from_tally": [
+          "historical_percentile",
+          "persistence",
+          "price_confirmation"
+        ]
       }
     },
     "data_quality": {
@@ -78,14 +84,20 @@
       }
     }
   },
-  "headline": "Options flow anomaly",
-  "current_read": "Unusual options volume; stock rose 2.4%.",
+  "headline": "Options flow anomaly \u00b7 Catalyst identified (manually curated, not auto-detected)",
+  "current_read": "A manually-identified catalyst; stock rose 2.4%.",
   "evidence": [
     {
+      "family": "catalyst",
+      "text": "Catalyst identified -- manually curated for this ticker, never auto-detected by TIP from any UW feed.",
+      "key": true,
+      "short": "Catalyst identified (manually curated, not auto-detected)"
+    },
+    {
       "family": "lifecycle",
-      "text": "TIP signal state BUILDING",
+      "text": "TIP signal state CONFIRMED",
       "key": false,
-      "short": "TIP signal state BUILDING"
+      "short": "TIP signal state CONFIRMED"
     },
     {
       "family": "price",
@@ -104,13 +116,13 @@
       "scan_date": "2026-10-15",
       "any_gate_passed": true,
       "state": "NEW",
-      "created_at": "2026-10-15 13:25:28"
+      "created_at": "2026-10-15 17:07:22"
     },
     {
       "scan_date": "2026-10-15",
       "any_gate_passed": true,
-      "state": "BUILDING",
-      "created_at": "2026-10-15 13:25:28"
+      "state": "CONFIRMED",
+      "created_at": "2026-10-15 17:07:22"
     }
   ],
   "raw": {

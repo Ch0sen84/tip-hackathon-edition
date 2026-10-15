@@ -1,5 +1,6 @@
 {
   "available": true,
   "simulated": true,
-  "reason": null
+  "reason": null,
+  "transport": null
 }

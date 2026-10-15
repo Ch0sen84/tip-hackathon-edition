@@ -272,12 +272,20 @@ nav#nav .ic { font-size: 13px; width: 16px; text-align: center; opacity: .7; }
 .history-details-body { max-height: 280px; overflow-y: auto; padding-right: 4px; margin-top: 4px; }
 
 .table-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--panel); }
-.tbl { width: 100%; border-collapse: collapse; font-size: 12.5px; min-width: 560px; }
-.tbl th { text-align: left; color: var(--muted); font-weight: 600; font-size: 10px; text-transform: uppercase; letter-spacing: .4px; padding: 9px 12px; border-bottom: 1px solid var(--border); white-space: nowrap; }
-.tbl td { padding: 8px 12px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+/* Legibility pass (Priority 3, 2026-10-15 round 3): production's own
+   data-table font-size is 13.5px, not the 12.5px this started at --
+   bumped to match, plus a touch more cell padding for 1920x1080
+   readability. min-width raised to fit the new Price/1D Change columns
+   without crowding; .table-wrap's overflow-x:auto + .radar-main's
+   min-width:0 (see the grid-item note above) still keep this from
+   forcing the whole page wider on narrow/mobile viewports. */
+.tbl { width: 100%; border-collapse: collapse; font-size: 13.5px; min-width: 660px; }
+.tbl th { text-align: left; color: var(--muted); font-weight: 600; font-size: 10.5px; text-transform: uppercase; letter-spacing: .4px; padding: 10px 12px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+.tbl td { padding: 9px 12px; border-bottom: 1px solid var(--border); vertical-align: middle; }
 .tbl tr:hover td { background: var(--panel2); }
+.col-price, .col-chg { white-space: nowrap; }
 @media (max-width: 860px) { .col-family { display: none; } }
-@media (max-width: 760px) { .col-read { display: none; } }
+@media (max-width: 760px) { .col-chg { display: none; } }
 @media (max-width: 560px) { .col-headline { display: none; } }
 
 .empty { color: var(--muted); padding: 30px 16px; text-align: center; font-size: 13px; }
@@ -297,8 +305,22 @@ pre.raw { background: var(--panel3); padding: 12px; border-radius: 8px; overflow
 
 .settings-card {
   border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--panel);
-  padding: 18px 20px; margin-bottom: 18px; max-width: 540px;
+  padding: 18px 20px; margin-bottom: 18px; max-width: 680px;
 }
+/* Priority 6 (2026-10-15 round 3): Settings/About read cramped/narrow
+   next to the rest of the app (Radar's table/cards routinely use the
+   full main-content width) -- widened from 540/620px to a still-
+   readable-line-length 680/720px rather than going full-bleed, since
+   these are prose-heavy pages. */
+.how-body.settings-card { max-width: 720px; }
+/* Theme the GitHub repo link (and any other in-app link) to the app's
+   own accent color instead of the browser default blue/purple -- it
+   previously looked like an unstyled default link, inconsistent with
+   every other interactive element on the page. */
+.how-body a, .ai-disabled-note a {
+  color: var(--accent, #22d3a8); text-decoration: none; font-weight: 600;
+}
+.how-body a:hover, .ai-disabled-note a:hover { text-decoration: underline; }
 .settings-card h3 { margin: 0 0 10px; font-size: 14px; letter-spacing: .2px; }
 .settings-card input, .settings-card select { width: 100%; display: block; margin: 8px 0; }
 .settings-row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 6px; }
@@ -373,6 +395,25 @@ pre.raw { background: var(--panel3); padding: 12px; border-radius: 8px; overflow
 .btn-sm:disabled { opacity: .4; cursor: not-allowed; }
 
 /* --- Market Radar watchlist editor (2026-10-14, Phase A) -------------- */
+/* Compact-by-default editor (Priority 2, 2026-10-15 round 3): a <details>
+   element collapsed by default so it no longer pushes Featured Signal
+   below the fold. The <summary> IS the collapsed state's entire visual
+   footprint -- one line, no default disclosure-triangle double-marker
+   since .watchlist-editor-toggle already supplies an explicit "edit"
+   affordance. */
+.watchlist-editor-compact { padding: 0; }
+.watchlist-editor-compact > summary.watchlist-editor-summary {
+  list-style: none; cursor: pointer; display: flex; align-items: center; gap: 10px;
+  padding: 14px 20px; flex-wrap: wrap;
+}
+.watchlist-editor-compact > summary.watchlist-editor-summary::-webkit-details-marker { display: none; }
+.watchlist-editor-toggle { margin-left: auto; }
+.watchlist-editor-compact[open] > summary.watchlist-editor-summary { border-bottom: 1px solid var(--border); }
+.watchlist-editor-body { padding: 14px 20px 18px; }
+.watchlist-demo-note {
+  background: rgba(232,179,57,0.1); border: 1px solid var(--amber); color: var(--amber);
+  padding: 8px 12px; border-radius: 8px; margin: 0 0 12px; font-size: 12px; line-height: 1.5;
+}
 .watchlist-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; min-height: 24px; }
 .watchlist-chip {
   display: inline-flex; align-items: center; gap: 4px; background: var(--panel2);

@@ -316,7 +316,7 @@ async function loadInvestigateSection(ticker, navSeq) {
       : `<p class="ai-disabled-note">Configured transport: <strong>${esc(transportLabel(avail.transport))}</strong></p>`;
     const simNote = avail.simulated
       ? `<p class="ai-disabled-note">Demo mode: running this will show a pre-written simulated transcript, not a real AI/UW call.</p>`
-      : `<p class="ai-disabled-note">Live mode: this will make a few bounded, read-only Unusual Whales lookups plus two AI calls using your saved keys, entirely from your local backend. Bounded, read-only investigation; the full LLM-directed tool-selection/synthesis workflow has not yet been verified end-to-end with a real provider -- see README.</p>`;
+      : `<p class="ai-disabled-note">Live mode: this will make a few bounded, read-only Unusual Whales lookups plus two AI calls using your saved keys, entirely from your local backend. A real end-to-end AI-directed investigation over genuine MCP tool calls has been independently verified (a real NVDA run, mcp transport) -- see README for the verification writeup.</p>`;
     el.innerHTML = `
       <div class="ai-card">
         <h3>Investigate with AI</h3>
@@ -372,9 +372,16 @@ async function runDiscoveryScan() {
     const data = await apiPost("/api/radar/discover", filters);
     _lastDiscoveryData = data;
     data.candidates.forEach((c) => { _discoveryStates[c.ticker] = "candidate"; });
+    // Priority 5 fix (2026-10-15 round 3): never phrase a synthetic-fixture
+    // Demo Mode read as if it consumed real UW screener quota -- see the
+    // matching fix in renderDiscoveryCandidateList() for the same bug in
+    // the per-scan summary line below the table.
+    const isSyntheticSource = data.source === "synthetic_discovery_fixture";
     statusEl.textContent = data.unavailable
       ? `Screener unavailable: ${(data.reason && data.reason.message) || "see Settings/UW key"}`
-      : `Scan complete \u2014 used ${data.screener_requests_used} screener request(s) \u00b7 snapshot ${data.snapshot_at || "n/a"}`;
+      : isSyntheticSource
+        ? `Scan complete (synthetic demo data, no real UW API call) \u00b7 snapshot ${data.snapshot_at || "n/a"}`
+        : `Scan complete \u2014 used ${data.screener_requests_used} screener request(s) \u00b7 snapshot ${data.snapshot_at || "n/a"}`;
     listEl.innerHTML = renderDiscoveryCandidateList(data.candidates, data);
     wireDiscoveryEvaluateButtons();
   } catch (err) {

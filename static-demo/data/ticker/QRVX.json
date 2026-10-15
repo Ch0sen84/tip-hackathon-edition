@@ -1,11 +1,11 @@
 {
   "ticker": "QRVX",
-  "state": "CONFIRMED",
+  "state": "BUILDING",
   "previous_state": "NEW",
-  "transition_rule": "multi_signal_or_persistence_on_first_reeval",
-  "confidence": "high",
-  "signal_type": "multi-signal",
-  "confidence_reason": "Multi-signal confirmation: dark_pool_anomaly, historical_percentile",
+  "transition_rule": "single_signal_reevaluated",
+  "confidence": "medium",
+  "signal_type": "single-signal-dark-pool",
+  "confidence_reason": "Single-category dark-pool anomaly only (6.4x avg, z=21.6) -- real, but not independently corroborated by a 2nd category",
   "qualifies": true,
   "qualifying_days_count": 1,
   "gates": {
@@ -51,19 +51,23 @@
         "confirmed": null
       }
     },
-    "multi_signal_confirmation": {
-      "passed": true,
-      "metrics": {
-        "contributing_gates": [
-          "dark_pool_anomaly",
-          "historical_percentile"
-        ]
-      }
-    },
     "catalyst_identified": {
       "passed": false,
       "metrics": {
         "note": "not auto-computed -- set explicitly when a real catalyst is found"
+      }
+    },
+    "multi_signal_confirmation": {
+      "passed": false,
+      "metrics": {
+        "contributing_gates": [
+          "dark_pool_anomaly"
+        ],
+        "excluded_from_tally": [
+          "historical_percentile",
+          "persistence",
+          "price_confirmation"
+        ]
       }
     },
     "data_quality": {
@@ -75,7 +79,7 @@
     }
   },
   "headline": "Dark pool ~6.4x recent average (short history) \u00b7 Synthetic baseline estimate: 98% (static premium-size model, not real historical data)",
-  "current_read": "Dark-pool activity well above normal and a synthetic baseline estimate flagged elevated premium (not a real historical comparison); no corresponding price response.",
+  "current_read": "Dark-pool activity well above normal; no corresponding price response; a synthetic baseline estimate also flagged elevated premium, but it carries no decision weight; no second independent category corroborates this yet.",
   "evidence": [
     {
       "family": "dark_pool",
@@ -86,14 +90,14 @@
     {
       "family": "synthetic_baseline",
       "text": "Synthetic baseline estimate: 98% (static premium-size model, not real historical data) -- this is a static estimator built into this demo build, not a real trailing-history comparison.",
-      "key": true,
+      "key": false,
       "short": "Synthetic baseline estimate: 98% (static premium-size model, not real historical data)"
     },
     {
       "family": "lifecycle",
-      "text": "TIP signal state CONFIRMED",
+      "text": "TIP signal state BUILDING",
       "key": false,
-      "short": "TIP signal state CONFIRMED"
+      "short": "TIP signal state BUILDING"
     },
     {
       "family": "price",
@@ -112,13 +116,13 @@
       "scan_date": "2026-10-15",
       "any_gate_passed": true,
       "state": "NEW",
-      "created_at": "2026-10-15 13:25:28"
+      "created_at": "2026-10-15 17:07:22"
     },
     {
       "scan_date": "2026-10-15",
       "any_gate_passed": true,
-      "state": "CONFIRMED",
-      "created_at": "2026-10-15 13:25:28"
+      "state": "BUILDING",
+      "created_at": "2026-10-15 17:07:22"
     }
   ],
   "raw": {

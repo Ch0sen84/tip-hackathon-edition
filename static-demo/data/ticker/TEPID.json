@@ -3,9 +3,9 @@
   "state": "BUILDING",
   "previous_state": "NEW",
   "transition_rule": "single_signal_reevaluated",
-  "confidence": "high",
-  "signal_type": "t1-baseline",
-  "confidence_reason": "Dark-pool anomaly vs baseline: 5.0x avg, z=16.0",
+  "confidence": "medium",
+  "signal_type": "single-signal-dark-pool",
+  "confidence_reason": "Single-category dark-pool anomaly only (5.0x avg, z=16.0) -- real, but not independently corroborated by a 2nd category",
   "qualifies": true,
   "qualifying_days_count": 1,
   "gates": {
@@ -56,18 +56,23 @@
         "confirmed": true
       }
     },
+    "catalyst_identified": {
+      "passed": false,
+      "metrics": {
+        "note": "not auto-computed -- set explicitly when a real catalyst is found"
+      }
+    },
     "multi_signal_confirmation": {
       "passed": false,
       "metrics": {
         "contributing_gates": [
           "dark_pool_anomaly"
+        ],
+        "excluded_from_tally": [
+          "historical_percentile",
+          "persistence",
+          "price_confirmation"
         ]
-      }
-    },
-    "catalyst_identified": {
-      "passed": false,
-      "metrics": {
-        "note": "not auto-computed -- set explicitly when a real catalyst is found"
       }
     },
     "data_quality": {
@@ -79,7 +84,7 @@
     }
   },
   "headline": "Dark pool ~5.0x recent average (short history)",
-  "current_read": "Dark-pool activity well above normal; stock rose 1.6%.",
+  "current_read": "Dark-pool activity well above normal; stock rose 1.6%; no second independent category corroborates this yet.",
   "evidence": [
     {
       "family": "dark_pool",
@@ -110,13 +115,13 @@
       "scan_date": "2026-10-15",
       "any_gate_passed": true,
       "state": "NEW",
-      "created_at": "2026-10-15 13:25:28"
+      "created_at": "2026-10-15 17:07:22"
     },
     {
       "scan_date": "2026-10-15",
       "any_gate_passed": true,
       "state": "BUILDING",
-      "created_at": "2026-10-15 13:25:28"
+      "created_at": "2026-10-15 17:07:22"
     }
   ],
   "raw": {

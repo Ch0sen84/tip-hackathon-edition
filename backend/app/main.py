@@ -274,6 +274,18 @@ def get_settings():
             "configured": bool(ai_key),
             "provider": data.get("ai_provider"),
             "last4": last4(ai_key),
+            # Priority 5 fix (2026-10-15 round 3): "an AI provider key is
+            # configured" and "which transport Investigate with AI will
+            # actually use" are two separate facts and must not be
+            # conflated in the Settings display -- a key being present
+            # does not mean MCP transport is active; INVESTIGATE_TRANSPORT
+            # (env var, unrelated to any credential) determines that.
+            # This exposes the EXISTING config value only -- the same one
+            # /api/investigate/availability already discloses once a
+            # ticker is loaded -- so it's visible in Settings up front,
+            # before the user has navigated anywhere. No new business
+            # logic; genuinely safe to disclose (carries no credential).
+            "investigate_transport": settings.investigate_transport,
         },
         # Market Radar (2026-10-14, Phase A): included here too (not just
         # the dedicated /api/settings/watchlist GET) so the Settings page

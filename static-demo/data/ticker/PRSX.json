@@ -1,11 +1,11 @@
 {
   "ticker": "PRSX",
-  "state": "CONFIRMED",
-  "previous_state": "CONFIRMED",
-  "transition_rule": "still_confirmed",
-  "confidence": "high",
-  "signal_type": "t1-baseline",
-  "confidence_reason": "Dark-pool anomaly vs baseline: 3.9x avg, z=11.7",
+  "state": "BUILDING",
+  "previous_state": "BUILDING",
+  "transition_rule": "still_single_signal",
+  "confidence": "medium",
+  "signal_type": "single-signal-dark-pool",
+  "confidence_reason": "Single-category dark-pool anomaly only (3.9x avg, z=11.7) -- real, but not independently corroborated by a 2nd category",
   "qualifies": true,
   "qualifying_days_count": 3,
   "gates": {
@@ -51,18 +51,23 @@
         "confirmed": null
       }
     },
+    "catalyst_identified": {
+      "passed": false,
+      "metrics": {
+        "note": "not auto-computed -- set explicitly when a real catalyst is found"
+      }
+    },
     "multi_signal_confirmation": {
       "passed": false,
       "metrics": {
         "contributing_gates": [
           "dark_pool_anomaly"
+        ],
+        "excluded_from_tally": [
+          "historical_percentile",
+          "persistence",
+          "price_confirmation"
         ]
-      }
-    },
-    "catalyst_identified": {
-      "passed": false,
-      "metrics": {
-        "note": "not auto-computed -- set explicitly when a real catalyst is found"
       }
     },
     "data_quality": {
@@ -74,7 +79,7 @@
     }
   },
   "headline": "Dark pool ~3.9x recent average (short history)",
-  "current_read": "Dark-pool activity well above normal; no corresponding price response.",
+  "current_read": "Dark-pool activity well above normal; no corresponding price response; no second independent category corroborates this yet.",
   "evidence": [
     {
       "family": "dark_pool",
@@ -84,9 +89,9 @@
     },
     {
       "family": "lifecycle",
-      "text": "TIP signal state CONFIRMED",
+      "text": "TIP signal state BUILDING",
       "key": false,
-      "short": "TIP signal state CONFIRMED"
+      "short": "TIP signal state BUILDING"
     },
     {
       "family": "price",
@@ -105,25 +110,25 @@
       "scan_date": "2026-10-13",
       "any_gate_passed": true,
       "state": "NEW",
-      "created_at": "2026-10-15 13:25:28"
+      "created_at": "2026-10-15 17:07:22"
     },
     {
       "scan_date": "2026-10-14",
       "any_gate_passed": true,
       "state": "BUILDING",
-      "created_at": "2026-10-15 13:25:28"
+      "created_at": "2026-10-15 17:07:22"
     },
     {
       "scan_date": "2026-10-15",
       "any_gate_passed": true,
-      "state": "CONFIRMED",
-      "created_at": "2026-10-15 13:25:28"
+      "state": "BUILDING",
+      "created_at": "2026-10-15 17:07:22"
     },
     {
       "scan_date": "2026-10-15",
       "any_gate_passed": true,
-      "state": "CONFIRMED",
-      "created_at": "2026-10-15 13:25:28"
+      "state": "BUILDING",
+      "created_at": "2026-10-15 17:07:22"
     }
   ],
   "raw": {

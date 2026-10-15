@@ -494,6 +494,26 @@ function fmtPriceLine(px) {
   return `<span class="px">${priceTxt}</span><span class="pxchg ${chgClass}">${fmtPct(chg)}</span>`;
 }
 
+// Split price/change cells for the Other Noteworthy TABLE (Priority 1 fix,
+// 2026-10-15 round 3): renderRow() used to compute `px` and then never
+// read it anywhere in the row template at all -- a plain dead-variable
+// bug, not a missing-field/fixture/adapter problem (the /api/radar
+// response has genuinely carried entry.price.last/chg_pct since the
+// present() fix noted above; the table template just never rendered it).
+// Reuses the exact same field reads fmtPriceLine() already uses (never a
+// new/guessed field name), honestly rendered as an em-dash when a price
+// is genuinely absent -- never a fabricated value.
+function fmtPriceCell(px) {
+  if (!px || px.last == null) return `<span class="px-unavailable">\u2014</span>`;
+  return `<span class="px">${px.last.toFixed(2)}</span>`;
+}
+function fmtChangeCell(px) {
+  if (!px || px.chg_pct == null) return `<span class="px-unavailable">\u2014</span>`;
+  const chg = px.chg_pct;
+  const chgClass = chg > 0 ? "up" : chg < 0 ? "down" : "";
+  return `<span class="pxchg ${chgClass}">${fmtPct(chg)}</span>`;
+}
+
 // --- Market Radar: cards / rows ---------------------------------------------
 
 // P1c (UX-correction pass): consistent card height/hierarchy -- ticker,
@@ -536,6 +556,19 @@ function renderFamilyLabel(entry) {
   return tags.map((t) => `<span class="cat-label cat-${esc(t)}">${esc(RADAR_FAMILY_LABELS[t] || t)}</span>`).join(" ");
 }
 
+// Priority 3 fix (2026-10-15 round 3): this used to also render a
+// "Current read" column with tip_evidence.current_read()'s full narrative
+// sentence (synthetic-placeholder disclosures, agreement/disagreement
+// prose, etc.) on EVERY row -- dense and repetitive across a table of
+// many tickers. `headline` is already the deliberately-short,
+// magnitude-first summary (tip_evidence.headline(), e.g. "Dark pool
+// ~3.2x recent average") and already flags synthetic placeholders
+// tersely ("Synthetic baseline estimate: ...") when that's genuinely
+// what fired -- so the table now shows ONLY headline. The full
+// current_read narrative is not deleted anywhere; it still renders in
+// Ticker Analysis's header card (renderTickerDetail) and the Featured
+// Signal hero card (renderFeaturedSignal), neither of which repeats
+// per-row.
 function renderRow(entry) {
   const px = entry.price || {};
   return `
@@ -544,8 +577,9 @@ function renderRow(entry) {
       <td><span class="tag state-${esc(entry.state)}">${esc(entry.state || "")}</span></td>
       <td>${esc(entry.confidence)}</td>
       <td class="col-family">${renderFamilyLabel(entry)}</td>
+      <td class="col-price">${fmtPriceCell(px)}</td>
+      <td class="col-chg">${fmtChangeCell(px)}</td>
       <td class="col-headline">${esc(entry.headline)}</td>
-      <td class="col-read">${esc(entry.current_read)}</td>
       <td><button class="btn-link btn-investigate" data-investigate-ticker="${esc(entry.ticker)}">Investigate &rarr;</button></td>
     </tr>`;
 }
@@ -936,7 +970,19 @@ function renderDiscoveryCandidateList(candidates, meta) {
   // item #8; this line is never implied to be the market-data date.
   const snapshotTxt = meta && meta.snapshot_at ? `Fetched at: ${esc(meta.snapshot_at)}` : "";
   const countTxt = meta ? `${esc(meta.count)} candidate(s) &middot; ranked by net premium magnitude` : "";
-  const quotaTxt = meta ? `&middot; used ${esc(meta.screener_requests_used)} screener request(s)` : "";
+  // Priority 5 fix (2026-10-15 round 3): this used to say "used N screener
+  // request(s)" unconditionally -- in Demo Mode (meta.source ===
+  // "synthetic_discovery_fixture") that literally never happened; it's a
+  // fabricated-fixture read with zero network call and zero real UW quota
+  // consumed. Never count a synthetic-fixture operation as a real external
+  // API request. Live Mode (source === "unusual_whales_screener_stocks")
+  // keeps the real, honest quota-cost disclosure unchanged.
+  const isSyntheticSource = meta && meta.source === "synthetic_discovery_fixture";
+  const quotaTxt = meta
+    ? (isSyntheticSource
+        ? "&middot; synthetic demo data (no real UW API call, no quota used)"
+        : `&middot; used ${esc(meta.screener_requests_used)} screener request(s)`)
+    : "";
   return `
     <div class="muted" style="margin-bottom:8px">${countTxt} ${quotaTxt} ${snapshotTxt ? `&middot; ${snapshotTxt}` : ""}</div>
     <div class="discovery-table-wrap">
@@ -962,10 +1008,18 @@ function renderDiscoveryCandidateList(candidates, meta) {
 // an accidentally-blank area) -- rendered once before the user has ever
 // clicked Scan. Never auto-runs a scan and never fabricates example rows.
 function renderDiscoveryEmptyState() {
+  // Priority 5 fix (2026-10-15 round 3): this unconditionally claimed a
+  // "real ... Unusual Whales screener query" -- false in Demo Mode, where
+  // Scan reads fixtures/discovery_candidates.json and makes no network
+  // call at all. Mode-aware wording, same _currentMode guard used
+  // elsewhere in this file.
+  const isLive = typeof _currentMode !== "undefined" && _currentMode === "live";
+  const scanTxt = isLive
+    ? `click "Scan" to run a real, one-time Unusual Whales screener query against your UW key.`
+    : `click "Scan" to view TIP's synthetic demo candidate list (no real UW API call -- switch to Live Mode in Settings for a real screener query).`;
   return `<div class="discovery-empty-state">
     <strong>No scan run yet</strong>
-    Set optional filters above (all are optional) and click "Scan" to run a real,
-    one-time Unusual Whales screener query. Nothing is fetched automatically.
+    Set optional filters above (all are optional) and ${scanTxt} Nothing is fetched automatically.
   </div>`;
 }
 
@@ -2233,8 +2287,9 @@ function renderInvestigateResult(d, ticker, modeLabel) {
          ${esc(d.simulated_label || "Simulated agent walkthrough -- not live UW data, not a real AI call")}
        </div>`
     : `<div class="ai-live-banner">LIVE: this investigation made real calls using your configured AI provider and UW key.
-         Bounded, read-only tool selection and synthesis -- see README for the one documented gap:
-         full LLM-directed tool-selection/synthesis has not yet been verified end-to-end with a real provider.
+         Bounded, read-only tool selection and synthesis. A real end-to-end AI-directed investigation over genuine
+         MCP tool calls has been independently verified (a real NVDA run, mcp transport) -- see README for the
+         verification writeup.
          <br><strong>Transport: ${esc(transportLabel(d.transport))}</strong></div>`;
   const headerHtml = ticker ? renderInvestigateHeader(ticker, modeLabel || "") : "";
   return `
@@ -2363,15 +2418,27 @@ function renderSettingsView(d) {
         <h3>AI / MCP (optional) <span class="muted">(real in the local edition)</span></h3>
         <p class="muted">Not available in the public demo build. The local edition supports a
           bounded, read-only "Investigate with AI" feature: tool-selection and synthesis via your
-          configured AI provider when live. The full LLM-directed workflow has not yet been
-          verified end-to-end with a real provider -- see the GitHub README's documented status.</p>
+          configured AI provider when live. A real end-to-end AI-directed investigation over genuine
+          MCP tool calls has been independently verified (a real NVDA run) -- see the GitHub README's
+          verification writeup.</p>
       </div>`
     : `<div class="settings-card">
         <h3>AI / MCP (optional)</h3>
         <p class="muted">Status: ${aiStatusLine}</p>
         <p class="muted">Bounded, read-only investigation: tool-selection and synthesis via your configured AI
-          provider when live. The full LLM-directed tool-selection/synthesis workflow has not yet been verified
-          end-to-end with a real provider -- see README.</p>
+          provider when live. A real end-to-end AI-directed investigation over genuine MCP tool calls has been
+          independently verified (a real NVDA run, mcp transport) -- see README for the verification writeup.
+          This confirms the <code>mcp</code> transport specifically; the <code>rest</code> fallback transport
+          (see "Effective transport" below) uses plain REST calls and has not had a separate end-to-end
+          verification pass.</p>
+        <!-- Priority 5 fix: "an AI key is configured" and "which transport actually
+             executes tool calls" are two separate facts -- shown as its own distinct
+             status line here, not folded into aiStatusLine above. Sourced from
+             ai.investigate_transport (settings.investigate_transport, an env-only
+             config switch unrelated to any credential). -->
+        <p class="muted">Effective transport: <strong>${esc(transportLabel(ai.investigate_transport))}</strong>
+          <span class="muted">(configured via <code>INVESTIGATE_TRANSPORT</code> -- independent of whether an
+          AI provider key is configured above)</span></p>
         <select id="aiProviderSelect">
           <option value="anthropic" ${ai.provider === "anthropic" ? "selected" : ""}>Anthropic</option>
           <option value="openai" ${ai.provider === "openai" ? "selected" : ""}>OpenAI</option>
@@ -2419,30 +2486,67 @@ function renderSettingsView(d) {
 // app, and it lives where the watchlist is actually used (Market Radar).
 // Not shown in the public demo build (its 11 synthetic scenarios are
 // fixed, not a user-editable watchlist concept at all).
+// Priority 2 fix (2026-10-15 round 3): this editor used to be a full,
+// always-expanded .settings-card sitting directly above Featured Signal
+// -- on a real 1920x1080/1080p viewport with a non-trivial ticker count
+// it routinely pushed Featured Signal below the fold. Now a <details>
+// element: COLLAPSED by default (no `open` attribute), with a compact
+// one-line <summary> (count + a short preview of the actual tickers)
+// that expands to the exact same full editor markup/ids/behavior below
+// -- add/remove/Scan Now and the 20-symbol limit are unchanged, nothing
+// removed, just not forced open by default.
+//
+// Also (Priority 2, Demo-vs-Live distinction): in the local edition's
+// own Demo Mode (d.mode === "demo", NOT the separate public_demo static
+// build), this editor is still shown and still saves real settings --
+// but Market Radar's synthetic adapter scans its OWN fixed 11-scenario
+// universe (adapter.get_universe(), see backend main.py radar()), never
+// this watchlist. Demo Mode previously showed this editor with no
+// indication that it does nothing to what Demo's Market Radar actually
+// displays, which reads as if "my watchlist" and "the tickers shown in
+// Market Radar right now" were the same thing. They are not -- this is
+// the SAVED configuration that becomes active watchlist scanning only
+// once you switch to Live Mode in Settings.
 function renderWatchlistEditor(d) {
   const publicDemo = !!d.public_demo;
   if (publicDemo) return "";
   const watchlist = d.watchlist || { tickers: [], max_size: 20 };
+  const count = watchlist.tickers.length;
+  const preview = count ? watchlist.tickers.slice(0, 4).join(", ") + (count > 4 ? `, +${count - 4} more` : "") : "no tickers saved";
+  const isDemo = d.mode === "demo";
+  const demoNote = isDemo
+    ? `<p class="muted watchlist-demo-note">You're in <strong>Demo Mode</strong>: Market Radar above is showing TIP's fixed
+        synthetic ticker universe (11 built-in demo scenarios), <strong>not</strong> this watchlist. This editor saves
+        your Live-Mode watchlist configuration now so it's ready the moment you switch to Live Mode in Settings --
+        it has no effect on what Demo Mode's Market Radar displays.</p>`
+    : "";
   return `
-    <div class="settings-card" id="watchlistEditorCard">
-      <h3>My Watchlist</h3>
-      <p class="muted">Each ticker in this watchlist costs ~3 real UW API calls per Market Radar scan
-        (flow alerts, dark-pool trades, stock state) -- limit ${watchlist.max_size} symbols.
-        This is watchlist-based scanning only; switch to the "Market Discovery" mode above for
-        market-wide screener-based discovery instead.</p>
-      <div class="watchlist-chips" id="watchlistChips">
-        ${watchlist.tickers.map((t) => `
-          <span class="watchlist-chip" data-ticker="${esc(t)}">
-            ${esc(t)}<button class="watchlist-chip-remove" data-remove-ticker="${esc(t)}" title="Remove ${esc(t)}">&times;</button>
-          </span>`).join("")}
-        ${watchlist.tickers.length === 0 ? '<span class="muted">No tickers configured -- Market Radar has nothing to scan.</span>' : ""}
+    <details class="settings-card watchlist-editor-compact" id="watchlistEditorCard">
+      <summary class="watchlist-editor-summary">
+        <strong>My Watchlist</strong>
+        <span class="muted">${count}/${watchlist.max_size} tickers${count ? " \u2014 " + esc(preview) : " (" + preview + ")"}${isDemo ? " \u00b7 saved for Live Mode" : ""}</span>
+        <span class="btn-link watchlist-editor-toggle">edit</span>
+      </summary>
+      <div class="watchlist-editor-body">
+        ${demoNote}
+        <p class="muted">Each ticker in this watchlist costs ~3 real UW API calls per Market Radar scan
+          (flow alerts, dark-pool trades, stock state) -- limit ${watchlist.max_size} symbols.
+          This is watchlist-based scanning only; switch to the "Market Discovery" mode above for
+          market-wide screener-based discovery instead.</p>
+        <div class="watchlist-chips" id="watchlistChips">
+          ${watchlist.tickers.map((t) => `
+            <span class="watchlist-chip" data-ticker="${esc(t)}">
+              ${esc(t)}<button class="watchlist-chip-remove" data-remove-ticker="${esc(t)}" title="Remove ${esc(t)}">&times;</button>
+            </span>`).join("")}
+          ${watchlist.tickers.length === 0 ? '<span class="muted">No tickers configured -- Live Mode\u2019s Market Radar would have nothing to scan.</span>' : ""}
+        </div>
+        <div class="settings-row" style="margin-top:8px">
+          <input type="text" id="watchlistAddInput" placeholder="Add ticker (e.g. AMD)" autocomplete="off" maxlength="7" />
+          <button class="btn" id="watchlistAddBtn" ${watchlist.tickers.length >= watchlist.max_size ? "disabled" : ""}>Add</button>
+        </div>
+        <div id="watchlistStatus" class="muted" style="margin-top:6px"></div>
       </div>
-      <div class="settings-row" style="margin-top:8px">
-        <input type="text" id="watchlistAddInput" placeholder="Add ticker (e.g. AMD)" autocomplete="off" maxlength="7" />
-        <button class="btn" id="watchlistAddBtn" ${watchlist.tickers.length >= watchlist.max_size ? "disabled" : ""}>Add</button>
-      </div>
-      <div id="watchlistStatus" class="muted" style="margin-top:6px"></div>
-    </div>`;
+    </details>`;
 }
 
 // --- Application Updates (Settings) -----------------------------------------
