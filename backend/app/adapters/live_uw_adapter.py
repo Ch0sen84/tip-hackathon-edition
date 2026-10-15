@@ -265,10 +265,31 @@ def _normalize_flow_alert(raw: dict) -> dict:
     Normalizing here (adapter boundary) keeps scan_service/tests/fixtures,
     which already use the total_ask_premium/total_bid_premium names, exactly
     as they are -- only the LIVE adapter needed to learn the real UW names.
+
+    REAL BUG FIX (#36, 2026-10-15 round 2): the Evidence Detail table (and
+    fixtures/demo data) read `is_call`/`is_put` booleans. Real UW
+    flow-alert rows carry neither of those -- the real field is `type`,
+    with string values `"call"`/`"put"` (confirmed live). Because the
+    assumed boolean fields never existed on a real response, every Live
+    Mode call/put aggregation silently read `False`/`False` for every
+    alert, producing the "zero call and zero put activity" bug even when
+    the ticker genuinely had both. Derive `is_call`/`is_put` here from the
+    real `type` field (case-insensitively, tolerating whitespace and any
+    other/missing value) whenever the row doesn't already carry explicit
+    is_call/is_put booleans -- this keeps demo fixtures (which already set
+    is_call/is_put directly) byte-identical while fixing Live Mode at the
+    one place real UW field names are translated into this app's internal
+    shape. An unexpected/missing `type` value (empty string, numeric,
+    `"CALL "` with whitespace, a typo'd value) safely yields
+    is_call=False/is_put=False rather than crashing or guessing.
     """
     out = dict(raw)
     out["total_ask_premium"] = raw.get("total_ask_premium", raw.get("total_ask_side_prem"))
     out["total_bid_premium"] = raw.get("total_bid_premium", raw.get("total_bid_side_prem"))
+    if "is_call" not in raw and "is_put" not in raw:
+        side = str(raw.get("type") or "").strip().lower()
+        out["is_call"] = side == "call"
+        out["is_put"] = side == "put"
     return out
 
 

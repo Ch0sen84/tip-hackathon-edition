@@ -340,6 +340,32 @@ def families(item):
         f.append("alerts")
     if (item.get("alerts") or {}).get("floor_n"):
         f.append("floor")
+    # BUG FIX (#33, 2026-10-15 round 2): catalyst_identified is one of
+    # signal_engine.INDEPENDENT_SIGNAL_GATES -- the engine already treats a
+    # manually-verified real catalyst as a genuinely independent category
+    # for multi_signal_confirmation/CONFIRMED/"high" confidence (see
+    # docs/SIGNAL_INTEGRITY_RULES.md rule 2). Before this fix, tip_evidence
+    # had no family/category for it at all, so a ticker like CATX (real
+    # options_flow_anomaly + catalyst_identified -> genuinely CONFIRMED,
+    # "high" confidence, signal_type "multi-signal" per the engine) still
+    # showed only 1 category here ("options") and was excluded from
+    # Highest Attention / labeled "OPTIONS" instead of multi-source --
+    # directly contradicting its own engine-computed state on the same
+    # page. Recognizing catalyst_identified as its own family/category
+    # aligns tip_evidence with the ALREADY-APPROVED INDEPENDENT_SIGNAL_GATES
+    # set; it does not add or change any signal_engine threshold/semantics.
+    #
+    # NOTE: deliberately read from the dedicated `catalyst_identified` item
+    # field, NOT `gates_passed` -- scan_service.evaluate_ticker_scan's
+    # gates_passed list intentionally EXCLUDES catalyst_identified (along
+    # with multi_signal_confirmation/data_quality) so it never appears as a
+    # generic "TIP anomaly gate passed" bullet / never trips qualifies()'s
+    # ANOMALY_GATES check on its own. Checking gates_passed here would
+    # silently never fire through the real app pipeline (it only ever
+    # would in a hand-built test item that sets gates_passed directly,
+    # bypassing scan_service) -- see app/main.py's _to_evidence_item.
+    if item.get("catalyst_identified"):
+        f.append("catalyst")
     # TIP lifecycle state (CONFIRMED etc.) is persistence of the same gate evidence,
     # so it orders names but is NOT counted as an independent kind of evidence.
     return f
@@ -351,10 +377,13 @@ def families(item):
 #   options   -> aggregate per-ticker options volume/premium (UW options-volume snapshot or
 #                TIP's options_flow_anomaly gate) -- a separate dataset from UW flow alerts
 #   alerts, floor -> both are UW flow-alert records, so together they are ONE category
+#   catalyst  -> signal_engine's catalyst_identified gate (manually-verified real catalyst,
+#                see the families() note above -- matches INDEPENDENT_SIGNAL_GATES exactly)
 CATEGORY_OF = {"dark_pool": "dark_pool", "options": "options", "alerts": "uw_flow", "floor": "uw_flow",
-               "synthetic_baseline": "synthetic_baseline"}
+               "synthetic_baseline": "synthetic_baseline", "catalyst": "catalyst"}
 CATEGORY_LABELS = {"dark_pool": "dark-pool activity", "options": "broader options activity", "uw_flow": "UW-flow context",
-                    "synthetic_baseline": "synthetic baseline estimate (not real historical data)"}
+                    "synthetic_baseline": "synthetic baseline estimate (not real historical data)",
+                    "catalyst": "a manually-identified catalyst"}
 
 
 def categories(item):
@@ -442,13 +471,33 @@ def _short(family, item):
         pct = m.get("percentile")
         pct_txt = f"{pct:.0%}" if isinstance(pct, (int, float)) else "elevated"
         return f"Synthetic baseline estimate: {pct_txt} (static premium-size model, not real historical data)"
+    if family == "catalyst":
+        return "Catalyst identified (manually curated, not auto-detected)"
     return None
 
 
 def headline(item):
     """One-line magnitude-first summary for compact rows: the qualifying evidence
-    kinds in their fixed order. Presentation only; changes no selection/ordering."""
-    parts = [_short(f, item) for f in families(item)]
+    kinds in their fixed order. Presentation only; changes no selection/ordering.
+
+    PRESENTATION BUG FIX (#35, 2026-10-15 round 2): `families(item)`'s own
+    iteration order puts `synthetic_baseline` BEFORE `options`/`alerts`/
+    `floor` (it is checked right after `dark_pool_anomaly`). This function
+    used to build its parts straight from that order, so any ticker with
+    real options/alerts/floor evidence PLUS the synthetic placeholder had
+    the placeholder's "Synthetic baseline estimate: ..." text leading the
+    headline, ahead of the real finding -- making a zero-weight fabricated
+    metric look like the primary result. Real families are now always
+    placed first (in their existing relative order), with
+    `synthetic_baseline` moved to the end regardless of where `families()`
+    put it -- it can still appear, just never lead, and never when any real
+    evidence exists to lead with instead.
+    """
+    fam = families(item)
+    ordered = [f for f in fam if f != "synthetic_baseline"]
+    if "synthetic_baseline" in fam:
+        ordered.append("synthetic_baseline")
+    parts = [_short(f, item) for f in ordered]
     parts = [p for p in parts if p]
     if not parts:
         gp = item.get("gates_passed") or []
@@ -457,13 +506,30 @@ def headline(item):
 
 
 def dominant_label(item):
+    """BUG FIX (#35): this used to key off `len(families(item)) >= 2`
+    without excluding `synthetic_baseline`, and fell back to `fam[0]` when
+    not -- both are family-ARITY checks that can be satisfied by a
+    synthetic+real pair with no real second category at all. A ticker whose
+    only families were ["synthetic_baseline", "options"] used to get
+    labeled "UW FLOW" (wrong; that label means alerts+floor) via the first
+    bypass, or "SYNTHETIC BASELINE" via `fam[0]` even though real options
+    evidence existed -- the placeholder must never be chosen as the
+    primary/dominant label while real evidence exists. Every branch below
+    now operates on `real_fam` (families() minus synthetic_baseline); the
+    synthetic-only label is reachable only when NO real family fired.
+    """
     fam = families(item)
     if len(categories(item)) >= 2:
         return "MULTI-SOURCE"
-    if len(fam) >= 2:  # UW alerts + FloorTrade: one category
+    real_fam = [f for f in fam if f != "synthetic_baseline"]
+    if len(real_fam) >= 2:  # UW alerts + FloorTrade: one category
         return "UW FLOW"
-    return {"dark_pool": "DARK POOL", "options": "OPTIONS", "alerts": "UW ALERTS", "floor": "FLOORTRADE",
-            "synthetic_baseline": "SYNTHETIC BASELINE"}.get(fam[0] if fam else "", "OTHER")
+    if real_fam:
+        return {"dark_pool": "DARK POOL", "options": "OPTIONS", "alerts": "UW ALERTS",
+                "floor": "FLOORTRADE", "catalyst": "CATALYST"}.get(real_fam[0], "OTHER")
+    if "synthetic_baseline" in fam:
+        return "SYNTHETIC BASELINE"
+    return "OTHER"
 
 
 def evidence(item, session_live=False):
@@ -509,6 +575,10 @@ def evidence(item, session_live=False):
         rules = ", ".join(sorted(set(a.get("floor_rules") or [])))
         out.append({"family": "floor", "text": f"{a['floor_n']} FloorTrade-family alert{'s' if a['floor_n'] > 1 else ''}"
                     + (f" ({rules})" if rules else "")})
+    if item.get("catalyst_identified"):
+        out.append({"family": "catalyst",
+                    "text": "Catalyst identified -- manually curated for this ticker, never "
+                    "auto-detected by TIP from any UW feed."})
     if item.get("state") in STATE_RANK:
         out.append({"family": "lifecycle", "text": f"TIP signal state {item['state']}"})
     px = item.get("price")
@@ -520,7 +590,13 @@ def evidence(item, session_live=False):
         out.append({"family": "context", "text": ctx["text"]})
     fam = set(families(item))
     for e in out:
-        e["key"] = e["family"] in fam or e["family"] == "price" or (
+        # BUG FIX (#35): `synthetic_baseline` is a member of `fam` (it's a
+        # real, tracked evidence family for ordering/labeling purposes) but
+        # must NEVER count as "key"/qualifying evidence -- it carries zero
+        # decision weight (see docs/SIGNAL_INTEGRITY_RULES.md rule 1) and
+        # must always render as supporting/disclosed context only, however
+        # genuine the real evidence around it looks.
+        e["key"] = (e["family"] != "synthetic_baseline" and e["family"] in fam) or e["family"] == "price" or (
             e["family"] == "context" and ctx.get("kind") == "CONFIRMED_EVENT")
         e["short"] = _short(e["family"], item) if e["family"] in fam else e["text"]
     return out
@@ -540,20 +616,41 @@ def current_read(item):
     see signal_engine.evaluate_gates), so this phrase is only ever written
     when backed by a real ratio. The synthetic placeholder gets its own,
     explicitly-labeled lead phrase instead of being folded into this one.
+
+    PRESENTATION BUG FIX (#35, 2026-10-15 round 2): the lead-phrase logic
+    used to check `"synthetic_baseline" in fam` BEFORE the `options`
+    fallback (`if not lead and "options" in fam`). When the only families
+    were ["synthetic_baseline", "options"], the synthetic branch populated
+    `lead` first, so the real options finding was silently never mentioned
+    anywhere in the read at all -- not even as a fallback. Real families
+    (dark_pool/alerts/floor/options) are now evaluated into `lead`
+    completely independently of synthetic_baseline; the synthetic phrase
+    only becomes the LEAD when no real family fired, and otherwise is
+    appended afterward as an explicit, clearly-subordinate disclosure that
+    carries no decision weight. Separately (Priority 1c): when exactly one
+    real evidence category exists (categories() < 2, i.e. not already
+    MULTI-SOURCE), the read now explicitly discloses that no second
+    independent category corroborates it yet -- so a single real finding
+    never reads as if it were already confirmed/corroborated.
     """
     fam = families(item)
+    cats = categories(item)
+    real_fam = [f for f in fam if f != "synthetic_baseline"]
     lead = []
-    if "dark_pool" in fam:
+    if "dark_pool" in real_fam:
         lead.append("dark-pool activity well above normal")
-    if "synthetic_baseline" in fam:
-        lead.append("a synthetic baseline estimate flagged elevated premium (not a real historical comparison)")
-    if "alerts" in fam:
+    if "alerts" in real_fam:
         lead.append("UW flow alerts running well above this name's usual pace")
-    if "floor" in fam:
+    if "floor" in real_fam:
         lead.append("FloorTrade-family prints")
-    if not lead and "options" in fam:
+    if "catalyst" in real_fam:
+        lead.append("a manually-identified catalyst")
+    if not lead and "options" in real_fam:
         lead.append("unusual options volume")
-    if not lead:
+    synthetic_only = not lead and "synthetic_baseline" in fam
+    if synthetic_only:
+        lead.append("a synthetic baseline estimate flagged elevated premium (not a real historical comparison)")
+    elif not lead:
         lead.append("unusual activity")
     parts = [" and ".join(lead)]
     read = options_read(item.get("options"))
@@ -567,6 +664,10 @@ def current_read(item):
         parts.append("no corresponding price response")
     elif mv:
         parts.append(mv)
+    if not synthetic_only and "synthetic_baseline" in fam:
+        parts.append("a synthetic baseline estimate also flagged elevated premium, but it carries no decision weight")
+    if real_fam and len(cats) < 2:
+        parts.append("no second independent category corroborates this yet")
     s = "; ".join(parts) + "."
     return s[0].upper() + s[1:]
 

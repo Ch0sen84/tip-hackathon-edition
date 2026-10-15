@@ -205,6 +205,100 @@ def test_adapter_get_ohlc_selects_regular_session_and_reports_coverage_metadata(
     assert result["raw_records_requested"] > 1  # over-fetched, never exactly the desired count
 
 
+# ---------------------------------------------------------------------------
+# #36 (2026-10-15 round 2): the Evidence Detail table reported ZERO call/put
+# activity because it read is_call/is_put booleans that don't exist on real
+# UW flow-alert rows -- the real field is `type` ("call"/"put"). These
+# tests exercise _normalize_flow_alert through the real adapter method
+# (get_flow_alerts), with CONSTRUCTED (not real-response) fixtures covering
+# the required matrix: missing type, malformed/unexpected values,
+# numeric-string premiums, and a real call+put mix.
+# ---------------------------------------------------------------------------
+
+def test_flow_alert_type_call_normalizes_to_is_call():
+    raw = {"type": "call", "total_premium": "1500000", "total_ask_side_prem": "1400000",
+           "total_bid_side_prem": "100000"}
+    session = _mock_session(200, {"data": [raw]})
+    client = UWRestClient("fake-key", session=session)
+    adapter = LiveUWAdapter(api_key="fake-key", watchlist=["NVDA"], client=client)
+    alerts = adapter.get_flow_alerts("NVDA")
+    assert len(alerts) == 1
+    assert alerts[0]["is_call"] is True
+    assert alerts[0]["is_put"] is False
+    # numeric-string premium passed through untouched for scan_service to coerce
+    assert alerts[0]["total_premium"] == "1500000"
+    assert alerts[0]["total_ask_premium"] == "1400000"
+
+
+def test_flow_alert_type_put_case_insensitive_and_whitespace_tolerant():
+    raw = {"type": " PUT ", "total_premium": 900000}
+    session = _mock_session(200, {"data": [raw]})
+    client = UWRestClient("fake-key", session=session)
+    adapter = LiveUWAdapter(api_key="fake-key", watchlist=["NVDA"], client=client)
+    alerts = adapter.get_flow_alerts("NVDA")
+    assert alerts[0]["is_put"] is True
+    assert alerts[0]["is_call"] is False
+
+
+def test_flow_alert_missing_type_field_is_neither_call_nor_put_no_crash():
+    raw = {"total_premium": 500000}  # no "type" key at all
+    session = _mock_session(200, {"data": [raw]})
+    client = UWRestClient("fake-key", session=session)
+    adapter = LiveUWAdapter(api_key="fake-key", watchlist=["NVDA"], client=client)
+    alerts = adapter.get_flow_alerts("NVDA")
+    assert alerts[0]["is_call"] is False
+    assert alerts[0]["is_put"] is False
+
+
+def test_flow_alert_malformed_type_value_is_neither_call_nor_put_no_crash():
+    for bad_type in (None, "", 123, "straddle", "cal", "putt"):
+        raw = {"type": bad_type, "total_premium": 1}
+        session = _mock_session(200, {"data": [raw]})
+        client = UWRestClient("fake-key", session=session)
+        adapter = LiveUWAdapter(api_key="fake-key", watchlist=["NVDA"], client=client)
+        alerts = adapter.get_flow_alerts("NVDA")
+        assert alerts[0]["is_call"] is False, f"bad_type={bad_type!r}"
+        assert alerts[0]["is_put"] is False, f"bad_type={bad_type!r}"
+
+
+def test_flow_alert_mix_of_calls_and_puts_aggregate_correctly_via_scan_service():
+    """End-to-end: normalized alerts feed scan_service's real aggregation
+    (the same function the Evidence Detail table's numbers are derived
+    from upstream) and produce a correct non-zero split."""
+    from app.core.scan_service import _options_flow_metrics
+
+    raw_rows = [
+        {"type": "call", "total_premium": "2000000", "total_ask_side_prem": "1900000",
+         "total_bid_side_prem": "100000"},
+        {"type": "PUT", "total_premium": 500000, "total_ask_side_prem": 100000,
+         "total_bid_side_prem": 400000},
+        {"type": "call", "total_premium": "750000"},
+    ]
+    session = _mock_session(200, {"data": raw_rows})
+    client = UWRestClient("fake-key", session=session)
+    adapter = LiveUWAdapter(api_key="fake-key", watchlist=["NVDA"], client=client)
+    alerts = adapter.get_flow_alerts("NVDA")
+    calls = [a for a in alerts if a["is_call"]]
+    puts = [a for a in alerts if a["is_put"]]
+    assert len(calls) == 2
+    assert len(puts) == 1
+    metrics = _options_flow_metrics(alerts)
+    assert metrics["metrics"]["total_premium"] == 2000000 + 500000 + 750000
+
+
+def test_flow_alert_explicit_is_call_is_put_from_fixtures_is_never_overridden():
+    """Demo/synthetic fixtures already set is_call/is_put directly (no
+    `type` field at all) -- the live-adapter fix must never clobber that
+    when it happens to pass through this normalizer."""
+    raw = {"is_call": True, "is_put": False, "total_premium": 1}
+    session = _mock_session(200, {"data": [raw]})
+    client = UWRestClient("fake-key", session=session)
+    adapter = LiveUWAdapter(api_key="fake-key", watchlist=["NVDA"], client=client)
+    alerts = adapter.get_flow_alerts("NVDA")
+    assert alerts[0]["is_call"] is True
+    assert alerts[0]["is_put"] is False
+
+
 def test_adapter_get_ohlc_forwards_window_through_to_the_client():
     session = _mock_session(200, {"data": []})
     client = UWRestClient("fake-key", session=session)

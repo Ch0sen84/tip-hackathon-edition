@@ -190,6 +190,14 @@ def _to_evidence_item(scan: dict) -> dict:
         "context": None,
         "next_earnings_date": None,
         "research": [],
+        # BUG FIX (#33, 2026-10-15 round 2): read directly from scan["gates"]
+        # rather than scan["gates_passed"] -- gates_passed deliberately
+        # excludes catalyst_identified (see scan_service.evaluate_ticker_scan),
+        # so tip_evidence.families()/categories() needs its own explicit
+        # field to recognize a genuine catalyst_identified pass as its own
+        # independent evidence category (matching
+        # signal_engine.INDEPENDENT_SIGNAL_GATES, which already counts it).
+        "catalyst_identified": bool(scan["gates"].get("catalyst_identified", {}).get("passed")),
     }
 
 

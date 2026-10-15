@@ -1913,6 +1913,25 @@ function renderTickerDetail(d) {
 // collapsed-by-default "Developer / Debug" disclosure at the very bottom.
 function _fa(a, key) { return Number(a[key] || 0); }
 
+// Bug fix (#36, 2026-10-15 round 2): real UW flow-alert rows carry a
+// `type` string field ("call"/"put"), NOT `is_call`/`is_put` booleans --
+// those booleans only exist on this app's own demo/synthetic fixtures
+// (and on anything already normalized by live_uw_adapter._normalize_flow_alert).
+// Prefer the explicit booleans when present (keeps demo fixtures exactly
+// as before), otherwise fall back to a case-insensitive, whitespace-
+// tolerant read of `type` so this still works even if raw/unnormalized
+// data ever reaches this renderer directly. Missing/malformed/unexpected
+// values (no type field, "", a number, "Call ", a typo) safely resolve to
+// neither side rather than crashing or guessing.
+function _flowSide(a) {
+  if (a.is_call === true) return "call";
+  if (a.is_put === true) return "put";
+  const t = String(a.type == null ? "" : a.type).trim().toLowerCase();
+  if (t === "call") return "call";
+  if (t === "put") return "put";
+  return null;
+}
+
 function summarizeFlowAlerts(flowAlerts) {
   const alerts = flowAlerts || [];
   let callCount = 0, putCount = 0, callPrem = 0, putPrem = 0;
@@ -1920,8 +1939,9 @@ function summarizeFlowAlerts(flowAlerts) {
   for (const a of alerts) {
     const prem = _fa(a, "total_premium");
     totalPrem += prem;
-    if (a.is_call) { callCount += 1; callPrem += prem; }
-    else if (a.is_put) { putCount += 1; putPrem += prem; }
+    const side = _flowSide(a);
+    if (side === "call") { callCount += 1; callPrem += prem; }
+    else if (side === "put") { putCount += 1; putPrem += prem; }
     askPrem += _fa(a, "total_ask_premium");
     bidPrem += _fa(a, "total_bid_premium");
     if (a.has_sweep) sweepCount += 1;
@@ -1971,7 +1991,7 @@ function renderRawDataSummary(d) {
       <tr><td>Dark-pool value</td><td>${fmtMoney(dp.totalValue) ?? "$0"}</td></tr>`;
 
   const notableRows = [
-    ...of.notable.map((a) => `<tr><td>Option alert</td><td>${esc(a.is_call ? "call" : a.is_put ? "put" : "n/a")}</td><td>${fmtMoney(_fa(a, "total_premium")) ?? "n/a"}</td><td>${esc(a.created_at || "n/a")}</td></tr>`),
+    ...of.notable.map((a) => `<tr><td>Option alert</td><td>${esc(_flowSide(a) || "n/a")}</td><td>${fmtMoney(_fa(a, "total_premium")) ?? "n/a"}</td><td>${esc(a.created_at || "n/a")}</td></tr>`),
     ...dp.notable.map((t) => `<tr><td>Dark-pool print</td><td>n/a</td><td>${fmtMoney(_fa(t, "premium")) ?? "n/a"}</td><td>${esc(t.executed_at || "n/a")}</td></tr>`),
   ].join("") || `<tr><td colspan="4" class="muted">No individual records this scan.</td></tr>`;
 

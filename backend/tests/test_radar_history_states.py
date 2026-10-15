@@ -6,7 +6,10 @@ import os
 from pathlib import Path
 
 os.environ.setdefault("TIP_MODE", "demo")
-os.environ.setdefault("TIP_DB_PATH", ":memory:")
+# #38: forced override, not setdefault -- see conftest.py's note. Harmless
+# no-op when conftest.py (which forces this first) has already run; kept
+# here too so this file is still safe if ever executed standalone.
+os.environ["TIP_DB_PATH"] = ":memory:"
 
 from fastapi.testclient import TestClient  # noqa: E402
 

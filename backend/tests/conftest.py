@@ -9,7 +9,19 @@ if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
 os.environ.setdefault("TIP_MODE", "demo")
-os.environ.setdefault("TIP_DB_PATH", ":memory:")
+# SAFETY CRITICAL (#38, 2026-10-15 round 2): this MUST be a forced
+# override, never os.environ.setdefault. A shell/container that already
+# exports TIP_DB_PATH (e.g. pointed at a real deployed install) would
+# otherwise win over this test suite's own isolation, which is exactly the
+# bug that let pytest previously write synthetic test records into a real
+# deployed SQLite volume. The test suite's own fixture setup must always
+# take priority over any inherited env var -- ":memory:" is used here
+# (every test using the default db_path gets a private, fully in-process
+# DB) with app/storage.py's assert_safe_test_db_path() as a hard fail-
+# closed backstop for any test that constructs a Storage with its own
+# explicit path instead of the settings default (see
+# tests/test_db_isolation.py for the regression coverage).
+os.environ["TIP_DB_PATH"] = ":memory:"
 
 
 @pytest.fixture

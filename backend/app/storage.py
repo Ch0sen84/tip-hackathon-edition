@@ -22,11 +22,72 @@ defaults to ./data/tip_hackathon.db, created automatically.
 """
 from __future__ import annotations
 
+import os
 import sqlite3
+import sys
+import tempfile
 from contextlib import contextmanager
 from datetime import date as date_cls
 from pathlib import Path
 from typing import Optional
+
+REAL_DEFAULT_DB_PATH = "./data/tip_hackathon.db"
+
+
+def _running_under_pytest() -> bool:
+    """True whenever a pytest process is actually driving this code --
+    never true for the real running app (uvicorn/Docker), so this guard
+    can ONLY ever refuse something inside a test run, never in production."""
+    return bool(os.environ.get("PYTEST_CURRENT_TEST")) or "pytest" in sys.modules
+
+
+def assert_safe_test_db_path(db_path: str) -> None:
+    """SAFETY CRITICAL (#38, 2026-10-15 round 2) -- FAIL CLOSED.
+
+    Backend pytest previously wrote synthetic test records straight into
+    the DEPLOYED SQLite volume whenever it inherited a real TIP_DB_PATH
+    from the shell/container it happened to run inside (instead of each
+    test using its own isolated DB). That could pollute/corrupt a user's
+    actual persistent TIP installation just by running the test suite.
+
+    This function is the hard backstop: called from
+    QualifyingDaysStore.__init__ on EVERY construction, it refuses (raises
+    RuntimeError, does not open/touch the file) unless `db_path` is either
+    literally ":memory:" or resolves to somewhere inside the OS temp
+    directory (tempfile.gettempdir()) -- which is exactly where
+    tempfile.mkdtemp() and pytest's own `tmp_path` fixture put their files.
+    Anything else -- including the real default
+    './data/tip_hackathon.db', any ambient TIP_DB_PATH inherited from a
+    shell/container pointed at a real deployed install, or any other
+    non-temp path a test might pass by mistake -- is refused loudly rather
+    than silently opened and written to.
+
+    Only active when pytest is actually running (_running_under_pytest());
+    the real app (uvicorn/Docker) is never affected by this check and keeps
+    using whatever db_path it's configured with, including the real
+    default, exactly as before.
+    """
+    if not _running_under_pytest():
+        return
+    if db_path == ":memory:":
+        return
+    resolved = os.path.realpath(db_path)
+    real_default = os.path.realpath(REAL_DEFAULT_DB_PATH)
+    tmp_root = os.path.realpath(tempfile.gettempdir())
+    is_in_tmp = resolved == tmp_root or resolved.startswith(tmp_root + os.sep)
+    if resolved == real_default or not is_in_tmp:
+        raise RuntimeError(
+            f"REFUSING to open SQLite DB at {db_path!r} (resolved to {resolved!r}) "
+            f"during a pytest run: this is not an isolated test path (expected "
+            f"':memory:' or a path under {tmp_root!r} created by "
+            f"tempfile.mkdtemp()/pytest's tmp_path fixture). This guard exists "
+            f"because pytest previously wrote synthetic test records into the "
+            f"real deployed TIP_DB_PATH volume -- see conftest.py and the #38 "
+            f"regression tests in tests/test_db_isolation.py. Fix the test to use "
+            f"an isolated temp DB path; never let it use an inherited TIP_DB_PATH "
+            f"or the real default."
+        )
+
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS ticker_scan_log (
@@ -51,6 +112,7 @@ class QualifyingDaysStore:
     the file locking. Safe to point at ':memory:' in tests."""
 
     def __init__(self, db_path: str = "./data/tip_hackathon.db"):
+        assert_safe_test_db_path(db_path)
         self.db_path = db_path
         # sqlite3's ':memory:' creates a BRAND NEW empty database on every
         # connect() call -- a fresh connection per method call (as the file
