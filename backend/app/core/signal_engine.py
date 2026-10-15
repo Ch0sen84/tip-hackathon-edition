@@ -19,6 +19,101 @@ PORTING NOTES (read before touching thresholds):
     NOT ported here: they are Postgres persistence helpers in production.
     This app computes an equivalent `qualifying_days_count` from a small
     local SQLite log instead -- see `backend/app/storage.py`.
+
+SIGNAL-INTEGRITY RULE CHANGE (2026-10-15, Chad-approved, read before touching
+confirmation/confidence logic again):
+
+  1. `historical_percentile` (the SYNTHETIC static premium-size-bucket
+     estimator -- see `synthetic_percentile_gate` below) has ZERO weight in
+     any state-machine or confidence decision now. It is still computed and
+     still returned in the `gates` dict every scan (so the UI can keep
+     showing it as an honestly-labeled, non-counting descriptive/demo-only
+     indicator -- see `tip_evidence.py`'s `synthetic_baseline` family,
+     already correct as of commit 7dafc8f), but it no longer contributes to
+     `multi_signal_confirmation`'s tally, to `classify_confidence`'s tiers,
+     or to any lifecycle transition. A ticker whose ONLY passing gate is
+     this synthetic one can never reach "high" confidence or CONFIRMED.
+
+  2. CONFIRMED (and HIGH confidence) now require >= 2 of the following
+     `INDEPENDENT_SIGNAL_GATES` to have genuinely passed on the SAME scan:
+       - dark_pool_anomaly     (source: real UW dark-pool trade records)
+       - options_flow_anomaly  (source: real UW option-trades/flow-alerts)
+       - catalyst_identified   (source: a manually-verified real catalyst --
+                                 never auto-computed from any UW feed at all,
+                                 see adapters/base.py)
+     `price_confirmation`, `persistence`, and `historical_percentile` are
+     DELIBERATELY EXCLUDED from this independence list:
+       - `historical_percentile` per rule 1 above (it's synthetic, not a
+         real data source at all).
+       - `persistence` is excluded because, in THIS app's build, it is
+         satisfied by `tier2_hit` (hardcoded False everywhere -- tier2 was
+         never ported, see scan_service.py) OR `is_new_qualifying_day`,
+         which is just "today's calendar date differs from a previously
+         logged qualifying date" -- a fact about WHEN a scan happened, not
+         an independently-sourced piece of market evidence. Counting it as
+         a second "category" would let the exact same single real anomaly
+         (e.g. one options-flow hit) qualify as "2 independent categories"
+         merely by being seen on two different calendar dates, which is the
+         specific loophole this rule change closes. `persistence` remains a
+         visible gate (and still contributes to `any_gate_passed` for
+         BUILDING/FADING bookkeeping below) but never counts toward the
+         2-category CONFIRMED/HIGH bar.
+       - `price_confirmation` is excluded on careful analysis, NOT a rubber
+         stamp: its own "passed" boolean is gated on `direction_heuristic`,
+         which `scan_service._direction_heuristic` computes from the SAME
+         options-flow ask/bid-side premium split that `options_flow_anomaly`
+         itself reads (see scan_service.build_gate_inputs). price_confirmation
+         measures a genuinely different instrument (real stock price/OHLC,
+         not options premium), so it IS real additional evidence and still
+         counts toward `any_gate_passed` / the STABLE transition's price
+         check below -- but it can only ever confirm or contradict a
+         direction that `options_flow_anomaly`'s own feed produced. Treating
+         "options_flow_anomaly passed" + "price_confirmation passed" as 2
+         INDEPENDENT categories would, in practice, let a single options-flow
+         anomaly with a consistent price reaction reach CONFIRMED by itself
+         -- exactly the "single genuine options-flow anomaly alone... must
+         result in observed/candidate, NOT CONFIRMED" case this rule change
+         is meant to prevent. price_confirmation therefore corroborates
+         existing evidence (and can flag CONFLICTING evidence when it fails)
+         but is not itself counted as one of the 2 required independent
+         categories. Reconsider this if a future gate's direction input is
+         ever sourced from something other than the options-flow feed.
+     If a future gate is added that derives its "passed" boolean from the
+     same raw API call as an existing INDEPENDENT_SIGNAL_GATES member (e.g.
+     two different thresholds over the same flow-alerts batch), it must NOT
+     be added to INDEPENDENT_SIGNAL_GATES either.
+
+  3. A SINGLE real gate passing (even a strong dark-pool ratio, even options
+     flow with a sweep) now caps at "medium" confidence and a non-CONFIRMED
+     lifecycle state (NEW/BUILDING/"observed") -- never "high"/CONFIRMED,
+     regardless of how many calendar days it has been seen on. Only genuine
+     multi-category corroboration on the CURRENT scan reaches CONFIRMED.
+
+  4. `determine_transition` no longer has a `qualifying_days_count >= 2`
+     bypass to CONFIRMED (the old code's "OR persistence" path -- removed,
+     see rule 2's loophole note). It also now RE-EVALUATES every scan: a
+     ticker already sitting in CONFIRMED or STABLE from a PRIOR scan (under
+     the old rules, or simply because evidence faded) is demoted to
+     BUILDING the moment `multi_signal_confirmation` no longer passes on the
+     current scan (demoted further to FADING only when no gate passes at
+     all). Existing `ticker_scan_log` / `ticker_current_state` rows are
+     never deleted or rewritten for audit purposes (see storage.py) -- only
+     the FORWARD-looking transition decision on the next scan changes.
+
+  5. KNOWN, DELIBERATELY NOT FIXED THIS PASS (documented per Chad's
+     "narrower fix preferred over bigger redesign" instruction): CONFIRMED
+     -> STABLE still uses `qualifying_days_count` (distinct calendar dates
+     with any gate passing, see storage.py's `COUNT(DISTINCT scan_date)`).
+     Because STABLE now ALSO requires `multi_signal_confirmation` to still
+     be passing on the scan that makes the transition (not just historical
+     qualifying days), a ticker cannot drift into STABLE on stale/unchanged
+     single-gate evidence -- but it COULD still reach STABLE after 3
+     calendar days of the SAME genuinely-real, unchanged 2-category
+     evidence repeating verbatim (e.g. an outage or a quiet market
+     returning an identical flow-alerts window on two different dates).
+     Closing that fully would require hashing/fingerprinting the underlying
+     evidence per qualifying day and is new infrastructure beyond this
+     pass's scope -- flagged for a future decision, not built here.
 """
 from __future__ import annotations
 
@@ -35,6 +130,17 @@ STRONG_RATIO = 4.0
 STRONG_Z = 3.0
 INVALIDATION_ADVERSE_PCT = -3.0  # price move against expected direction, %
 STABLE_MIN_QUALIFYING_DAYS = 3
+
+# Gates counted toward the 2-independent-category CONFIRMED/HIGH bar.
+# `historical_percentile` (synthetic), `persistence` (calendar-date-only,
+# not an independent data source), and `price_confirmation` (its direction
+# input is sourced from the SAME options-flow feed as options_flow_anomaly)
+# are deliberately excluded -- see the "SIGNAL-INTEGRITY RULE CHANGE" note
+# in this module's docstring for the full rationale before changing this
+# tuple.
+INDEPENDENT_SIGNAL_GATES = (
+    "dark_pool_anomaly", "options_flow_anomaly", "catalyst_identified",
+)
 
 
 def synthetic_percentile_gate(ticker: str, today_premium: float) -> dict:
@@ -126,18 +232,23 @@ def evaluate_gates(ticker: str, *, tier1_hit: bool = False, tier1_bootstrap: boo
                     "confirmed": price_confirmed},
     }
 
-    multi = sum(1 for g in ("dark_pool_anomaly", "options_flow_anomaly", "historical_percentile", "persistence")
-                if gates[g]["passed"]) >= 2
-    gates["multi_signal_confirmation"] = {
-        "passed": multi,
-        "metrics": {"contributing_gates": [g for g in
-                    ("dark_pool_anomaly", "options_flow_anomaly", "historical_percentile", "persistence")
-                    if gates[g]["passed"]]},
-    }
-
     gates["catalyst_identified"] = {
         "passed": bool(catalyst_identified),
         "metrics": {"note": "not auto-computed -- set explicitly when a real catalyst is found"},
+    }
+
+    # NOTE: tallies only INDEPENDENT_SIGNAL_GATES -- historical_percentile
+    # (synthetic) and persistence (calendar-date-only) never count toward
+    # this, even though both gates are still computed/displayed above. See
+    # this module's docstring, "SIGNAL-INTEGRITY RULE CHANGE" rule 2.
+    contributing = [g for g in INDEPENDENT_SIGNAL_GATES if gates[g]["passed"]]
+    multi = len(contributing) >= 2
+    gates["multi_signal_confirmation"] = {
+        "passed": multi,
+        "metrics": {
+            "contributing_gates": contributing,
+            "excluded_from_tally": ["historical_percentile", "persistence", "price_confirmation"],
+        },
     }
 
     gates["data_quality"] = {
@@ -151,44 +262,57 @@ def evaluate_gates(ticker: str, *, tier1_hit: bool = False, tier1_bootstrap: boo
 # --- Confidence --------------------------------------------------------------
 
 def classify_confidence(gates: dict, is_watchlist: bool = False) -> tuple:
-    """Returns (confidence, signal_type, reason, qualifies). Ported verbatim
-    from production signal_engine.py."""
+    """Returns (confidence, signal_type, reason, qualifies).
+
+    SIGNAL-INTEGRITY RULE CHANGE (see this module's docstring): "high"
+    confidence now requires `multi_signal_confirmation` -- i.e. >= 2 of
+    `INDEPENDENT_SIGNAL_GATES` genuinely passing on this scan. A SINGLE
+    real gate (dark_pool_anomaly, options_flow_anomaly, price_confirmation,
+    or catalyst_identified) passing alone caps at "medium" -- even a strong
+    dark-pool ratio/z-score no longer reaches "high" by itself. The
+    SYNTHETIC `historical_percentile` gate and the calendar-date-only
+    `persistence` gate no longer have a confidence branch at all: neither
+    can produce "high" OR "medium" on its own anymore, by design (rule 1 of
+    the docstring note above) -- a ticker whose only passing gate is either
+    of those stays "low"/non-qualifying here, exactly like a ticker with no
+    passing gates at all.
+    """
     if is_watchlist:
         return ("manual", "watchlist-manual",
                 "Manually marked for tracking (named watchlist ticker)", True)
 
-    dp = gates["dark_pool_anomaly"]
-    of = gates["options_flow_anomaly"]  # noqa: F841 (kept for parity with production signature/readability)
-    hp = gates["historical_percentile"]
-    persist = gates["persistence"]
     multi = gates["multi_signal_confirmation"]
+    dp = gates["dark_pool_anomaly"]
+    of = gates["options_flow_anomaly"]
+    pc = gates["price_confirmation"]
+    ci = gates["catalyst_identified"]
 
     if multi["passed"]:
         contributing = multi["metrics"]["contributing_gates"]
-        conf = "high"
-        reason = f"Multi-signal confirmation: {', '.join(contributing)}"
-        return (conf, "multi-signal", reason, True)
+        reason = f"Multi-signal confirmation (>=2 independent categories): {', '.join(contributing)}"
+        return ("high", "multi-signal", reason, True)
 
     if dp["passed"]:
         ratio = dp["metrics"].get("ratio")
         z = dp["metrics"].get("z_score")
-        strong = (ratio and ratio >= STRONG_RATIO) or (z and z >= STRONG_Z)
-        conf = "high" if strong else "medium"
-        reason = f"Dark-pool anomaly vs baseline: {ratio:.1f}x avg, z={z:.1f}" if ratio else "Dark-pool anomaly vs baseline"
-        return (conf, "t1-baseline", reason, True)
+        reason = (f"Single-category dark-pool anomaly only ({ratio:.1f}x avg, z={z:.1f}) -- "
+                   "real, but not independently corroborated by a 2nd category" if ratio
+                   else "Single-category dark-pool anomaly only -- not independently corroborated")
+        return ("medium", "single-signal-dark-pool", reason, True)
 
-    if hp["passed"]:
-        m = hp["metrics"]
-        conf = "high" if m.get("percentile", 0) >= 0.97 else "medium"
-        reason = f"Historical percentile: {m.get('percentile', 0):.0%} in trailing {m.get('window_days')}d window"
-        return (conf, "historical-percentile", reason, True)
+    if of["passed"]:
+        return ("medium", "single-signal-options-flow",
+                "Single-category options-flow anomaly only -- not independently corroborated "
+                "by a 2nd category", True)
 
-    if persist["passed"] and persist["metrics"]["tier2_qualifying_prints"] > 0:
-        n = persist["metrics"]["tier2_qualifying_prints"]
-        pct = persist["metrics"]["tier2_max_pct"]
-        conf = "high" if (n >= 3 or pct >= 0.90) else "medium"
-        reason = f"{n} prints \u2265{pct:.0%} of that day's volume"
-        return (conf, "t2-pctvol", reason, True)
+    if pc["passed"]:
+        return ("medium", "single-signal-price-confirmation",
+                "Price action confirmed the expected direction, but with no other independent "
+                "category also passing", True)
+
+    if ci["passed"]:
+        return ("medium", "single-signal-catalyst",
+                "A catalyst was identified, but with no other independent category also passing", True)
 
     if gates["dark_pool_anomaly"]["metrics"].get("bootstrap"):
         return ("low", "t1-bootstrap", "Bootstrap-only, insufficient history -- not auto-qualified", False)
@@ -202,8 +326,24 @@ def determine_transition(current_state: Optional[str], gates: dict,
                           qualifying_days_count: int, price_move_pct: Optional[float],
                           direction_heuristic: Optional[str]) -> tuple:
     """Pure, deterministic. Returns (new_state, rule_id). current_state is
-    None for a brand-new ticker (no open qualification record yet). Ported
-    verbatim from production signal_engine.py."""
+    None for a brand-new ticker (no open qualification record yet).
+
+    SIGNAL-INTEGRITY RULE CHANGE (see this module's docstring, rules 2 and
+    4): CONFIRMED is reached/held ONLY via `gates["multi_signal_confirmation"]`
+    (>= 2 of INDEPENDENT_SIGNAL_GATES on THIS scan) -- the old
+    `or qualifying_days_count >= 2` bypass is removed, since that let a
+    single real gate seen on two different calendar dates masquerade as
+    independent corroboration. Every call RE-EVALUATES the current scan's
+    gates against `current_state`: a ticker already CONFIRMED or STABLE
+    from a prior scan (whether reached honestly or, before this rule
+    change, via the synthetic gate/old persistence bypass) is demoted the
+    moment multi-signal confirmation no longer holds -- to BUILDING if at
+    least one real gate still passed this scan, to FADING if none did.
+    STABLE additionally still requires multi-signal confirmation to hold on
+    the transitioning scan itself (not just historical qualifying days) --
+    see docstring rule 5 for the one residual limitation this does NOT
+    close (repeated identical real evidence across qualifying days).
+    """
     # Invalidation check first -- overrides everything else.
     if price_move_pct is not None and direction_heuristic in ("bullish-lean", "bearish-lean"):
         expected_up = direction_heuristic == "bullish-lean"
@@ -213,36 +353,41 @@ def determine_transition(current_state: Optional[str], gates: dict,
 
     any_gate_passed = any(g["passed"] for name, g in gates.items()
                            if name not in ("multi_signal_confirmation", "catalyst_identified", "data_quality"))
+    confirmed = gates["multi_signal_confirmation"]["passed"]
 
     if current_state is None:
         return ("NEW", "first_qualifying_gate")
 
     if current_state == "NEW":
-        if gates["multi_signal_confirmation"]["passed"] or qualifying_days_count >= 2:
-            return ("CONFIRMED", "multi_signal_or_persistence_on_first_reeval")
+        if confirmed:
+            return ("CONFIRMED", "multi_signal_confirmation_two_independent_categories")
         return ("BUILDING", "single_signal_reevaluated")
 
     if current_state in ("BUILDING",):
-        if gates["multi_signal_confirmation"]["passed"] or qualifying_days_count >= 2:
-            return ("CONFIRMED", "multi_signal_or_2plus_qualifying_days")
+        if confirmed:
+            return ("CONFIRMED", "multi_signal_confirmation_two_independent_categories")
         if not any_gate_passed:
             return ("FADING", "no_gate_passed_while_building")
         return ("BUILDING", "still_single_signal")
 
     if current_state == "CONFIRMED":
-        if qualifying_days_count >= STABLE_MIN_QUALIFYING_DAYS and gates["price_confirmation"]["passed"]:
-            return ("STABLE", f">= {STABLE_MIN_QUALIFYING_DAYS}_qualifying_days_and_price_confirmed")
-        if not any_gate_passed:
+        if confirmed and qualifying_days_count >= STABLE_MIN_QUALIFYING_DAYS and gates["price_confirmation"]["passed"]:
+            return ("STABLE", f">= {STABLE_MIN_QUALIFYING_DAYS}_qualifying_days_and_price_confirmed_and_still_multi_signal")
+        if not confirmed:
+            if any_gate_passed:
+                return ("BUILDING", "demoted_lost_multi_signal_confirmation")
             return ("FADING", "no_gate_passed_while_confirmed")
         return ("CONFIRMED", "still_confirmed")
 
     if current_state == "STABLE":
-        if not any_gate_passed:
+        if not confirmed:
+            if any_gate_passed:
+                return ("BUILDING", "demoted_lost_multi_signal_confirmation")
             return ("FADING", "no_gate_passed_while_stable")
         return ("STABLE", "still_stable")
 
     if current_state == "FADING":
-        if gates["multi_signal_confirmation"]["passed"]:
+        if confirmed:
             return ("CONFIRMED", "reheated_multi_signal")
         if any_gate_passed:
             return ("BUILDING", "reheated_single_signal")

@@ -358,9 +358,25 @@ CATEGORY_LABELS = {"dark_pool": "dark-pool activity", "options": "broader option
 
 
 def categories(item):
-    """Distinct evidence categories, in fixed order, each counted once."""
+    """Distinct evidence categories, in fixed order, each counted once.
+
+    SIGNAL-INTEGRITY RULE CHANGE (2026-10-15, matching signal_engine.py's
+    confirmation-math rule change): `synthetic_baseline` is EXCLUDED from
+    this tally. `present()`'s "Highest Attention" split (and rank_key's
+    ordering) requires >= 2 distinct categories -- counting the SYNTHETIC
+    historical_percentile placeholder as one of those 2 would let a ticker
+    with only ONE real evidence family (e.g. dark_pool) plus the synthetic
+    placeholder get emphasised as "MULTI-SOURCE"/Highest Attention, exactly
+    the zero-weight-for-synthetic-gates rule signal_engine.py now enforces
+    for confirmation/confidence. The synthetic_baseline family itself is
+    UNCHANGED everywhere else (still shown, still labeled, still a real
+    `families()`/`evidence()`/`dominant_label()` entry) -- only its
+    contribution to the >=2-category COUNT is removed.
+    """
     out = []
     for f in families(item):
+        if f == "synthetic_baseline":
+            continue
         c = CATEGORY_OF[f]
         if c not in out:
             out.append(c)

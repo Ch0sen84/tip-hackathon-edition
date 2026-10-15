@@ -114,28 +114,70 @@ class TestClassifyConfidence:
         assert sig_type == "multi-signal"
         assert qualifies is True
 
-    def test_dark_pool_strong_ratio_is_high(self):
+    def test_dark_pool_strong_ratio_is_medium_not_high(self):
+        """SIGNAL-INTEGRITY RULE CHANGE: a single real gate -- even a
+        strong dark-pool ratio/z-score -- can no longer reach "high" on
+        its own. Only genuine >=2-category multi_signal_confirmation does."""
         gates = make_gates(dark_pool_anomaly={"passed": True, "metrics": {"ratio": 5.0, "z_score": 1.0, "bootstrap": False}})
         conf, sig_type, reason, qualifies = se.classify_confidence(gates)
-        assert conf == "high"
-        assert sig_type == "t1-baseline"
+        assert conf == "medium"
+        assert sig_type == "single-signal-dark-pool"
+        assert qualifies is True
 
     def test_dark_pool_weak_ratio_is_medium(self):
         gates = make_gates(dark_pool_anomaly={"passed": True, "metrics": {"ratio": 1.2, "z_score": 1.0, "bootstrap": False}})
         conf, sig_type, reason, qualifies = se.classify_confidence(gates)
         assert conf == "medium"
 
-    def test_historical_percentile_high_at_97(self):
+    def test_historical_percentile_alone_never_qualifies(self):
+        """SIGNAL-INTEGRITY RULE CHANGE: the SYNTHETIC historical_percentile
+        gate has zero weight in confidence now, even when it passes strongly
+        (percentile=0.98) -- it is excluded from INDEPENDENT_SIGNAL_GATES
+        and classify_confidence no longer has a branch for it at all."""
         gates = make_gates(historical_percentile={"passed": True, "metrics": {"percentile": 0.98, "window_days": 30}})
         conf, sig_type, reason, qualifies = se.classify_confidence(gates)
-        assert conf == "high"
-        assert sig_type == "historical-percentile"
+        assert (conf, sig_type, qualifies) == ("low", "none", False)
 
-    def test_persistence_with_prints_qualifies(self):
+    def test_persistence_alone_never_qualifies(self):
+        """SIGNAL-INTEGRITY RULE CHANGE: `persistence` is excluded from
+        INDEPENDENT_SIGNAL_GATES (calendar-date-only, not an independent
+        data source -- see signal_engine.py docstring) and no longer has
+        its own confidence branch; passing alone stays low/non-qualifying."""
         gates = make_gates(persistence={"passed": True, "metrics": {"tier2_qualifying_prints": 3, "tier2_max_pct": 0.5, "is_new_qualifying_day": False}})
         conf, sig_type, reason, qualifies = se.classify_confidence(gates)
+        assert (conf, sig_type, qualifies) == ("low", "none", False)
+
+    def test_price_confirmation_alone_is_medium_not_high(self):
+        """price_confirmation is a real gate but is excluded from
+        INDEPENDENT_SIGNAL_GATES (its direction input is sourced from the
+        same options-flow feed as options_flow_anomaly) -- passing alone
+        caps at medium, never high/CONFIRMED-eligible."""
+        gates = make_gates(price_confirmation={"passed": True, "metrics": {"confirmed": True}})
+        conf, sig_type, reason, qualifies = se.classify_confidence(gates)
+        assert conf == "medium"
+        assert sig_type == "single-signal-price-confirmation"
+
+    def test_catalyst_identified_alone_is_medium_not_high(self):
+        gates = make_gates(catalyst_identified={"passed": True, "metrics": {}})
+        conf, sig_type, reason, qualifies = se.classify_confidence(gates)
+        assert conf == "medium"
+        assert sig_type == "single-signal-catalyst"
+
+    def test_two_independent_categories_reach_high_confidence(self):
+        """dark_pool_anomaly + options_flow_anomaly are two genuinely
+        independent real data sources (dark-pool trades vs options flow) --
+        this is the "2 independent categories CAN reach CONFIRMED" case."""
+        gates = make_gates(
+            dark_pool_anomaly={"passed": True, "metrics": {"ratio": 5.0, "z_score": 4.0, "bootstrap": False}},
+            options_flow_anomaly={"passed": True, "metrics": {}},
+        )
+        gates["multi_signal_confirmation"] = {
+            "passed": True,
+            "metrics": {"contributing_gates": ["dark_pool_anomaly", "options_flow_anomaly"]},
+        }
+        conf, sig_type, reason, qualifies = se.classify_confidence(gates)
         assert conf == "high"
-        assert sig_type == "t2-pctvol"
+        assert sig_type == "multi-signal"
 
     def test_bootstrap_only_is_low_not_qualifying(self):
         gates = make_gates(dark_pool_anomaly={"passed": False, "metrics": {"ratio": None, "z_score": None, "bootstrap": True}})
@@ -164,10 +206,66 @@ class TestDetermineTransition:
         state, rule = se.determine_transition("NEW", gates, 1, None, None)
         assert state == "CONFIRMED"
 
-    def test_new_to_confirmed_on_two_plus_qualifying_days(self):
+    def test_single_gate_does_not_confirm_even_with_two_qualifying_days(self):
+        """SIGNAL-INTEGRITY RULE CHANGE: the old `qualifying_days_count >= 2`
+        bypass to CONFIRMED is removed. A single real gate (dark_pool_anomaly
+        only here, multi_signal_confirmation still false) seen on 2+
+        calendar days must NOT reach CONFIRMED -- this was the exact
+        loophole (persistence of unchanged single-category evidence
+        masquerading as independent corroboration) the rule change closes."""
         gates = make_gates(dark_pool_anomaly={"passed": True, "metrics": {"ratio": 2.0, "z_score": 1.0, "bootstrap": False}})
         state, rule = se.determine_transition("NEW", gates, 2, None, None)
+        assert state == "BUILDING"
+
+    def test_two_independent_gates_do_confirm(self):
+        """Two genuinely independent real gates (dark_pool_anomaly +
+        options_flow_anomaly -- different UW feeds) CAN reach CONFIRMED,
+        even on the very first re-evaluation (qualifying_days_count=0)."""
+        gates = make_gates(
+            dark_pool_anomaly={"passed": True, "metrics": {"ratio": 2.0, "z_score": 1.0, "bootstrap": False}},
+            options_flow_anomaly={"passed": True, "metrics": {}},
+        )
+        gates["multi_signal_confirmation"] = {
+            "passed": True,
+            "metrics": {"contributing_gates": ["dark_pool_anomaly", "options_flow_anomaly"]},
+        }
+        state, rule = se.determine_transition("NEW", gates, 0, None, None)
         assert state == "CONFIRMED"
+
+    def test_repeated_same_day_scans_cannot_manufacture_confirmation(self):
+        """Re-running determine_transition multiple times against the SAME
+        unchanged single-gate snapshot (simulating repeated same-day scans
+        -- qualifying_days_count never increments for a repeated same-day
+        scan per storage.py's COUNT(DISTINCT scan_date)) must never drift
+        toward CONFIRMED just from being evaluated repeatedly."""
+        gates = make_gates(dark_pool_anomaly={"passed": True, "metrics": {"ratio": 2.0, "z_score": 1.0, "bootstrap": False}})
+        state = None
+        for _ in range(5):
+            state, rule = se.determine_transition(state, gates, 1, None, None)
+        assert state in ("NEW", "BUILDING")
+        assert state != "CONFIRMED"
+
+    def test_stale_confirmed_is_demoted_when_multi_signal_no_longer_holds(self):
+        """SIGNAL-INTEGRITY RULE CHANGE item 4: a ticker already sitting in
+        CONFIRMED from a PRIOR scan (e.g. reached under the old rules) is
+        demoted to BUILDING the moment multi_signal_confirmation no longer
+        passes on the current scan, as long as at least one real gate still
+        passed -- never silently kept as CONFIRMED."""
+        gates = make_gates(dark_pool_anomaly={"passed": True, "metrics": {"ratio": 2.0, "z_score": 1.0, "bootstrap": False}})
+        state, rule = se.determine_transition("CONFIRMED", gates, 3, None, None)
+        assert state == "BUILDING"
+        assert rule == "demoted_lost_multi_signal_confirmation"
+
+    def test_stale_confirmed_fades_when_nothing_passes_at_all(self):
+        gates = make_gates()
+        state, rule = se.determine_transition("CONFIRMED", gates, 3, None, None)
+        assert state == "FADING"
+
+    def test_stale_stable_is_demoted_when_multi_signal_no_longer_holds(self):
+        gates = make_gates(options_flow_anomaly={"passed": True, "metrics": {}})
+        state, rule = se.determine_transition("STABLE", gates, 10, None, None)
+        assert state == "BUILDING"
+        assert rule == "demoted_lost_multi_signal_confirmation"
 
     def test_building_to_fading_when_nothing_passes(self):
         gates = make_gates()
@@ -180,12 +278,34 @@ class TestDetermineTransition:
         assert state == "BUILDING"
 
     def test_confirmed_to_stable_after_three_qualifying_days_with_price_confirmation(self):
+        """STABLE now additionally requires multi_signal_confirmation to
+        still hold on the transitioning scan itself (see signal_engine.py
+        docstring rule 5) -- so this needs a genuine 2-category pass, not
+        just dark_pool_anomaly + price_confirmation (price_confirmation is
+        excluded from the independent tally, see INDEPENDENT_SIGNAL_GATES)."""
+        gates = make_gates(
+            dark_pool_anomaly={"passed": True, "metrics": {"ratio": 2.0, "z_score": 1.0, "bootstrap": False}},
+            options_flow_anomaly={"passed": True, "metrics": {}},
+            price_confirmation={"passed": True, "metrics": {}},
+        )
+        gates["multi_signal_confirmation"] = {
+            "passed": True,
+            "metrics": {"contributing_gates": ["dark_pool_anomaly", "options_flow_anomaly"]},
+        }
+        state, rule = se.determine_transition("CONFIRMED", gates, se.STABLE_MIN_QUALIFYING_DAYS, 2.0, "bullish-lean")
+        assert state == "STABLE"
+
+    def test_confirmed_single_gate_with_price_confirmation_does_not_reach_stable(self):
+        """The narrower companion case: dark_pool_anomaly + price_confirmation
+        passing is only 1 independent category (price_confirmation doesn't
+        count) -- multi_signal_confirmation is false, so even with
+        qualifying_days_count satisfied this must demote, not promote."""
         gates = make_gates(
             dark_pool_anomaly={"passed": True, "metrics": {"ratio": 2.0, "z_score": 1.0, "bootstrap": False}},
             price_confirmation={"passed": True, "metrics": {}},
         )
         state, rule = se.determine_transition("CONFIRMED", gates, se.STABLE_MIN_QUALIFYING_DAYS, 2.0, "bullish-lean")
-        assert state == "STABLE"
+        assert state == "BUILDING"
 
     def test_confirmed_to_fading_when_nothing_passes(self):
         gates = make_gates()

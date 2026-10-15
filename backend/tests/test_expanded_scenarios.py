@@ -48,11 +48,21 @@ class TestConflictingPriceConfirmation:
 
 
 class TestPersistenceProgression:
-    def test_seed_then_live_scan_reaches_confirmed(self):
+    def test_seed_then_live_scan_stays_building_not_falsely_confirmed(self):
         """Full, real, multi-day trajectory: seed two backdated real scans
-        (NEW then BUILDING), then a third live scan must compute CONFIRMED
-        via determine_transition's qualifying_days_count>=2 rule -- not a
-        relabeled snapshot."""
+        (NEW then BUILDING), then a third live scan.
+
+        SIGNAL-INTEGRITY RULE CHANGE (2026-10-15): PRSX's fixture is a
+        SINGLE independent category (dark_pool_anomaly only -- see
+        fixtures/scenario_persistence_progression.json's own description).
+        Before this rule change, the old `qualifying_days_count >= 2`
+        bypass in determine_transition promoted this straight to CONFIRMED
+        on the live scan -- exactly the "single real gate seen on two
+        different calendar dates masquerading as 2 independent categories"
+        loophole Chad's rule change closes. The live scan must now stay
+        BUILDING: multi_signal_confirmation never passes for PRSX (only
+        1 of INDEPENDENT_SIGNAL_GATES fires), so there is no genuine
+        corroboration to promote it."""
         from app.seed_demo_history import seed_persistence_progression
 
         store = QualifyingDaysStore(":memory:")
@@ -73,8 +83,9 @@ class TestPersistenceProgression:
         assert qualifying_days == 2
         live_scan = _scan("PRSX", current_state=current_state,
                            qualifying_days_count=qualifying_days)
-        assert live_scan["state"] == "CONFIRMED"
-        assert live_scan["transition_rule"] == "multi_signal_or_2plus_qualifying_days"
+        assert live_scan["gates"]["multi_signal_confirmation"]["passed"] is False
+        assert live_scan["state"] == "BUILDING"
+        assert live_scan["transition_rule"] == "still_single_signal"
 
     def test_seeding_is_idempotent(self):
         from app.seed_demo_history import seed_persistence_progression
@@ -112,30 +123,51 @@ class TestPersistenceProgression:
 
 class TestMultiSignalAltCombination:
     def test_volx_multi_signal_without_dark_pool(self):
+        """SIGNAL-INTEGRITY RULE CHANGE (2026-10-15): VOLX's fixture was
+        tuned to trip options_flow_anomaly + historical_percentile (the
+        SYNTHETIC gate). historical_percentile is now EXCLUDED from
+        multi_signal_confirmation's tally (zero weight in any decision --
+        see signal_engine.py docstring), so VOLX is correctly only a
+        single real category now (options_flow_anomaly alone) -- medium
+        confidence, not high/multi-signal. This is the intended behavior
+        change, not a regression: a synthetic-gate-backed "multi-signal"
+        reading must not survive this rule change."""
         scan = _scan("VOLX")
-        assert scan["signal_type"] == "multi-signal"
-        assert scan["confidence"] == "high"
-        assert set(scan["gates"]["multi_signal_confirmation"]["metrics"]["contributing_gates"]) == {
-            "options_flow_anomaly", "historical_percentile",
-        }
+        assert scan["gates"]["historical_percentile"]["passed"] is True  # still computed/shown
         assert scan["gates"]["dark_pool_anomaly"]["passed"] is False
+        assert scan["gates"]["options_flow_anomaly"]["passed"] is True
+        assert scan["gates"]["multi_signal_confirmation"]["passed"] is False
+        assert scan["signal_type"] == "single-signal-options-flow"
+        assert scan["confidence"] == "medium"
+        assert scan["qualifies"] is True
 
 
 class TestOptionsOnlyBearish:
     def test_brnx_matches_zync_shaped_single_signal_behavior(self):
+        """BRNX is options_flow_anomaly + a confirmed price_confirmation,
+        no dark pool. price_confirmation is excluded from
+        INDEPENDENT_SIGNAL_GATES (its direction input is sourced from the
+        same options-flow feed -- see signal_engine.py docstring), so this
+        correctly stays single-category: options-flow alone never
+        independently confers CONFIRMED/high confidence (same real-engine
+        finding as ZYNC), even when price corroborates its own direction."""
         scan = _scan("BRNX")
         assert scan["gates"]["options_flow_anomaly"]["passed"] is True
         assert scan["gates"]["price_confirmation"]["metrics"]["direction_heuristic"] == "bearish-lean"
         assert scan["gates"]["price_confirmation"]["metrics"]["confirmed"] is True
-        # documented real-engine finding: options-only never independently
-        # confers confidence/qualification (same as ZYNC) -- not a bug.
-        assert scan["confidence"] == "low"
-        assert scan["signal_type"] == "t1-bootstrap"
-        assert scan["qualifies"] is False
+        assert scan["gates"]["multi_signal_confirmation"]["passed"] is False
+        assert scan["confidence"] == "medium"
+        assert scan["signal_type"] == "single-signal-options-flow"
+        assert scan["qualifies"] is True
 
 
 class TestDarkPoolWithDirection:
     def test_tepid_single_signal_with_evaluated_price_confirmation(self):
+        """SIGNAL-INTEGRITY RULE CHANGE: a single real gate -- even a
+        strong dark-pool ratio -- now caps at medium confidence, never
+        high/CONFIRMED-eligible on its own (price_confirmation passing
+        alongside it does not add a second INDEPENDENT category -- see
+        signal_engine.py docstring)."""
         scan = _scan("TEPID")
         assert scan["gates"]["dark_pool_anomaly"]["passed"] is True
         assert scan["gates"]["options_flow_anomaly"]["passed"] is False  # below $1M threshold
@@ -143,12 +175,16 @@ class TestDarkPoolWithDirection:
         assert scan["gates"]["multi_signal_confirmation"]["passed"] is False
         assert scan["gates"]["price_confirmation"]["metrics"]["direction_heuristic"] == "bullish-lean"
         assert scan["gates"]["price_confirmation"]["metrics"]["confirmed"] is True
-        assert scan["confidence"] == "high"
-        assert scan["signal_type"] == "t1-baseline"
+        assert scan["confidence"] == "medium"
+        assert scan["signal_type"] == "single-signal-dark-pool"
 
 
 class TestCatalystIdentified:
     def test_catx_catalyst_flag_flows_from_fixture_through_adapter_to_gate(self):
+        """CATX is options_flow_anomaly + a manually-verified catalyst_identified
+        -- two genuinely independent real categories (different data sources:
+        options flow vs. a curated real-world catalyst), so this is a real
+        "2 independent categories CAN reach CONFIRMED/high" demonstration."""
         adapter = SyntheticDataAdapter(str(FIXTURES_DIR))
         assert adapter.get_catalyst_identified("CATX") is True
         # every other scenario defaults to False -- never auto-detected.
@@ -158,6 +194,12 @@ class TestCatalystIdentified:
         scan = _scan("CATX")
         assert scan["gates"]["catalyst_identified"]["passed"] is True
         assert scan["gates"]["options_flow_anomaly"]["passed"] is True
+        assert scan["gates"]["multi_signal_confirmation"]["passed"] is True
+        assert set(scan["gates"]["multi_signal_confirmation"]["metrics"]["contributing_gates"]) == {
+            "options_flow_anomaly", "catalyst_identified",
+        }
+        assert scan["confidence"] == "high"
+        assert scan["signal_type"] == "multi-signal"
 
 
 def test_all_eleven_scenarios_run_through_real_engine_without_crashing():
@@ -166,13 +208,12 @@ def test_all_eleven_scenarios_run_through_real_engine_without_crashing():
     assert len(universe) == 11
     results = {t: _scan(t) for t in universe}
     distinct_signal_types = {r["signal_type"] for r in results.values()}
-    # Real finding, documented rather than fabricated: across all 11
-    # scenarios only 4 of classify_confidence's possible signal_type
-    # branches are ever reachable here (multi-signal, t1-baseline,
-    # t1-bootstrap, none) -- none of the fixtures trip the
-    # historical-percentile-alone or t2-pctvol branches, because any
-    # premium large enough to pass historical_percentile alone also
-    # trips multi_signal_confirmation (see PRSX's fixture-tuning note),
-    # and no fixture here synthesizes tier2 prints (scan_service hardcodes
-    # tier2_hit=False). Still genuinely varied, not a single canned type.
-    assert distinct_signal_types == {"multi-signal", "t1-baseline", "t1-bootstrap", "none"}
+    # Real finding under the SIGNAL-INTEGRITY RULE CHANGE (2026-10-15,
+    # re-verified against all 11 real fixtures, not assumed): with
+    # historical_percentile/persistence/price_confirmation excluded from
+    # INDEPENDENT_SIGNAL_GATES, several scenarios that used to read as
+    # "multi-signal" (VOLX, BRNX, TEPID) are now correctly single-category.
+    assert distinct_signal_types == {
+        "multi-signal", "single-signal-dark-pool", "single-signal-options-flow",
+        "t1-bootstrap", "none",
+    }

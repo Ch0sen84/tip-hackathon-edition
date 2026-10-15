@@ -104,7 +104,14 @@ async function main() {
   check("PRSX (the real seeded persistence scenario) has genuine multi-entry history_states", () => {
     assert.ok(prsx, "PRSX not found in radar response");
     assert.ok(Array.isArray(prsx.history_states) && prsx.history_states.length >= 3);
-    assert.deepEqual(prsx.history_states.slice(0, 3), ["NEW", "BUILDING", "CONFIRMED"]);
+    // SIGNAL-INTEGRITY RULE CHANGE (2026-10-15): PRSX is a single
+    // independent category (dark_pool_anomaly only). The old
+    // `qualifying_days_count >= 2` bypass that used to promote this to
+    // CONFIRMED on the 3rd (live) scan is removed -- a single real gate
+    // seen on 2 calendar dates is no longer treated as 2 independent
+    // categories. It correctly stays BUILDING now; see
+    // signal_engine.py's module docstring for the full rule.
+    assert.deepEqual(prsx.history_states.slice(0, 3), ["NEW", "BUILDING", "BUILDING"]);
   });
 
   console.log(`\n=== setupRadarFiltersAndRender end-to-end over the fake DOM ===`);

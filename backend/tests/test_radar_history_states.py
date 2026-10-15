@@ -41,7 +41,19 @@ def test_radar_entries_carry_a_real_state_field():
 def test_prsx_shows_real_multi_entry_history_after_seeding(app_main):
     """PRSX is the one scenario this pass seeded with genuinely distinct
     real scan_date history -- it must be the one showing a multi-entry
-    history_states list on a fresh process, not a fabricated one."""
+    history_states list on a fresh process, not a fabricated one.
+
+    SIGNAL-INTEGRITY RULE CHANGE (2026-10-15): PRSX's fixture is a SINGLE
+    independent category (dark_pool_anomaly only -- see
+    fixtures/scenario_persistence_progression.json's own description).
+    Before this rule change, the live third scan reached CONFIRMED purely
+    via the old `qualifying_days_count >= 2` bypass -- exactly the
+    single-real-gate-seen-on-two-calendar-dates loophole Chad's rule
+    change closes (see signal_engine.py's module docstring). PRSX now
+    correctly STAYS BUILDING on the live scan: multi_signal_confirmation
+    never passes (only 1 of INDEPENDENT_SIGNAL_GATES fires), so there is
+    no genuine 2-category corroboration to promote it to CONFIRMED.
+    """
     client = TestClient(app_main.app)
     resp = client.get("/api/radar")
     data = resp.json()
@@ -53,7 +65,7 @@ def test_prsx_shows_real_multi_entry_history_after_seeding(app_main):
     # than once already -- assert the real, seeded trajectory PREFIX
     # rather than an exact length, so this stays robust to test order
     # without weakening what it actually proves (a real seeded multi-day
-    # NEW -> BUILDING -> CONFIRMED progression, never fabricated).
+    # NEW -> BUILDING -> (still BUILDING, no false CONFIRMED) progression).
     history = all_entries["PRSX"]["history_states"]
     assert len(history) >= 3
-    assert history[:3] == ["NEW", "BUILDING", "CONFIRMED"]
+    assert history[:3] == ["NEW", "BUILDING", "BUILDING"]
