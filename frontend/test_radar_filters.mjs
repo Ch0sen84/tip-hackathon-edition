@@ -7,6 +7,7 @@
 
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import { fileURLToPath } from "node:url";
 
 const BASE = process.argv[2] || "http://127.0.0.1:8899";
 
@@ -40,7 +41,7 @@ global.window = { addEventListener() {}, TIP_NAV_HANDLERS: null };
 global.ResizeObserver = class { observe() {} };
 global.fetch = fetch;
 
-const coreSrc = fs.readFileSync(new URL("./app.core.js", import.meta.url).pathname, "utf8");
+const coreSrc = fs.readFileSync(fileURLToPath(new URL("./app.core.js", import.meta.url)), "utf8");
 (0, eval)(coreSrc + `
 globalThis.__exports = {
   entryFamilyTags, filterRadarEntries, renderRadarFilterOptions,

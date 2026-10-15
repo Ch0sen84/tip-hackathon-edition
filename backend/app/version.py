@@ -28,12 +28,29 @@ _DEFAULT_VERSION_FILE_CANDIDATES = (
 
 
 def _candidate_paths() -> list[str]:
-    paths = []
+    """REAL BUG FIX (2026-10-15, Priority 5 -- test-isolation around
+    /srv/VERSION): TIP_VERSION_FILE is meant as an explicit OVERRIDE (used
+    by every test in test_update_check.py via monkeypatch.setenv), but this
+    used to always ALSO append the hardcoded /srv/VERSION and repo-root
+    VERSION candidates after it. When a test deliberately points
+    TIP_VERSION_FILE at a path that does NOT exist (e.g.
+    test_get_build_info_missing_file_returns_all_none /
+    test_update_check_route_unknown_version_when_nothing_baked_in), the
+    lookup fell through to the real ambient /srv/VERSION on whatever
+    machine the suite happens to run on -- a file this app's own Dockerfile
+    creates at image-build time and that can genuinely exist on a dev/CI
+    box from an unrelated local build, leaking that machine's real state
+    into a test that explicitly asked for "no version file present". An
+    explicit override must be authoritative: when TIP_VERSION_FILE is set,
+    ONLY that exact path is ever considered (missing means missing, never
+    a silent fallback to ambient filesystem state). The hardcoded defaults
+    are only consulted when the env var is unset entirely -- the real
+    production/Docker case this was designed for.
+    """
     env_path = os.environ.get(_VERSION_FILE_ENV)
     if env_path:
-        paths.append(env_path)
-    paths.extend(_DEFAULT_VERSION_FILE_CANDIDATES)
-    return paths
+        return [env_path]
+    return list(_DEFAULT_VERSION_FILE_CANDIDATES)
 
 
 def _read_version_file() -> dict:

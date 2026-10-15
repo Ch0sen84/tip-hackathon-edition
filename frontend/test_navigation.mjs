@@ -17,6 +17,7 @@
 
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import { fileURLToPath } from "node:url";
 
 const BASE = process.argv[2] || "http://127.0.0.1:8899";
 
@@ -125,8 +126,8 @@ async function main() {
   global.location.search = `?api=${BASE}`;
   const app = loadReal(
     [
-      new URL("./app.core.js", import.meta.url).pathname,
-      new URL("./app.live.js", import.meta.url).pathname,
+      fileURLToPath(new URL("./app.core.js", import.meta.url)),
+      fileURLToPath(new URL("./app.live.js", import.meta.url)),
     ],
     [
       "navigateToView", "navigateToTicker", "TIP_STATE", "parseNavHash",

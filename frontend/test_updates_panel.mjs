@@ -8,6 +8,7 @@
 
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import { fileURLToPath } from "node:url";
 
 function loadReal(paths, names) {
   const src = paths.map((p) => fs.readFileSync(p, "utf8")).join("\n;\n");
@@ -23,7 +24,7 @@ function check(name, fn) {
 }
 
 const lib = loadReal(
-  [new URL("./app.core.js", import.meta.url).pathname],
+  [fileURLToPath(new URL("./app.core.js", import.meta.url))],
   ["renderUpdatesSection", "renderUpdateCheckResult", "buildAgentUpdatePrompt",
    "renderWatchlistEditor", "fmtMoney", "fmtNum", "esc"],
 );

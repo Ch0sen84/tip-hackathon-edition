@@ -80,14 +80,20 @@
       }
     }
   },
-  "headline": "Dark pool ~3.8x recent average (short history) \u00b7 Options flow anomaly",
-  "current_read": "Dark-pool activity well above normal; stock rose 2.1%.",
+  "headline": "Dark pool ~3.8x recent average (short history) \u00b7 Synthetic baseline estimate: 98% (static premium-size model, not real historical data) \u00b7 Options flow anomaly",
+  "current_read": "Dark-pool activity well above normal and a synthetic baseline estimate flagged elevated premium (not a real historical comparison); stock rose 2.1%.",
   "evidence": [
     {
       "family": "dark_pool",
       "text": "Dark pool ~3.8x its recent average; short history",
       "key": true,
       "short": "Dark pool ~3.8x recent average (short history)"
+    },
+    {
+      "family": "synthetic_baseline",
+      "text": "Synthetic baseline estimate: 98% (static premium-size model, not real historical data) -- this is a static estimator built into this demo build, not a real trailing-history comparison.",
+      "key": true,
+      "short": "Synthetic baseline estimate: 98% (static premium-size model, not real historical data)"
     },
     {
       "family": "lifecycle",
@@ -112,13 +118,13 @@
       "scan_date": "2026-10-15",
       "any_gate_passed": true,
       "state": "NEW",
-      "created_at": "2026-10-15 05:04:31"
+      "created_at": "2026-10-15 13:25:28"
     },
     {
       "scan_date": "2026-10-15",
       "any_gate_passed": true,
       "state": "CONFIRMED",
-      "created_at": "2026-10-15 05:04:31"
+      "created_at": "2026-10-15 13:25:28"
     }
   ],
   "raw": {

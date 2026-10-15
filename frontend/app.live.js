@@ -218,9 +218,25 @@ async function loadTickerDetail(ticker) {
 // loadSettings) with whether THIS investigation will be/was simulated
 // (avail.simulated / d.simulated) -- both real, fetched flags, nothing
 // invented.
-function modeLabelFor(simulated) {
+function modeLabelFor(simulated, transport) {
   const modePart = _currentMode === "live" ? "LIVE mode" : "DEMO mode";
-  const aiPart = simulated ? "simulated AI transcript" : "live AI + MCP calls";
+  // REAL BUG FIX (2026-10-15, Priority 3): this used to hardcode "live AI +
+  // MCP calls" for every non-simulated investigation, regardless of which
+  // transport actually ran (INVESTIGATE_TRANSPORT defaults to "rest" --
+  // plain REST calls over the same allowlisted endpoints, NOT genuine MCP
+  // protocol -- see app.ai.mcp_tool_client/allowlist.py). The backend
+  // already discloses the real transport it used (result.transport); use
+  // the SAME transportLabel() helper the Investigate result panel already
+  // uses, so this summary line can never claim MCP ran when REST did.
+  // transport is unknown before a real investigation has actually run
+  // (e.g. the pre-run availability check) -- say so plainly rather than
+  // calling transportLabel(undefined), which would print a confusing
+  // "Unknown (older response or unset)" before anything has even started.
+  const aiPart = simulated
+    ? "simulated AI transcript"
+    : transport
+      ? `live AI + ${transportLabel(transport).toLowerCase()}`
+      : "live AI + UW tool calls (transport confirmed once the investigation runs)";
   return `${modePart} \u2014 ${aiPart}`;
 }
 
@@ -238,7 +254,7 @@ async function runInvestigate(ticker, navSeq, modeLabel) {
     const d = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(d.detail || `HTTP ${res.status}`);
     if (mySeq !== _navSeq) return; // user moved on before this resolved -- never render a stale ticker's result
-    body.innerHTML = renderInvestigateResult(d, ticker, modeLabel || modeLabelFor(d.simulated));
+    body.innerHTML = renderInvestigateResult(d, ticker, modeLabel || modeLabelFor(d.simulated, d.transport));
   } catch (err) {
     if (mySeq !== _navSeq) return;
     body.innerHTML = `<div class="empty">Investigation failed: ${esc(err.message)}</div>`;

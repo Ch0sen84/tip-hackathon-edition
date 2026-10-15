@@ -10,6 +10,7 @@
 
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import { fileURLToPath } from "node:url";
 
 const BASE = process.argv[2] || "http://127.0.0.1:8899";
 
@@ -83,7 +84,7 @@ function check(name, fn) {
 }
 
 function loadCoreOnly() {
-  const coreSrc = fs.readFileSync(new URL("./app.core.js", import.meta.url).pathname, "utf8");
+  const coreSrc = fs.readFileSync(fileURLToPath(new URL("./app.core.js", import.meta.url)), "utf8");
   (0, eval)(coreSrc + `
 globalThis.__exports = {
   renderDiscoveryFilterForm, readDiscoveryFilterForm, renderDiscoveryCandidateRow,
@@ -93,8 +94,8 @@ globalThis.__exports = {
 }
 
 function loadCoreAndLive() {
-  const coreSrc = fs.readFileSync(new URL("./app.core.js", import.meta.url).pathname, "utf8");
-  const liveSrcRaw = fs.readFileSync(new URL("./app.live.js", import.meta.url).pathname, "utf8");
+  const coreSrc = fs.readFileSync(fileURLToPath(new URL("./app.core.js", import.meta.url)), "utf8");
+  const liveSrcRaw = fs.readFileSync(fileURLToPath(new URL("./app.live.js", import.meta.url)), "utf8");
   // Strip the real module-level side effects this harness doesn't need
   // (nav-item wiring, the unified ticker combo bootstrap IIFE) -- same
   // technique test_navigation.mjs already uses for this exact file.

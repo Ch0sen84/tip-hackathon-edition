@@ -476,7 +476,17 @@ function fmtPct(x) {
 // together.
 function fmtPriceLine(px) {
   if (!px || (px.last == null && px.chg_pct == null)) {
-    return `<span class="px-unavailable">price data unavailable in this scenario</span>`;
+    // REAL BUG FIX (2026-10-15, Priority 2): this wording was hardcoded
+    // demo-flavored ("in this scenario") and shown identically in Live
+    // Mode, where there are no scenarios at all -- it used to ALWAYS
+    // render anyway because of a Live-Mode price-plumbing bug (now fixed
+    // in live_uw_adapter._normalize_stock_state). Kept honestly generic in
+    // Live Mode since real price data CAN still be genuinely unavailable
+    // there (adapter error, unentitled tier, etc.) -- never claim a
+    // scenario that doesn't exist in that mode.
+    const isLive = typeof _currentMode !== "undefined" && _currentMode === "live";
+    const msg = isLive ? "price data unavailable" : "price data unavailable in this scenario";
+    return `<span class="px-unavailable">${msg}</span>`;
   }
   const chg = px.chg_pct;
   const chgClass = chg > 0 ? "up" : chg < 0 ? "down" : "";
@@ -719,9 +729,16 @@ function renderRadarLists(data, filters, loadTickerDetailFn) {
   const totalShown = (featured ? 1 : 0) + filteredRest.length + filteredOther.length;
   const countsEl = document.getElementById("radarFilterCounts");
   if (countsEl) {
+    // REAL BUG FIX (2026-10-15, Priority 4): this literally said
+    // "scenario(s) scanned" even in LIVE mode, where there are no
+    // scenarios at all -- just real watchlist tickers. Mode-aware wording,
+    // guarded against ReferenceError in contexts (e.g. static-demo) where
+    // _currentMode is never declared.
+    const isLive = typeof _currentMode !== "undefined" && _currentMode === "live";
+    const scannedUnit = isLive ? "ticker(s) scanned" : "scenario(s) scanned (including non-qualifying controls)";
     countsEl.textContent = (familyFilter || stateFilter)
-      ? `Showing ${totalShown} of ${totalQualifying} qualifying signal(s) after filters \u2014 ${data.scanned} scenario(s) scanned in total (including non-qualifying controls)`
-      : `${totalQualifying} qualifying signal(s) shown \u2014 ${data.scanned} scenario(s) scanned in total (including non-qualifying controls)`;
+      ? `Showing ${totalShown} of ${totalQualifying} qualifying signal(s) after filters \u2014 ${data.scanned} ${scannedUnit}`
+      : `${totalQualifying} qualifying signal(s) shown \u2014 ${data.scanned} ${scannedUnit}`;
   }
   const radarEmptyEl = document.getElementById("radarEmpty");
   if (radarEmptyEl) {
@@ -2264,7 +2281,8 @@ function renderWatchlistEditor(d) {
   return `
     <div class="settings-card" id="watchlistEditorCard">
       <h3>My Watchlist</h3>
-      <p class="muted">Each ticker costs a real UW API call per Scan Now -- limit ${watchlist.max_size} symbols.
+      <p class="muted">Each ticker in this watchlist costs ~3 real UW API calls per Market Radar scan
+        (flow alerts, dark-pool trades, stock state) -- limit ${watchlist.max_size} symbols.
         This is watchlist-based scanning only; switch to the "Market Discovery" mode above for
         market-wide screener-based discovery instead.</p>
       <div class="watchlist-chips" id="watchlistChips">
@@ -2318,16 +2336,46 @@ Steps:
 1. cd into the existing checkout (do not re-clone over it).
 2. git fetch origin && git log HEAD..origin/main --oneline
    (show the user exactly what will change before doing anything).
-3. git pull origin main (fails safely on local edits -- do not
-   force-overwrite anything without the user's explicit OK).
+3. Try a normal update first: git pull origin main.
+   - If that succeeds cleanly (no conflicts, fast-forward or clean
+     merge), skip straight to step 4.
+   - If it FAILS with "refusing to merge unrelated histories",
+     "Updating ... is not possible" (diverged), or any non-fast-forward/
+     conflict error, this checkout's history has diverged from the
+     remote (this can happen after a repository history rewrite) --
+     do NOT force-push, force-merge, or discard anything yet. Instead:
+     a. git fetch origin --prune
+     b. git status --short  and  git log --oneline -5
+        (show the user whether they have ANY real local-only commits
+        or uncommitted edits worth keeping -- check this honestly,
+        do not assume there are none).
+     c. If there is genuinely nothing local-only to keep, STOP and show
+        the user this exact plan before running anything further:
+          "This checkout's git history has diverged from the remote
+           (likely a repository history rewrite). The safe fix is:
+             git fetch origin
+             git reset --hard origin/main
+           This discards any local-only commits/edits in THIS checkout
+           (the .env file and the 'tip-data' Docker volume are NOT
+           touched by this -- they live outside git). Proceed? (yes/no)"
+        Only run "git fetch origin && git reset --hard origin/main"
+        after the user explicitly confirms "yes" in this exact
+        conversation -- never run it automatically, never assume
+        consent from the update-check having been triggered.
+     d. If there IS real local-only work worth keeping, STOP and tell
+        the user to resolve/back it up manually (e.g. git branch
+        backup-before-reset) before any reset is considered -- do not
+        propose discarding it silently.
 4. docker compose up --build -d (rebuilds the image; the existing
-   "tip-data" named volume and .env are untouched by this).
+   "tip-data" named volume and .env are untouched by this -- true for
+   both the clean-pull and the confirmed-reset path above).
 5. curl -s http://localhost:8000/api/health again to confirm the
    updated container is healthy and settings/watchlist persisted
    (should look identical to before the update).
 
-Report back exactly what changed (the commit range from step 2) and the
-before/after health check output.`;
+Report back exactly what changed (the commit range from step 2, and
+whether a reset was needed and confirmed) and the before/after health
+check output.`;
 }
 
 function renderUpdatesSection(d) {

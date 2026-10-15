@@ -110,13 +110,13 @@
       "scan_date": "2026-10-15",
       "any_gate_passed": true,
       "state": "NEW",
-      "created_at": "2026-10-15 05:04:31"
+      "created_at": "2026-10-15 13:25:28"
     },
     {
       "scan_date": "2026-10-15",
       "any_gate_passed": true,
       "state": "BUILDING",
-      "created_at": "2026-10-15 05:04:31"
+      "created_at": "2026-10-15 13:25:28"
     }
   ],
   "raw": {

@@ -425,6 +425,32 @@ function navigateToTicker(ticker, loadTickerDetailFn, opts = {}) {
   return result;
 }
 
+// Market Radar mode toggle (C2b/C2c, 2026-10-15): switches which of the
+// two sibling panels is visible. "watchlist" is the default/unchanged
+// panel; "discovery" is lazily loaded (onDiscoverySelected callback)
+// only the first time it's selected, never pre-fetched on page load.
+let _radarMode = "watchlist";
+function wireRadarModeToggle(onDiscoverySelected) {
+  const toggle = document.getElementById("radarModeToggle");
+  if (!toggle) return;
+  let discoveryLoaded = false;
+  toggle.querySelectorAll("[data-radar-mode]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const mode = btn.dataset.radarMode;
+      _radarMode = mode;
+      toggle.querySelectorAll("[data-radar-mode]").forEach((b) => b.classList.toggle("active", b === btn));
+      const wl = document.getElementById("watchlistRadarSection");
+      const disc = document.getElementById("discoveryRadarSection");
+      if (wl) wl.style.display = mode === "watchlist" ? "" : "none";
+      if (disc) disc.style.display = mode === "discovery" ? "" : "none";
+      if (mode === "discovery" && !discoveryLoaded) {
+        discoveryLoaded = true;
+        if (typeof onDiscoverySelected === "function") onDiscoverySelected();
+      }
+    });
+  });
+}
+
 function switchView(view) {
   document.querySelectorAll(".nav-item").forEach((b) => b.classList.toggle("active", b.dataset.view === view));
   document.querySelectorAll(".view").forEach((v) => v.classList.toggle("active", v.id === `view-${view}`));
@@ -450,7 +476,17 @@ function fmtPct(x) {
 // together.
 function fmtPriceLine(px) {
   if (!px || (px.last == null && px.chg_pct == null)) {
-    return `<span class="px-unavailable">price data unavailable in this scenario</span>`;
+    // REAL BUG FIX (2026-10-15, Priority 2): this wording was hardcoded
+    // demo-flavored ("in this scenario") and shown identically in Live
+    // Mode, where there are no scenarios at all -- it used to ALWAYS
+    // render anyway because of a Live-Mode price-plumbing bug (now fixed
+    // in live_uw_adapter._normalize_stock_state). Kept honestly generic in
+    // Live Mode since real price data CAN still be genuinely unavailable
+    // there (adapter error, unentitled tier, etc.) -- never claim a
+    // scenario that doesn't exist in that mode.
+    const isLive = typeof _currentMode !== "undefined" && _currentMode === "live";
+    const msg = isLive ? "price data unavailable" : "price data unavailable in this scenario";
+    return `<span class="px-unavailable">${msg}</span>`;
   }
   const chg = px.chg_pct;
   const chgClass = chg > 0 ? "up" : chg < 0 ? "down" : "";
@@ -693,9 +729,16 @@ function renderRadarLists(data, filters, loadTickerDetailFn) {
   const totalShown = (featured ? 1 : 0) + filteredRest.length + filteredOther.length;
   const countsEl = document.getElementById("radarFilterCounts");
   if (countsEl) {
+    // REAL BUG FIX (2026-10-15, Priority 4): this literally said
+    // "scenario(s) scanned" even in LIVE mode, where there are no
+    // scenarios at all -- just real watchlist tickers. Mode-aware wording,
+    // guarded against ReferenceError in contexts (e.g. static-demo) where
+    // _currentMode is never declared.
+    const isLive = typeof _currentMode !== "undefined" && _currentMode === "live";
+    const scannedUnit = isLive ? "ticker(s) scanned" : "scenario(s) scanned (including non-qualifying controls)";
     countsEl.textContent = (familyFilter || stateFilter)
-      ? `Showing ${totalShown} of ${totalQualifying} qualifying signal(s) after filters \u2014 ${data.scanned} scenario(s) scanned in total (including non-qualifying controls)`
-      : `${totalQualifying} qualifying signal(s) shown \u2014 ${data.scanned} scenario(s) scanned in total (including non-qualifying controls)`;
+      ? `Showing ${totalShown} of ${totalQualifying} qualifying signal(s) after filters \u2014 ${data.scanned} ${scannedUnit}`
+      : `${totalQualifying} qualifying signal(s) shown \u2014 ${data.scanned} ${scannedUnit}`;
   }
   const radarEmptyEl = document.getElementById("radarEmpty");
   if (radarEmptyEl) {
@@ -736,6 +779,129 @@ function setupRadarFiltersAndRender(data, loadTickerDetailFn) {
   if (famSel) famSel.onchange = rerender;
   if (stateSel) stateSel.onchange = rerender;
   rerender();
+}
+
+// --- Market Discovery (C2b/C2c, 2026-10-15) --------------------------------
+//
+// Pure rendering helpers, same pattern as the rest of this file (no
+// fetch() here -- app.live.js owns the one POST /api/radar/discover call
+// and the per-candidate Evaluate flow). A 'candidate' here is always a
+// RAW screener row (discovery_state: "candidate") -- it must never be
+// confused with an evaluated/signal_engine state; see
+// renderDiscoveryCandidateRow()'s explicit state tag below.
+
+// LABEL FIX (2026-10-15, Chad's live-mode item #9): this control sends
+// UW's own `min_premium` query param straight through to
+// /api/screener/stocks -- Chad's real test showed a $5M `min_premium`
+// filter returning SPY with a net_premium of -$1.8M, proving UW's
+// min_premium is NOT the same thing as the signed `net_premium` figure
+// shown on each result row (it reads as a gross/absolute premium
+// threshold, not a net-premium floor). The label below now describes
+// what the control actually filters on; it does not change backend
+// behavior or add client-side post-filtering (that would need separate
+// approval -- see the task report for this as a possible follow-up).
+const DISCOVERY_FILTER_FIELDS = [
+  { key: "min_premium", label: "Min premium ($) \u2014 UW's own screener filter, not the same as a result row's net premium", placeholder: "e.g. 5000000" },
+  { key: "min_call_volume", label: "Min call volume", placeholder: "e.g. 5000" },
+  { key: "min_put_volume", label: "Min put volume", placeholder: "e.g. 1000" },
+  { key: "min_iv_rank", label: "Min IV rank", placeholder: "0-100" },
+  { key: "min_change", label: "Min change (%)", placeholder: "e.g. 1.0" },
+  { key: "max_change", label: "Max change (%)", placeholder: "e.g. 10.0" },
+];
+
+// Quota-cost disclosure MUST be visible before the scan ever runs (spec
+// requirement) -- rendered as part of the form itself, not appended only
+// after a result comes back.
+function renderDiscoveryFilterForm(limit = 20) {
+  const fields = DISCOVERY_FILTER_FIELDS.map((f) => `
+    <label>${esc(f.label)}
+      <input type="number" step="any" id="discoveryFilter_${esc(f.key)}" placeholder="${esc(f.placeholder)}" />
+    </label>`).join("");
+  return `
+    <form class="discovery-filter-form" id="discoveryFilterFormEl">
+      ${fields}
+      <label>Max candidates
+        <input type="number" id="discoveryFilter_limit" min="1" max="50" value="${esc(limit)}" />
+      </label>
+      <span class="discovery-quota-note" id="discoveryQuotaNote">This will use 1 screener request.</span>
+      <button class="btn" type="submit" id="discoveryScanBtn">Scan</button>
+    </form>`;
+}
+
+function readDiscoveryFilterForm() {
+  const body = {};
+  DISCOVERY_FILTER_FIELDS.forEach((f) => {
+    const el = document.getElementById(`discoveryFilter_${f.key}`);
+    const v = el ? el.value.trim() : "";
+    if (v !== "") body[f.key] = Number(v);
+  });
+  const limitEl = document.getElementById("discoveryFilter_limit");
+  const limitVal = limitEl ? Number(limitEl.value) : 20;
+  body.limit = Number.isFinite(limitVal) && limitVal > 0 ? Math.min(limitVal, 50) : 20;
+  return body;
+}
+
+// NOTE: a second, pre-existing `fmtMoney` is defined later in this file
+// (the evidence-panel $ formatter) and, since function declarations are
+// hoisted/overwritten by later same-name declarations in one script
+// scope, THAT later definition is what actually runs here -- it already
+// returns a string WITH a leading "$" (e.g. "$31.7M"), so the markup
+// below must not add a second one.
+
+// One candidate row: ticker + real screener metrics + snapshot-implied
+// "not yet evaluated" state + an Evaluate button. discoveryState is one
+// of "candidate" | "evaluating" | "evaluated" (set/transitioned entirely
+// by app.live.js's evaluateDiscoveryCandidate(), never auto-advanced here).
+function renderDiscoveryCandidateRow(c, discoveryState) {
+  const state = discoveryState || c.discovery_state || "candidate";
+  const stateLabel = state === "evaluated" ? "Evaluated" : state === "evaluating" ? "Evaluating..." : "Not yet evaluated";
+  const btnLabel = state === "evaluated" ? `Re-evaluate ${esc(c.ticker)}` : `Evaluate ${esc(c.ticker)} in TIP`;
+  // Chad's item #10: a real screener row can be an index/derivative
+  // instrument (observed: SPXW, is_index=true) -- the per-ticker
+  // evaluation pipeline "Evaluate in TIP" reuses has never been verified
+  // against one, so rather than silently offering an action that might
+  // error or produce meaningless gates, this is labeled and disabled.
+  const isIndex = !!c.is_index;
+  const evaluateSupported = c.evaluate_supported !== undefined ? !!c.evaluate_supported : !isIndex;
+  const indexTag = isIndex ? `<span class="tag" title="Index/derivative instrument, not a tradeable equity">INDEX</span>` : "";
+  const evalBtn = evaluateSupported
+    ? `<button class="btn-link btn-evaluate" data-evaluate-ticker="${esc(c.ticker)}">${btnLabel} &rarr;</button>`
+    : `<span class="muted" title="Index/derivative instruments are not supported by the per-ticker evaluation pipeline yet">Evaluate not supported (index/derivative)</span>`;
+  // Chad's item #8: UW's own per-row snapshot date (source_date) is a
+  // DIFFERENT thing from this app's own fetch timestamp (the list-level
+  // "Snapshot:" line in renderDiscoveryCandidateList below) -- shown here,
+  // separately labeled, so a stale source date can never look like "right now".
+  const sourceDateTag = c.source_date ? `<span class="muted discovery-source-date">data as of ${esc(c.source_date)}</span>` : "";
+  return `
+    <div class="discovery-candidate-row" data-ticker="${esc(c.ticker)}" data-discovery-state="${esc(state)}">
+      <span class="tk">${esc(c.ticker)}</span> ${indexTag}
+      <span class="discovery-metric"><span class="m-label">net premium</span>${fmtMoney(c.net_premium) ?? "n/a"}</span>
+      <span class="discovery-metric"><span class="m-label">repeated hits</span>${fmtNum(c.repeated_hits, 0)}</span>
+      <span class="discovery-metric"><span class="m-label">call/put vol</span>${fmtNum(c.call_volume, 0)}/${fmtNum(c.put_volume, 0)}</span>
+      <span class="discovery-metric"><span class="m-label">IV rank</span>${fmtNum(c.iv_rank, 2)}</span>
+      <span class="discovery-metric"><span class="m-label">change</span>${c.change_percent != null ? fmtPct(c.change_percent) : "n/a"}</span>
+      ${sourceDateTag}
+      <span class="discovery-state-tag state-${esc(state)}">${esc(stateLabel)}</span>
+      ${evalBtn}
+    </div>`;
+}
+
+function renderDiscoveryCandidateList(candidates, meta) {
+  if (!candidates || candidates.length === 0) {
+    return `<div class="empty">No candidates matched these filters.</div>`;
+  }
+  // "fetched at" (this app's own request time) vs each row's own
+  // "data as of" (UW's source date, rendered per-row above) are
+  // deliberately two distinct, separately-labeled values -- see Chad's
+  // item #8; this line is never implied to be the market-data date.
+  const snapshotTxt = meta && meta.snapshot_at ? `Fetched at: ${esc(meta.snapshot_at)}` : "";
+  const countTxt = meta ? `${esc(meta.count)} candidate(s) &middot; ranked by net premium magnitude` : "";
+  const quotaTxt = meta ? `&middot; used ${esc(meta.screener_requests_used)} screener request(s)` : "";
+  return `
+    <div class="muted" style="margin-bottom:8px">${countTxt} ${quotaTxt} ${snapshotTxt ? `&middot; ${snapshotTxt}` : ""}</div>
+    <div class="discovery-candidate-list">
+      ${candidates.map((c) => renderDiscoveryCandidateRow(c)).join("")}
+    </div>`;
 }
 
 // Featured Signal: large treatment for the single highest-confidence /
@@ -840,8 +1006,22 @@ function classifyGate(name, gate) {
       if (passed) return GATE_CATEGORY.SUPPORTING;
       if (m.reason === "not evaluated (no today_premium supplied)") return GATE_CATEGORY.DATA_LIMITATION;
       return GATE_CATEGORY.UNMET_CRITERIA;
-    case "options_flow_anomaly":
     case "persistence":
+      // PRESENTATION BUG FIX (2026-10-15, signal-labeling audit): this
+      // build's persistence/tier2 logic was never ported from production
+      // (scan_service.build_gate_inputs hardcodes tier2_hit=False,
+      // tier2_qualifying_prints=0, and no caller ever passes
+      // is_new_qualifying_day=True -- see signal_engine.py's own porting
+      // notes). That means `passed` on this gate is structurally ALWAYS
+      // False in this app, never a genuine "no repeated large prints were
+      // observed" market finding. Classifying that as UNMET_CRITERIA made
+      // a missing feature look identical to real negative evidence --
+      // exactly the confusion item 3 of the audit asked to fix. A real
+      // future `passed=true` (once tier2 is actually wired) still counts
+      // as SUPPORTING; only the never-capable-of-passing-today case is
+      // reclassified.
+      return passed ? GATE_CATEGORY.SUPPORTING : GATE_CATEGORY.DATA_LIMITATION;
+    case "options_flow_anomaly":
     case "multi_signal_confirmation":
       return passed ? GATE_CATEGORY.SUPPORTING : GATE_CATEGORY.UNMET_CRITERIA;
     case "catalyst_identified":
@@ -902,7 +1082,9 @@ function gateWhyItMatters(name, gate) {
       const pct = typeof m.tier2_max_pct === "number" ? `${(m.tier2_max_pct * 100).toFixed(0)}%` : "n/a";
       return gate.passed
         ? `${n} qualifying print(s) seen so far, the largest at ${pct} of that day's volume.`
-        : "No qualifying persistent print pattern (repeated large prints) was seen this scan.";
+        : "This build's repeated-large-print (persistence/tier2) detection was not ported from "
+          + "production, so this gate cannot pass here yet -- this is NOT a market observation that "
+          + "no persistence occurred, just an unimplemented input.";
     }
     case "multi_signal_confirmation": {
       const contrib = m.contributing_gates || [];
@@ -1104,12 +1286,31 @@ function wireChartRangeRow(containerId, onChange) {
 
 const EVIDENCE_PAGE_SIZE = 20;
 
+// REAL BUG FIX (2026-10-15, Chad's live-mode item #11): negative amounts
+// previously rendered as "$-78.7M" (minus sign stuck inside the dollar
+// sign) instead of standard "-$78.7M" (ASCII minus, since this file
+// already uses plain ASCII elsewhere for copy/paste-ability, e.g. in the
+// evidence table) -- the sign now applies to the whole formatted string,
+// never inside the "$".
 function fmtMoney(v) {
   if (v == null) return null;
+  const neg = v < 0;
   const abs = Math.abs(v);
-  if (abs >= 1e6) return `$${(v / 1e6).toFixed(1)}M`;
-  if (abs >= 1e3) return `$${(v / 1e3).toFixed(0)}K`;
-  return `$${Math.round(v)}`;
+  let body;
+  if (abs >= 1e6) body = `$${(abs / 1e6).toFixed(1)}M`;
+  else if (abs >= 1e3) body = `$${(abs / 1e3).toFixed(0)}K`;
+  else body = `$${Math.round(abs)}`;
+  return neg ? `-${body}` : body;
+}
+
+// REAL BUG FIX (2026-10-15, Chad's live-mode item #12): display-only
+// rounding for numbers that can arrive with excess float precision from
+// the live screener (e.g. IV rank 20.6659...). Never used on anything
+// that feeds signal_engine/scan_service math -- those keep full
+// precision; this is purely for what's printed on screen.
+function fmtNum(v, decimals = 2) {
+  if (v === null || v === undefined || Number.isNaN(Number(v))) return "n/a";
+  return Number(v).toFixed(decimals).replace(/\.0+$/, (m) => (decimals === 0 ? "" : m));
 }
 
 // Groups by REAL event date + category -- never fabricates a day with
@@ -1695,11 +1896,114 @@ function renderTickerDetail(d) {
     </div>
     <div id="investigateSection"></div>
     ${timelineHtml}
-    <details class="how" style="margin-top:14px">
-      <summary>Raw adapter data (what fed the gates above)</summary>
-      <p class="muted">Transition rule id: <code>${esc(d.transition_rule)}</code> &mdash; ${esc(ruleGloss)}</p>
-      <pre class="raw">${esc(JSON.stringify(d.raw, null, 2))}</pre>
-    </details>`;
+    ${renderRawDataSummary(d)}`;
+}
+
+// --- Readable evidence summary (2026-10-15, item #2) ------------------------
+//
+// Replaces this section's old PROMINENT behavior of dumping d.raw (the
+// exact flow_alerts/darkpool_trades arrays the gates above consumed) as
+// thousands of lines of unfiltered JSON. Computes real, concise numbers
+// straight from those same two arrays -- never a new data source, never
+// an invented value -- using the SAME evidence-summary-table / collapsed-
+// <details> markup pattern already built for the paginated evidence
+// panel above (renderEvidencePanel/wireEvidencePanel), so this is an
+// extension of that existing pattern, not a parallel UI. The full raw
+// JSON is kept, fully intact, just demoted into a clearly-labeled,
+// collapsed-by-default "Developer / Debug" disclosure at the very bottom.
+function _fa(a, key) { return Number(a[key] || 0); }
+
+function summarizeFlowAlerts(flowAlerts) {
+  const alerts = flowAlerts || [];
+  let callCount = 0, putCount = 0, callPrem = 0, putPrem = 0;
+  let askPrem = 0, bidPrem = 0, sweepCount = 0, multilegCount = 0, totalPrem = 0;
+  for (const a of alerts) {
+    const prem = _fa(a, "total_premium");
+    totalPrem += prem;
+    if (a.is_call) { callCount += 1; callPrem += prem; }
+    else if (a.is_put) { putCount += 1; putPrem += prem; }
+    askPrem += _fa(a, "total_ask_premium");
+    bidPrem += _fa(a, "total_bid_premium");
+    if (a.has_sweep) sweepCount += 1;
+    if (a.has_multileg) multilegCount += 1;
+  }
+  const notable = alerts
+    .slice()
+    .sort((a, b) => _fa(b, "total_premium") - _fa(a, "total_premium"))
+    .slice(0, 5);
+  return { count: alerts.length, callCount, putCount, callPrem, putPrem, askPrem, bidPrem,
+    sweepCount, multilegCount, totalPrem, notable };
+}
+
+function summarizeDarkpool(darkpoolTrades) {
+  const trades = darkpoolTrades || [];
+  let totalShares = 0, totalValue = 0;
+  for (const t of trades) {
+    totalShares += _fa(t, "size");
+    totalValue += _fa(t, "premium");
+  }
+  const notable = trades.slice().sort((a, b) => _fa(b, "premium") - _fa(a, "premium")).slice(0, 5);
+  return { count: trades.length, totalShares, totalValue, notable };
+}
+
+function renderRawDataSummary(d) {
+  const raw = d.raw || {};
+  const flowAlerts = raw.flow_alerts || [];
+  const darkpoolTrades = raw.darkpool_trades || [];
+  const of = summarizeFlowAlerts(flowAlerts);
+  const dp = summarizeDarkpool(darkpoolTrades);
+  const ruleGloss = TRANSITION_RULE_GLOSS[d.transition_rule] || "internal rule identifier";
+
+  const askShare = (of.askPrem + of.bidPrem) > 0 ? of.askPrem / (of.askPrem + of.bidPrem) : null;
+  const optionsRows = of.count === 0
+    ? `<tr><td colspan="2" class="muted">No options flow alerts returned this scan.</td></tr>`
+    : `
+      <tr><td>Call vs put alerts</td><td>${of.callCount} call (${fmtMoney(of.callPrem) ?? "$0"}) &middot; ${of.putCount} put (${fmtMoney(of.putPrem) ?? "$0"})</td></tr>
+      <tr><td>Total options premium</td><td>${fmtMoney(of.totalPrem) ?? "$0"}</td></tr>
+      <tr><td>Ask-side vs bid-side premium</td><td>${fmtMoney(of.askPrem) ?? "$0"} ask &middot; ${fmtMoney(of.bidPrem) ?? "$0"} bid${askShare != null ? ` (${(askShare * 100).toFixed(0)}% ask)` : ""}</td></tr>
+      <tr><td>Repeated hits / unusual flow</td><td>${of.sweepCount} sweep-flagged, ${of.multilegCount} multileg-flagged (of ${of.count} alert${of.count === 1 ? "" : "s"})</td></tr>`;
+
+  const dpRows = dp.count === 0
+    ? `<tr><td colspan="2" class="muted">No dark-pool trades returned this scan.</td></tr>`
+    : `
+      <tr><td>Dark-pool trade count</td><td>${dp.count}</td></tr>
+      <tr><td>Dark-pool shares</td><td>${dp.totalShares.toLocaleString()}</td></tr>
+      <tr><td>Dark-pool value</td><td>${fmtMoney(dp.totalValue) ?? "$0"}</td></tr>`;
+
+  const notableRows = [
+    ...of.notable.map((a) => `<tr><td>Option alert</td><td>${esc(a.is_call ? "call" : a.is_put ? "put" : "n/a")}</td><td>${fmtMoney(_fa(a, "total_premium")) ?? "n/a"}</td><td>${esc(a.created_at || "n/a")}</td></tr>`),
+    ...dp.notable.map((t) => `<tr><td>Dark-pool print</td><td>n/a</td><td>${fmtMoney(_fa(t, "premium")) ?? "n/a"}</td><td>${esc(t.executed_at || "n/a")}</td></tr>`),
+  ].join("") || `<tr><td colspan="4" class="muted">No individual records this scan.</td></tr>`;
+
+  const coverageNote = `This reflects a single most-recent snapshot from each UW endpoint this scan `
+    + `(${of.count} flow alert${of.count === 1 ? "" : "s"}, ${dp.count} dark-pool trade${dp.count === 1 ? "" : "s"}) `
+    + `-- not a multi-day historical pull. See "Signal Lifecycle" above for what real history this ticker has.`;
+
+  return `
+    <div class="card evidence-raw-summary-card">
+      <div class="card-head"><strong>Evidence Detail &mdash; options flow &amp; dark pool</strong>
+        <span class="muted">computed directly from this scan's adapter data, not invented</span></div>
+      <table class="evidence-summary-table">
+        <tbody>
+          ${optionsRows}
+          ${dpRows}
+        </tbody>
+      </table>
+      <div class="muted" style="margin-top:8px">Evidence for vs against the current signal state: ${renderGateGroupsSummary(d.gates)}</div>
+      <div class="muted" style="margin-top:6px;font-size:11px">${esc(coverageNote)}</div>
+      <details class="evidence-detail-panel" style="margin-top:8px">
+        <summary class="muted">Notable contracts / prints (top ${of.notable.length + dp.notable.length} by premium)</summary>
+        <table class="evidence-summary-table">
+          <thead><tr><th>Type</th><th>Side</th><th>Premium</th><th>Time</th></tr></thead>
+          <tbody>${notableRows}</tbody>
+        </table>
+      </details>
+      <details class="how" style="margin-top:14px">
+        <summary>Developer / Debug &mdash; raw adapter JSON (what fed the gates above)</summary>
+        <p class="muted">Transition rule id: <code>${esc(d.transition_rule)}</code> &mdash; ${esc(ruleGloss)}</p>
+        <pre class="raw">${esc(JSON.stringify(d.raw, null, 2))}</pre>
+      </details>
+    </div>`;
 }
 
 // --- Investigate with AI (bounded, optional) ---------------------------------
@@ -1874,33 +2178,6 @@ function renderSettingsView(d) {
       ${!publicDemo && !uw.verified ? `<p class="muted">Activate Live Mode is disabled until Test Connection succeeds for the current key.</p>` : ""}
     </div>`;
 
-  // Market Radar watchlist editor (2026-10-14, Phase A): not shown in
-  // the public demo build (its 11 synthetic scenarios are fixed, not a
-  // user-editable watchlist concept at all). Chips + an add input,
-  // matching the mode/key sections' settings-card style. Each
-  // add/remove PUTs the FULL updated list (see initWatchlistEditor() in
-  // app.live.js) -- simpler and atomic, no partial-update races.
-  const watchlist = d.watchlist || { tickers: [], max_size: 20 };
-  const watchlistSection = publicDemo ? "" : `
-    <div class="settings-card">
-      <h3>Market Radar Watchlist</h3>
-      <p class="muted">Each ticker costs a real UW API call per Scan Now -- limit ${watchlist.max_size} symbols.
-        This is watchlist-based scanning only, not broader-market discovery
-        (Unusual Whales does offer a market-wide screener; it is not wired up here yet).</p>
-      <div class="watchlist-chips" id="watchlistChips">
-        ${watchlist.tickers.map((t) => `
-          <span class="watchlist-chip" data-ticker="${esc(t)}">
-            ${esc(t)}<button class="watchlist-chip-remove" data-remove-ticker="${esc(t)}" title="Remove ${esc(t)}">&times;</button>
-          </span>`).join("")}
-        ${watchlist.tickers.length === 0 ? '<span class="muted">No tickers configured -- Market Radar has nothing to scan.</span>' : ""}
-      </div>
-      <div class="settings-row" style="margin-top:8px">
-        <input type="text" id="watchlistAddInput" placeholder="Add ticker (e.g. AMD)" autocomplete="off" maxlength="7" />
-        <button class="btn" id="watchlistAddBtn" ${watchlist.tickers.length >= watchlist.max_size ? "disabled" : ""}>Add</button>
-      </div>
-      <div id="watchlistStatus" class="muted" style="margin-top:6px"></div>
-    </div>`;
-
   const uwStatusLine = uw.configured
     ? `configured (source: ${esc(uw.source)}, ending •••${esc(uw.last4 || "")})${uw.verified ? " · verified (passed Test Connection)" : " · not yet verified"}${uw.last_test_result ? ` · last test: ${esc(uw.last_test_result)}` : ""}`
     : "not configured";
@@ -1980,8 +2257,166 @@ function renderSettingsView(d) {
         <div id="mcpTestStatus" class="muted" style="margin-top:6px"></div>
       </div>`;
 
-  root.innerHTML = `${banner}${modeSection}${watchlistSection}${uwSection}${aiSection}`;
+  root.innerHTML = `${banner}${modeSection}${uwSection}${aiSection}${renderUpdatesSection(d)}`;
   return { publicDemo };
+}
+
+// --- Market Radar watchlist editor (moved to Radar 2026-10-15) --------------
+//
+// MOVED (not rebuilt) from the Settings page into Market Radar's "My
+// Watchlist" mode, per Chad's live-mode feedback: this is the exact same
+// markup/behavior that used to live in renderSettingsView() above --
+// same /api/settings/watchlist GET/PUT endpoints, same 20-symbol limit
+// (watchlist.max_size, server-enforced), same initWatchlistEditor() wiring
+// in app.live.js, same chip ids (#watchlistChips/#watchlistAddInput/
+// #watchlistAddBtn/#watchlistStatus). Settings no longer renders a second
+// copy of this editor -- there is exactly one watchlist editor in the
+// app, and it lives where the watchlist is actually used (Market Radar).
+// Not shown in the public demo build (its 11 synthetic scenarios are
+// fixed, not a user-editable watchlist concept at all).
+function renderWatchlistEditor(d) {
+  const publicDemo = !!d.public_demo;
+  if (publicDemo) return "";
+  const watchlist = d.watchlist || { tickers: [], max_size: 20 };
+  return `
+    <div class="settings-card" id="watchlistEditorCard">
+      <h3>My Watchlist</h3>
+      <p class="muted">Each ticker in this watchlist costs ~3 real UW API calls per Market Radar scan
+        (flow alerts, dark-pool trades, stock state) -- limit ${watchlist.max_size} symbols.
+        This is watchlist-based scanning only; switch to the "Market Discovery" mode above for
+        market-wide screener-based discovery instead.</p>
+      <div class="watchlist-chips" id="watchlistChips">
+        ${watchlist.tickers.map((t) => `
+          <span class="watchlist-chip" data-ticker="${esc(t)}">
+            ${esc(t)}<button class="watchlist-chip-remove" data-remove-ticker="${esc(t)}" title="Remove ${esc(t)}">&times;</button>
+          </span>`).join("")}
+        ${watchlist.tickers.length === 0 ? '<span class="muted">No tickers configured -- Market Radar has nothing to scan.</span>' : ""}
+      </div>
+      <div class="settings-row" style="margin-top:8px">
+        <input type="text" id="watchlistAddInput" placeholder="Add ticker (e.g. AMD)" autocomplete="off" maxlength="7" />
+        <button class="btn" id="watchlistAddBtn" ${watchlist.tickers.length >= watchlist.max_size ? "disabled" : ""}>Add</button>
+      </div>
+      <div id="watchlistStatus" class="muted" style="margin-top:6px"></div>
+    </div>`;
+}
+
+// --- Application Updates (Settings) -----------------------------------------
+//
+// Check-and-inform ONLY: no automatic git pull / docker rebuild / restart
+// is ever triggered from here (see README.md "Checking for updates" and
+// backend/app/update_check.py's module docstring). `build` is the
+// GET /api/settings/version payload (always fetched -- no network call,
+// just reads a baked-in file). `checkResult` is the GET
+// /api/settings/update-check payload, only present after the user has
+// explicitly clicked "Check for Updates" (never auto-fetched, so this app
+// never makes an unprompted outbound call to GitHub).
+const UPDATE_STATUS_LABELS = {
+  up_to_date: { label: "Up to date", cls: "state-STABLE" },
+  update_available: { label: "Update available", cls: "state-BUILDING" },
+  unable_to_check: { label: "Unable to check", cls: "state-FADING" },
+  unknown_version: { label: "Unknown installed version", cls: "" },
+};
+
+function buildAgentUpdatePrompt(build) {
+  const repoUrl = (build && build.repo_url) || "https://github.com/Ch0sen84/tip-hackathon-edition";
+  return `You are updating an existing local installation of TIP Hackathon Edition
+(${repoUrl}) to the latest commit on \`main\`. This is a MANUAL,
+agent-assisted update -- never trigger any part of this automatically
+from the running web app itself.
+
+Ground rules:
+- Preserve .env exactly as-is; do not overwrite or regenerate it.
+- Preserve the "tip-data" Docker volume (SQLite settings/watchlist DB) --
+  never run "docker compose down -v" as part of an update.
+- Never print, log, or transmit any saved UW/AI API key.
+- Confirm the current container is healthy BEFORE making changes:
+  curl -s http://localhost:8000/api/health
+
+Steps:
+1. cd into the existing checkout (do not re-clone over it).
+2. git fetch origin && git log HEAD..origin/main --oneline
+   (show the user exactly what will change before doing anything).
+3. Try a normal update first: git pull origin main.
+   - If that succeeds cleanly (no conflicts, fast-forward or clean
+     merge), skip straight to step 4.
+   - If it FAILS with "refusing to merge unrelated histories",
+     "Updating ... is not possible" (diverged), or any non-fast-forward/
+     conflict error, this checkout's history has diverged from the
+     remote (this can happen after a repository history rewrite) --
+     do NOT force-push, force-merge, or discard anything yet. Instead:
+     a. git fetch origin --prune
+     b. git status --short  and  git log --oneline -5
+        (show the user whether they have ANY real local-only commits
+        or uncommitted edits worth keeping -- check this honestly,
+        do not assume there are none).
+     c. If there is genuinely nothing local-only to keep, STOP and show
+        the user this exact plan before running anything further:
+          "This checkout's git history has diverged from the remote
+           (likely a repository history rewrite). The safe fix is:
+             git fetch origin
+             git reset --hard origin/main
+           This discards any local-only commits/edits in THIS checkout
+           (the .env file and the 'tip-data' Docker volume are NOT
+           touched by this -- they live outside git). Proceed? (yes/no)"
+        Only run "git fetch origin && git reset --hard origin/main"
+        after the user explicitly confirms "yes" in this exact
+        conversation -- never run it automatically, never assume
+        consent from the update-check having been triggered.
+     d. If there IS real local-only work worth keeping, STOP and tell
+        the user to resolve/back it up manually (e.g. git branch
+        backup-before-reset) before any reset is considered -- do not
+        propose discarding it silently.
+4. docker compose up --build -d (rebuilds the image; the existing
+   "tip-data" named volume and .env are untouched by this -- true for
+   both the clean-pull and the confirmed-reset path above).
+5. curl -s http://localhost:8000/api/health again to confirm the
+   updated container is healthy and settings/watchlist persisted
+   (should look identical to before the update).
+
+Report back exactly what changed (the commit range from step 2, and
+whether a reset was needed and confirmed) and the before/after health
+check output.`;
+}
+
+function renderUpdatesSection(d) {
+  const build = d.build || {};
+  const hasVersion = !!(build.commit || build.version);
+  const installedLabel = build.version || build.commit || "unknown";
+  const repoUrl = build.repo_url || "https://github.com/Ch0sen84/tip-hackathon-edition";
+  return `
+    <div class="settings-card" id="updatesCard">
+      <h3>Application Updates</h3>
+      <p class="muted">Installed: ${hasVersion ? `<code>${esc(installedLabel)}</code>${build.commit ? ` (commit <code>${esc(build.commit)}</code>)` : ""}${build.built_at ? `, built ${esc(build.built_at)}` : ""}` : `<em>unknown</em> -- this image was not built with BUILD_COMMIT baked in (see README "Checking for updates")`}</p>
+      <div class="settings-row">
+        <button class="btn" id="checkUpdatesBtn">Check for Updates</button>
+        <a class="btn-link" href="${esc(repoUrl)}" target="_blank" rel="noopener">View repository</a>
+      </div>
+      <div id="updateCheckResult" class="muted" style="margin-top:8px"></div>
+      <p class="muted" style="margin-top:10px">This only CHECKS and reports -- it never runs git/Docker commands or
+        restarts anything by itself. Updating is a manual or AI-agent-assisted step you run yourself.</p>
+      <div class="settings-row" style="margin-top:6px">
+        <button class="btn" id="copyUpdatePromptBtn">Copy AI-agent update prompt</button>
+      </div>
+      <div id="copyUpdatePromptStatus" class="muted" style="margin-top:4px"></div>
+    </div>`;
+}
+
+function renderUpdateCheckResult(result) {
+  if (!result) return "";
+  const meta = UPDATE_STATUS_LABELS[result.status] || { label: result.status, cls: "" };
+  const commitLine = result.latest_commit
+    ? `Latest on main: <a href="${esc(result.latest_commit_url || "#")}" target="_blank" rel="noopener"><code>${esc(result.latest_commit)}</code></a>`
+    : "";
+  const compareLine = result.compare_url
+    ? `<a href="${esc(result.compare_url)}" target="_blank" rel="noopener">View on GitHub</a>`
+    : "";
+  return `
+    <div>
+      <span class="tag ${meta.cls}">${esc(meta.label)}</span>
+      <span>${esc(result.message || "")}</span>
+    </div>
+    ${commitLine ? `<div style="margin-top:4px">${commitLine}</div>` : ""}
+    ${compareLine ? `<div style="margin-top:4px">${compareLine}</div>` : ""}`;
 }
 
 // Wires click-anywhere "Investigate" affordances (cards/rows on Market

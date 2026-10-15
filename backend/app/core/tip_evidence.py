@@ -72,7 +72,8 @@ INDEX_CONTEXT_TICKERS = ("SPY", "QQQ")  # eligible under the same rules; labelle
 FLOOR_TRADE_RULES = ("FloorTradeSmallCap", "FloorTradeMidCap", "FloorTradeLargeCap")  # frozen UW family
 STATE_RANK = {"CONFIRMED": 3, "STRENGTHENING": 3, "BUILDING": 2, "NEW": 1}
 ANOMALY_GATES = ("dark_pool_anomaly", "historical_percentile", "options_flow_anomaly")
-FAMILY_LABELS = {"dark_pool": "Dark pool", "options": "Options", "alerts": "UW alerts", "floor": "FloorTrade"}
+FAMILY_LABELS = {"dark_pool": "Dark pool", "options": "Options", "alerts": "UW alerts", "floor": "FloorTrade",
+                 "synthetic_baseline": "Synthetic baseline estimate"}
 
 
 # ------------------------------------------------------------- formatting --
@@ -310,11 +311,29 @@ def alert_bits(a, session_live):
 
 # ---------------------------------------------------------------- families --
 def families(item):
-    """Independent evidence families firing for this ticker (ordering/tiering only)."""
+    """Independent evidence families firing for this ticker (ordering/tiering only).
+
+    PRESENTATION BUG FIX (2026-10-15, Priority 1 -- Chad's Live-Mode
+    diagnostic): `historical_percentile` used to be folded into the same
+    "dark_pool" family as the REAL `dark_pool_anomaly` gate. But
+    `historical_percentile`'s default implementation is
+    `signal_engine.synthetic_percentile_gate` -- a SYNTHETIC/STATIC premium-
+    size bucket estimator, NOT real historical dark-pool data (see that
+    function's own docstring). Folding it into "dark_pool" meant a ticker
+    whose real dark_pool_anomaly gate FAILED (bootstrap/insufficient
+    baseline -- confirmed structurally always true in this build's Live
+    Mode, since real UW darkpool trades carry no baseline field) could
+    still show "Dark-pool activity above normal" purely because the
+    synthetic placeholder gate passed on premium size alone. Kept as its
+    own family below so it is labeled honestly and never rendered as real
+    dark-pool evidence.
+    """
     f = []
     gp = set(item.get("gates_passed") or [])
-    if gp & {"dark_pool_anomaly", "historical_percentile"}:
+    if "dark_pool_anomaly" in gp:
         f.append("dark_pool")
+    if "historical_percentile" in gp:
+        f.append("synthetic_baseline")
     if hot_side(item.get("options")) or "options_flow_anomaly" in gp:
         f.append("options")
     if alert_surge(item.get("alerts")):
@@ -332,8 +351,10 @@ def families(item):
 #   options   -> aggregate per-ticker options volume/premium (UW options-volume snapshot or
 #                TIP's options_flow_anomaly gate) -- a separate dataset from UW flow alerts
 #   alerts, floor -> both are UW flow-alert records, so together they are ONE category
-CATEGORY_OF = {"dark_pool": "dark_pool", "options": "options", "alerts": "uw_flow", "floor": "uw_flow"}
-CATEGORY_LABELS = {"dark_pool": "dark-pool activity", "options": "broader options activity", "uw_flow": "UW-flow context"}
+CATEGORY_OF = {"dark_pool": "dark_pool", "options": "options", "alerts": "uw_flow", "floor": "uw_flow",
+               "synthetic_baseline": "synthetic_baseline"}
+CATEGORY_LABELS = {"dark_pool": "dark-pool activity", "options": "broader options activity", "uw_flow": "UW-flow context",
+                    "synthetic_baseline": "synthetic baseline estimate (not real historical data)"}
 
 
 def categories(item):
@@ -400,6 +421,11 @@ def _short(family, item):
     if family == "floor":
         n = (item.get("alerts") or {}).get("floor_n") or 0
         return f"FloorTrade-family activity ({_plural(n, 'alert')})"
+    if family == "synthetic_baseline":
+        m = (item.get("gates_metrics") or {}).get("historical_percentile") or {}
+        pct = m.get("percentile")
+        pct_txt = f"{pct:.0%}" if isinstance(pct, (int, float)) else "elevated"
+        return f"Synthetic baseline estimate: {pct_txt} (static premium-size model, not real historical data)"
     return None
 
 
@@ -420,21 +446,35 @@ def dominant_label(item):
         return "MULTI-SOURCE"
     if len(fam) >= 2:  # UW alerts + FloorTrade: one category
         return "UW FLOW"
-    return {"dark_pool": "DARK POOL", "options": "OPTIONS", "alerts": "UW ALERTS", "floor": "FLOORTRADE"}.get(
-        fam[0] if fam else "", "OTHER")
+    return {"dark_pool": "DARK POOL", "options": "OPTIONS", "alerts": "UW ALERTS", "floor": "FLOORTRADE",
+            "synthetic_baseline": "SYNTHETIC BASELINE"}.get(fam[0] if fam else "", "OTHER")
 
 
 def evidence(item, session_live=False):
     """List of {"family", "text", "short", "key"} reasons -- the 'why TIP surfaced this'.
     key=True marks the bullets that are the reason the name qualified (plus price);
-    the rest is supporting context (shown on expansion)."""
+    the rest is supporting context (shown on expansion).
+
+    PRESENTATION BUG FIX (2026-10-15): the "Dark pool ..." bullet used to
+    fire off EITHER the real dark_pool_anomaly gate OR the SYNTHETIC
+    historical_percentile placeholder gate, rendering the synthetic gate's
+    pass as if it were real dark-pool evidence (see families() docstring
+    for the full writeup). Split into two honestly-labeled bullets below --
+    a real "Dark pool ..." bullet only when dark_pool_anomaly itself passed,
+    and a separate, explicitly-disclosed "Synthetic baseline estimate ..."
+    bullet when historical_percentile passed, never conflated.
+    """
     out = []
     dp = item.get("dp") or {}
     gp = set(item.get("gates_passed") or [])
-    if gp & {"dark_pool_anomaly", "historical_percentile"}:
+    if "dark_pool_anomaly" in gp:
         b = dp_bits(dp.get("ratio"), dp.get("hist"), dp.get("prints"))
         if b:
             out.append({"family": "dark_pool", "text": "Dark pool " + "; ".join(b)})
+    if "historical_percentile" in gp:
+        out.append({"family": "synthetic_baseline",
+                    "text": _short("synthetic_baseline", item) + " -- this is a static estimator built "
+                    "into this demo build, not a real trailing-history comparison."})
     o = item.get("options")
     if item.get("options_status") == "UNAVAILABLE":
         out.append({"family": "options_unavailable",
@@ -472,11 +512,25 @@ def evidence(item, session_live=False):
 
 def current_read(item):
     """Short deterministic interpretation. Describes agreement/disagreement and
-    price response; never asserts direction the data does not support."""
+    price response; never asserts direction the data does not support.
+
+    PRESENTATION BUG FIX (2026-10-15, Priority 1): this used to assert
+    "dark-pool activity well above normal" unconditionally whenever the
+    dark_pool family fired -- including (before the families() fix above)
+    when that family only ever fired off the SYNTHETIC historical_percentile
+    placeholder, with no real dark-pool ratio/history behind it at all. Now
+    the "dark_pool" family can only fire from the real dark_pool_anomaly
+    gate (which itself can only pass with a real, non-bootstrapped ratio --
+    see signal_engine.evaluate_gates), so this phrase is only ever written
+    when backed by a real ratio. The synthetic placeholder gets its own,
+    explicitly-labeled lead phrase instead of being folded into this one.
+    """
     fam = families(item)
     lead = []
     if "dark_pool" in fam:
         lead.append("dark-pool activity well above normal")
+    if "synthetic_baseline" in fam:
+        lead.append("a synthetic baseline estimate flagged elevated premium (not a real historical comparison)")
     if "alerts" in fam:
         lead.append("UW flow alerts running well above this name's usual pace")
     if "floor" in fam:

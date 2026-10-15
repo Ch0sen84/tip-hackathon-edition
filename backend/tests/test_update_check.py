@@ -133,6 +133,26 @@ def test_get_build_info_missing_file_returns_all_none(tmp_path, monkeypatch):
     assert info == {"commit": None, "version": None, "built_at": None}
 
 
+def test_explicit_version_file_override_never_falls_back_to_ambient_srv_version(tmp_path, monkeypatch):
+    """REAL BUG FIX (2026-10-15, Priority 5): an explicit TIP_VERSION_FILE
+    pointing at a nonexistent path used to silently fall through to the
+    hardcoded /srv/VERSION / repo-root VERSION candidates -- genuine
+    test-isolation leak if either happens to exist on the machine running
+    the suite (e.g. left over from a real Docker build on the same box).
+    An explicit override must mean exactly that path, missing or not."""
+    missing = tmp_path / "nonexistent_version_file"
+    monkeypatch.setenv("TIP_VERSION_FILE", str(missing))
+    paths = version._candidate_paths()
+    assert paths == [str(missing)]
+    for real_candidate in version._DEFAULT_VERSION_FILE_CANDIDATES:
+        assert real_candidate not in paths
+
+
+def test_no_version_file_env_uses_hardcoded_defaults_only(monkeypatch):
+    monkeypatch.delenv("TIP_VERSION_FILE", raising=False)
+    assert version._candidate_paths() == list(version._DEFAULT_VERSION_FILE_CANDIDATES)
+
+
 # --- /api/settings/version and /api/settings/update-check routes ----------
 
 def test_version_route_no_network_call(app_main, tmp_path, monkeypatch):

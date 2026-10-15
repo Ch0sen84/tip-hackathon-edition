@@ -13,8 +13,12 @@
 
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import { fileURLToPath } from "node:url";
 
-const src = fs.readFileSync(new URL("./app.core.js", import.meta.url).pathname, "utf8");
+// WINDOWS PATH BUG FIX (2026-10-15): see test_chart_markers.mjs for the
+// full writeup -- `.pathname` on a file:// URL is not a valid native path
+// on Windows; fileURLToPath() is the correct cross-platform conversion.
+const src = fs.readFileSync(fileURLToPath(new URL("./app.core.js", import.meta.url)), "utf8");
 (0, eval)(src + "\nglobalThis.__exports = { transitionLabel };");
 const { transitionLabel } = globalThis.__exports;
 

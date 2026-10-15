@@ -38,6 +38,14 @@ function check(name, fn) {
     passed++;
   } catch (e) {
     console.log(`FAIL: ${name} -- ${e.message}`);
+    // REAL BUG FIX (2026-10-15, Priority 5): this used to rely ENTIRELY on
+    // the hardcoded `total` sentinel check below (passed !== total) to
+    // produce a nonzero exit code -- fragile, and inconsistent with every
+    // other frontend test_*.mjs file's check(), which sets
+    // process.exitCode = 1 directly in the catch block. Setting it here
+    // too means a failed assertion always yields a nonzero exit code even
+    // if the `total` constant is ever wrong/stale.
+    process.exitCode = 1;
   }
 }
 

@@ -200,6 +200,78 @@ class UWRestClient:
         return self.get("/api/news/headlines", {"ticker": ticker, "limit": limit})
 
 
+def _to_float(v) -> Optional[float]:
+    if v is None:
+        return None
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _normalize_stock_state(raw: dict) -> dict:
+    """Normalizes a REAL /api/stock/{ticker}/stock-state response into the
+    common shape scan_service/tip_evidence expect (last_price/change_percent
+    -- the same shape SyntheticDataAdapter's fixtures already use directly).
+
+    REAL BUG FIX (2026-10-15, Chad's Live-Mode Radar price finding): this
+    adapter previously returned UW's RAW response unmodified and the rest of
+    the app looked for keys (`last_price`, `change_percent`/`chg_pct`/
+    `percent_change`) that do not exist anywhere in UW's real schema --
+    confirmed live (direct curl against /api/stock/SPY/stock-state):
+        {"close": "767.01", "high": "768.25", "low": "764.1", "open":
+         "767.39", "volume":.., "total_volume":.., "market_time":
+         "premarket", "tape_time": "2026-10-15T13:10:30Z", "prev_close":
+         "769.6"}
+    Every numeric field is a STRING, and there is NO native change-percent
+    field at all -- UW gives close + prev_close only, so change_percent must
+    be derived here, never guessed from a nonexistent field. This is why
+    every real Live Radar card rendered price:{last:null, chg_pct:null}
+    (pure plumbing/field-name bug, not missing data from UW).
+    """
+    close = _to_float(raw.get("close"))
+    prev_close = _to_float(raw.get("prev_close"))
+    change_percent = None
+    if close is not None and prev_close:
+        change_percent = (close - prev_close) / prev_close * 100.0
+    return {
+        "ticker": raw.get("ticker"),
+        "last_price": close,
+        "change_percent": change_percent,
+        "prev_close": prev_close,
+        "open": _to_float(raw.get("open")),
+        "high": _to_float(raw.get("high")),
+        "low": _to_float(raw.get("low")),
+        "volume": _to_float(raw.get("volume")),
+        "total_volume": _to_float(raw.get("total_volume")),
+        "market_time": raw.get("market_time"),
+        "tape_time": raw.get("tape_time"),
+        "source": "unusual_whales_stock_state",
+    }
+
+
+def _normalize_flow_alert(raw: dict) -> dict:
+    """Normalizes a REAL /api/option-trades/flow-alerts row.
+
+    REAL BUG FIX (2026-10-15): scan_service._options_flow_metrics (and this
+    app's own base.py docstring) assumed field names `total_ask_premium`/
+    `total_bid_premium`. The REAL UW field names, confirmed live via a direct
+    curl against /api/option-trades/flow-alerts, are `total_ask_side_prem`/
+    `total_bid_side_prem` (total_premium itself IS correctly named). Because
+    the assumed names never matched any real response key, ask_premium/
+    bid_premium were silently always 0 in Live Mode -> ask_share always
+    None -> one-sided options_flow_hit and direction_heuristic could only
+    ever fire via has_sweep, never via the real ask/bid-side premium split.
+    Normalizing here (adapter boundary) keeps scan_service/tests/fixtures,
+    which already use the total_ask_premium/total_bid_premium names, exactly
+    as they are -- only the LIVE adapter needed to learn the real UW names.
+    """
+    out = dict(raw)
+    out["total_ask_premium"] = raw.get("total_ask_premium", raw.get("total_ask_side_prem"))
+    out["total_bid_premium"] = raw.get("total_bid_premium", raw.get("total_bid_side_prem"))
+    return out
+
+
 class LiveUWAdapter(UWDataAdapter):
     mode = "live"
 
@@ -215,7 +287,7 @@ class LiveUWAdapter(UWDataAdapter):
         body = self.client.flow_alerts(ticker=ticker)
         if body.get("status") in (UNAVAILABLE, UNAUTHORIZED, ERROR):
             return []
-        return list(body.get("data") or [])
+        return [_normalize_flow_alert(r) for r in (body.get("data") or [])]
 
     def get_darkpool_trades(self, ticker: str) -> list:
         body = self.client.darkpool_ticker(ticker)
@@ -228,7 +300,9 @@ class LiveUWAdapter(UWDataAdapter):
         if body.get("status") in (UNAVAILABLE, UNAUTHORIZED, ERROR):
             return {"unavailable": True, "reason": body}
         data = body.get("data") or body
-        return data if data else None
+        if not data:
+            return None
+        return _normalize_stock_state(data)
 
     def get_ohlc(self, ticker: str, timeframe: str = "1d", limit: int = 180,
                  window: Optional[str] = None) -> dict:
@@ -312,12 +386,22 @@ class LiveUWAdapter(UWDataAdapter):
         }
 
     def health(self) -> dict:
-        probe = self.client.stock_state("SPY")
-        tier_ok = not (isinstance(probe, dict) and probe.get("status") in (UNAVAILABLE, UNAUTHORIZED, ERROR))
+        """REAL BUG FIX (2026-10-15, Priority 4 -- /api/health must make
+        ZERO external UW calls): this used to call self.client.stock_state
+        ("SPY") -- a REAL outbound UW API request -- on every single
+        /api/health hit, which is exactly the opposite of a cheap liveness
+        probe (and burns UW quota just from a monitoring/load-balancer
+        health check). Structural/local-only now: reports whether a key is
+        configured and which base URL would be used, with NO network call.
+        Real connectivity is verified separately and explicitly via
+        POST /api/settings/uw-key/test (user-triggered, one bounded call,
+        already existed for exactly this purpose) -- never implicitly from
+        a health check."""
         return {
             "mode": self.mode,
             "base_url": self.client.base_url,
             "api_key_configured": bool(self.client.api_key),
-            "probe_ok": tier_ok,
-            "probe_detail": None if tier_ok else probe,
+            "probe_ok": None,
+            "probe_detail": "Connectivity is not probed by /api/health (zero external calls). "
+                             "Use Settings -> Test Connection for a real, explicit UW connectivity check.",
         }

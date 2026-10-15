@@ -176,6 +176,12 @@ def _to_evidence_item(scan: dict) -> dict:
         "ticker": scan["ticker"],
         "state": scan["state"],
         "gates_passed": scan["gates_passed"],
+        # tip_evidence._short()'s "synthetic_baseline" family needs the
+        # real historical_percentile gate metrics (percentile value) to
+        # disclose an honest number instead of a generic "elevated" --
+        # carried through here rather than re-derived in the presentation
+        # layer (see families()/evidence()/current_read() fixes, 2026-10-15).
+        "gates_metrics": {name: g.get("metrics") for name, g in scan["gates"].items()},
         "dp": {"ratio": dp_metrics.get("ratio"), "hist": None, "prints": None} if dp_metrics.get("ratio") else None,
         "options": None,
         "options_partial": False,
@@ -993,4 +999,37 @@ def scenarios():
 # started from backend/ without the sibling frontend/ dir mounted).
 _FRONTEND_DIR = Path(__file__).resolve().parents[2] / "frontend"
 if _FRONTEND_DIR.exists():
-    app.mount("/", StaticFiles(directory=str(_FRONTEND_DIR), html=True), name="frontend")
+    from fastapi.responses import HTMLResponse
+    import re as _re
+
+    def _index_html_with_cache_busting() -> str:
+        """REAL BUG FIX (2026-10-15, Priority 4 -- asset cache invalidation):
+        there was no versioned/cache-busting mechanism for app.core.js /
+        app.live.js at all -- a browser could keep serving a stale cached
+        bundle after a real deploy indefinitely, requiring a user to know to
+        manually hard-reload or append their own "?v=". Appends a real
+        `?v=<build commit>` (falling back to the file's own mtime when no
+        BUILD_COMMIT is baked in -- e.g. a non-Docker local run) to every
+        same-origin <script src="..."> tag in index.html, derived from the
+        SAME version.get_build_info() the Application Updates feature
+        already uses, so a new deploy's baked-in commit automatically busts
+        the cache with no manual ?v= needed."""
+        html = (_FRONTEND_DIR / "index.html").read_text(encoding="utf-8")
+        build = _version.get_build_info()
+        cache_key = build.get("commit") or str(int((_FRONTEND_DIR / "app.core.js").stat().st_mtime))
+
+        def _bust(match: "_re.Match") -> str:
+            src = match.group(1)
+            if src.startswith(("http://", "https://", "//")):
+                return match.group(0)  # never touch an external URL
+            sep = "&" if "?" in src else "?"
+            return f'src="{src}{sep}v={cache_key}"'
+
+        return _re.sub(r'src="([^"]+\.js)"', _bust, html)
+
+    @app.get("/", include_in_schema=False)
+    @app.get("/index.html", include_in_schema=False)
+    def _serve_index():
+        return HTMLResponse(_index_html_with_cache_busting())
+
+    app.mount("/", StaticFiles(directory=str(_FRONTEND_DIR)), name="frontend")

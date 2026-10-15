@@ -6,6 +6,7 @@
 
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import { fileURLToPath } from "node:url";
 
 class FakeEl {
   constructor(id) { this.id = id; this._html = ""; this._value = ""; this.disabled = false; this.listeners = {}; }
@@ -43,7 +44,7 @@ function check(name, fn) {
 }
 
 const lib = loadReal(
-  [new URL("./app.core.js", import.meta.url).pathname],
+  [fileURLToPath(new URL("./app.core.js", import.meta.url))],
   ["buildEvidenceDaySummary", "renderEvidencePanel", "wireEvidencePanel", "fmtMoney", "dateOnly",
    "buildActivityBuckets", "distinctEventDates"],
 );

@@ -83,11 +83,25 @@ def test_adapter_get_stock_state_marks_unavailable_without_crashing():
 
 
 def test_adapter_get_stock_state_returns_data_on_success():
-    session = _mock_session(200, {"data": {"last_price": 450.1, "change_percent": 1.0}})
+    # REAL UW shape (confirmed live, 2026-10-15): close/prev_close are
+    # strings and there is no last_price/change_percent field at all --
+    # the adapter must derive/normalize them, never pass the raw dict
+    # through unmodified (see live_uw_adapter._normalize_stock_state).
+    session = _mock_session(200, {"data": {"close": "450.10", "prev_close": "445.00"}})
     client = UWRestClient("fake-key", session=session)
     adapter = LiveUWAdapter(api_key="fake-key", watchlist=["SPY"], client=client)
     state = adapter.get_stock_state("SPY")
-    assert state["last_price"] == 450.1
+    assert state["last_price"] == 450.10
+    assert round(state["change_percent"], 4) == round((450.10 - 445.00) / 445.00 * 100, 4)
+
+
+def test_adapter_get_stock_state_missing_prev_close_never_fabricates_change_pct():
+    session = _mock_session(200, {"data": {"close": "99.50"}})
+    client = UWRestClient("fake-key", session=session)
+    adapter = LiveUWAdapter(api_key="fake-key", watchlist=["SPY"], client=client)
+    state = adapter.get_stock_state("SPY")
+    assert state["last_price"] == 99.50
+    assert state["change_percent"] is None  # no prev_close -> honestly unknown, never guessed
 
 
 def test_adapter_universe_is_the_configured_watchlist():
@@ -95,12 +109,17 @@ def test_adapter_universe_is_the_configured_watchlist():
     assert adapter.get_universe() == ["SPY", "QQQ"]
 
 
-def test_health_reports_probe_failure_without_crashing():
-    session = _mock_session(401, text_body="unauthorized")
+def test_health_makes_zero_external_calls_and_reports_key_configured():
+    """REAL BUG FIX (2026-10-15, Priority 4): health() used to call
+    client.stock_state("SPY") -- a real outbound UW request -- on every
+    /api/health hit. Assert the session's .get is NEVER invoked at all."""
+    session = MagicMock()
     client = UWRestClient("bad-key", session=session)
     adapter = LiveUWAdapter(api_key="bad-key", watchlist=["SPY"], client=client)
     h = adapter.health()
-    assert h["probe_ok"] is False
+    session.get.assert_not_called()
+    assert h["api_key_configured"] is True
+    assert h["probe_ok"] is None  # structurally not probed, never faked as True/False
 
 
 # ---------------------------------------------------------------------------

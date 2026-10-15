@@ -122,6 +122,7 @@ global.LightweightCharts = {
 // Load the real source files and eval them in this global context so they
 // wire up exactly as they do in a browser (functions become globals).
 import fs from "node:fs";
+import { fileURLToPath } from "node:url";
 // NOTE: app.core.js and app.live.js must be eval'd TOGETHER in one indirect
 // eval() call, not two separate calls -- a real browser loads them as two
 // <script> tags sharing ONE global scope, but Node's indirect eval() gives
@@ -168,8 +169,8 @@ async function main() {
   global.location.search = `?api=${BASE}`;
   const liveB = loadReal(
     [
-      new URL("./app.core.js", import.meta.url).pathname,
-      new URL("./app.live.js", import.meta.url).pathname,
+      fileURLToPath(new URL("./app.core.js", import.meta.url)),
+      fileURLToPath(new URL("./app.live.js", import.meta.url)),
     ],
     [
       "setMode", "loadRadar", "loadTickerDetail", "navigateToTicker", "TIP_STATE",

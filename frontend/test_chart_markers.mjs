@@ -11,8 +11,16 @@
 
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import { fileURLToPath } from "node:url";
 
-const src = fs.readFileSync(new URL("./app.core.js", import.meta.url).pathname, "utf8");
+// WINDOWS PATH BUG FIX (2026-10-15): `new URL(..., import.meta.url).pathname`
+// is NOT a valid native path on Windows (a file:// URL's .pathname keeps a
+// leading "/" before the drive letter, e.g. "/C:/Users/..."; concatenating
+// that into further path logic is exactly how a "C:\C:\..." double-drive
+// path gets built). fileURLToPath() is the documented, cross-platform-safe
+// conversion (already used correctly in test_history_collapse.mjs) -- use
+// it everywhere a module-relative file is read.
+const src = fs.readFileSync(fileURLToPath(new URL("./app.core.js", import.meta.url)), "utf8");
 (0, eval)(src + "\nglobalThis.__exports = { nearestBarTime, dateOnly };");
 const { nearestBarTime, dateOnly } = globalThis.__exports;
 
