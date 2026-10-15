@@ -102,13 +102,13 @@
       "scan_date": "2026-10-15",
       "any_gate_passed": false,
       "state": "NEW",
-      "created_at": "2026-10-15 04:55:10"
+      "created_at": "2026-10-15 05:04:31"
     },
     {
       "scan_date": "2026-10-15",
       "any_gate_passed": false,
       "state": "BUILDING",
-      "created_at": "2026-10-15 04:55:10"
+      "created_at": "2026-10-15 05:04:31"
     }
   ],
   "raw": {

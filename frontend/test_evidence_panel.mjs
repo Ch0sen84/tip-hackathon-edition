@@ -44,7 +44,8 @@ function check(name, fn) {
 
 const lib = loadReal(
   [new URL("./app.core.js", import.meta.url).pathname],
-  ["buildEvidenceDaySummary", "renderEvidencePanel", "wireEvidencePanel", "fmtMoney", "dateOnly"],
+  ["buildEvidenceDaySummary", "renderEvidencePanel", "wireEvidencePanel", "fmtMoney", "dateOnly",
+   "buildActivityBuckets", "distinctEventDates"],
 );
 
 function makeEvent(kind, time, price, value) {
@@ -206,6 +207,41 @@ check("every real event is reachable across all pages (no silent data loss)", ()
     document.getElementById("evNextPage").dispatchEvent("click");
   }
   assert.equal(seen, 73);
+});
+
+console.log("\n=== C1 activity timeline: buildActivityBuckets / distinctEventDates ===");
+check("bucket counts sum to the exact real event total (no loss, no fabrication)", () => {
+  const events = [];
+  for (let i = 0; i < 237; i++) {
+    events.push(makeEvent(i % 2 === 0 ? "flow_alert" : "darkpool_trade",
+      `2026-10-14T${String(i % 24).padStart(2, "0")}:${String(i % 60).padStart(2, "0")}:00Z`, 100, 1000));
+  }
+  const buckets = lib.buildActivityBuckets(events, 30);
+  const totalFlow = buckets.reduce((s, b) => s + b.flowCount, 0);
+  const totalDp = buckets.reduce((s, b) => s + b.dpCount, 0);
+  assert.equal(totalFlow + totalDp, 237);
+});
+
+check("single real date -> distinctEventDates reports exactly one date (honest single-session)", () => {
+  const events = [
+    makeEvent("flow_alert", "2026-10-14T19:00:00Z", 1, null),
+    makeEvent("darkpool_trade", "2026-10-14T20:00:00Z", 1, null),
+  ];
+  assert.deepEqual(lib.distinctEventDates(events), ["2026-10-14"]);
+});
+
+check("genuinely multi-day events -> distinctEventDates reports all real dates, not collapsed", () => {
+  const events = [
+    makeEvent("flow_alert", "2026-10-12T19:00:00Z", 1, null),
+    makeEvent("flow_alert", "2026-10-14T19:00:00Z", 1, null),
+  ];
+  assert.deepEqual(lib.distinctEventDates(events), ["2026-10-12", "2026-10-14"]);
+});
+
+check("activity buckets never invent a bucket with no real events", () => {
+  const events = [makeEvent("flow_alert", "2026-10-14T19:00:00Z", 1, 500)];
+  const buckets = lib.buildActivityBuckets(events, 30);
+  assert.equal(buckets.length, 1); // exactly one real bucket, not padded to a full day
 });
 
 console.log(`\n${passed} check(s) passed.${failed ? ` ${failed} FAILED.` : ""}`);

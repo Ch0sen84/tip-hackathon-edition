@@ -85,16 +85,25 @@ global.ResizeObserver = class { observe() {} };
 // (data mapping, marker time-matching, unavailable-state branch) without
 // needing an actual browser canvas. Captures what the real function
 // would have handed to the real library, for the chart checks below.
+// C1 activity timeline (2026-10-15): mountCandlestickChart now ALSO
+// triggers a second, separate createChart() call (mountActivityTimeline,
+// a flow-alert/dark-pool histogram pane) -- that second chart never
+// calls addCandlestickSeries, so `lastChartCall` is only (re)assigned
+// from inside addCandlestickSeries below, keeping it pointed at the
+// actual candlestick chart regardless of how many other chart
+// instances get created afterward.
 let lastChartCall = null;
 global.LightweightCharts = {
   createChart: () => {
     const call = { bars: null, markers: null, width: null, volume: null };
-    lastChartCall = call;
     return {
-      addCandlestickSeries: () => ({
-        setData: (d) => { call.bars = d; },
-        setMarkers: (m) => { call.markers = m; },
-      }),
+      addCandlestickSeries: () => {
+        lastChartCall = call;
+        return {
+          setData: (d) => { call.bars = d; },
+          setMarkers: (m) => { call.markers = m; },
+        };
+      },
       // Phase B (2026-10-14): volume histogram series fake, mirroring the
       // real lightweight-charts API shape mountCandlestickChart() now uses
       // (priceScale().applyOptions(...), setData(...)).

@@ -288,6 +288,9 @@ pre.raw { background: var(--panel3); padding: 12px; border-radius: 8px; overflow
 .gate-group-count-pill.gcp-datalimit { color: var(--amber); border-color: rgba(232,179,57,0.4); }
 .gate-details > summary { cursor: pointer; font-size: 13px; margin-bottom: 6px; }
 
+/* --- C1 activity timeline (2026-10-15) ---------------------------------- */
+.activity-timeline-chart { width: 100%; height: 110px; }
+
 /* --- Compact paginated evidence interface (2026-10-15) ----------------- */
 .evidence-summary-table { width: 100%; border-collapse: collapse; margin-top: 4px; font-size: 12px; }
 .evidence-summary-table th, .evidence-summary-table td { text-align: left; padding: 3px 8px 3px 0; border-bottom: 1px solid var(--border2); }

@@ -1253,6 +1253,99 @@ function wireEvidencePanel(allEvents) {
   render();
 }
 
+// --- C1 activity timeline (2026-10-15) --------------------------------
+//
+// DATA-COVERAGE FINDING (verified live before writing any of this,
+// per Chad's explicit instruction): UW's flow-alerts/darkpool-trades
+// endpoints, as this adapter calls them, return only the MOST RECENT N
+// events with no date filtering -- empirically confirmed across NVDA,
+// PLTR, TSLA, QQQ, SPY: ALL 600 markers (100 flow alerts + 500 dark-
+// pool trades) land on the single most recent trading day, every
+// single time. Real multi-day coverage exists on UW's side but would
+// cost either one call PER CALENDAR DAY (darkpool's `date` param) or a
+// paginated `older_than` cursor walk of uncertain depth (flow-alerts)
+// -- exactly the "high-volume backfill" shape Chad said not to start
+// without approval. So a histogram spanning the full 1M/1Y chart range
+// would be ~97% empty bars and one real bar -- honest, but not useful,
+// and risks looking like a bug rather than a real finding.
+//
+// Built instead: a single-SESSION intraday activity timeline (30-minute
+// buckets, using the real event timestamps we already have) -- this is
+// genuinely useful ("when today did activity cluster") without ever
+// implying multi-day coverage we don't have. Clearly labeled as such.
+const ACTIVITY_BUCKET_MINUTES = 30;
+
+function buildActivityBuckets(allEvents, bucketMinutes = ACTIVITY_BUCKET_MINUTES) {
+  const bucketMs = bucketMinutes * 60 * 1000;
+  const byBucket = new Map();
+  for (const e of allEvents) {
+    const t = new Date(e.time).getTime();
+    if (Number.isNaN(t)) continue;
+    const bucketStart = Math.floor(t / bucketMs) * bucketMs;
+    if (!byBucket.has(bucketStart)) {
+      byBucket.set(bucketStart, { bucketStart, flowCount: 0, flowValue: 0, dpCount: 0, dpValue: 0 });
+    }
+    const row = byBucket.get(bucketStart);
+    if (e.kind === "flow_alert") {
+      row.flowCount += 1;
+      if (e.value != null) row.flowValue += e.value;
+    } else {
+      row.dpCount += 1;
+      if (e.value != null) row.dpValue += e.value;
+    }
+  }
+  return Array.from(byBucket.values()).sort((a, b) => a.bucketStart - b.bucketStart);
+}
+
+// Real distinct dates present in the event set -- drives the honest
+// single-session vs multi-session disclosure text, never assumed.
+function distinctEventDates(allEvents) {
+  return Array.from(new Set(allEvents.map((e) => dateOnly(e.time)))).sort();
+}
+
+function mountActivityTimeline(containerId, allEvents) {
+  const root = document.getElementById(containerId);
+  if (!root) return;
+  if (!allEvents.length) {
+    root.innerHTML = `<div class="empty">No flow-alert or dark-pool activity in the currently fetched evidence to chart.</div>`;
+    return;
+  }
+  if (typeof LightweightCharts === "undefined") {
+    root.innerHTML = `<div class="chart-unavailable">Chart library unavailable.</div>`;
+    return;
+  }
+  const dates = distinctEventDates(allEvents);
+  const coverageNote = dates.length === 1
+    ? `Today's activity only (${esc(dates[0])}) \u2014 UW's flow-alert/dark-pool endpoints return the most recent events, not a multi-day history; see the Evidence table above for the full underlying record.`
+    : `Activity across ${dates.length} real distinct date(s) actually present in the fetched evidence.`;
+
+  root.innerHTML = `<div id="${containerId}-chart" class="activity-timeline-chart"></div><div class="muted" style="margin-top:4px;font-size:11px">${coverageNote}</div>`;
+  const chartEl = document.getElementById(`${containerId}-chart`);
+  const chart = LightweightCharts.createChart(chartEl, {
+    height: 110,
+    layout: { background: { color: "transparent" }, textColor: "#9aa4b2" },
+    grid: { vertLines: { color: "rgba(255,255,255,0.04)" }, horzLines: { color: "rgba(255,255,255,0.04)" } },
+    timeScale: { borderColor: "rgba(255,255,255,0.12)", timeVisible: true, secondsVisible: false },
+    rightPriceScale: { borderColor: "rgba(255,255,255,0.12)" },
+  });
+  const buckets = buildActivityBuckets(allEvents);
+  const flowSeries = chart.addHistogramSeries({ color: "rgba(245,158,11,0.75)", priceScaleId: "right" });
+  flowSeries.setData(buckets.map((b) => ({ time: Math.floor(b.bucketStart / 1000), value: b.flowCount })));
+  const dpSeries = chart.addHistogramSeries({ color: "rgba(96,165,250,0.6)", priceScaleId: "right" });
+  dpSeries.setData(buckets.map((b) => ({ time: Math.floor(b.bucketStart / 1000), value: b.dpCount })));
+  chart.timeScale().fitContent();
+  root._tipActivityChart = chart;
+  if (!root._tipResizeObserverAttached && typeof ResizeObserver !== "undefined") {
+    const ro = new ResizeObserver(() => {
+      if (root._tipActivityChart && chartEl.clientWidth > 0) {
+        root._tipActivityChart.applyOptions({ width: chartEl.clientWidth });
+      }
+    });
+    ro.observe(root);
+    root._tipResizeObserverAttached = true;
+  }
+}
+
 function renderChartUnavailable(reason) {
   const detail = reason && reason.message ? reason.message
     : reason && reason.status ? `UW status: ${reason.status}`
@@ -1420,6 +1513,7 @@ function mountCandlestickChart(containerId, ohlc) {
     root.after(info);
     wireEvidencePanel(allEvents);
   }
+  mountActivityTimeline("activityTimelineContainer", allEvents);
 
   root._tipChart = chart;
   if (!root._tipResizeObserverAttached && typeof ResizeObserver !== "undefined") {
@@ -1578,6 +1672,13 @@ function renderTickerDetail(d) {
       <div id="ohlcChartContainer" class="chart-container"><div class="empty">Loading chart...</div></div>
       <div id="chartVolumeLabel" class="muted" style="margin-top:4px;font-size:11px"></div>
       <div id="chartRangeNote" class="muted" style="margin-top:6px;font-size:11px"></div>
+      <!-- C1 activity timeline (2026-10-15): flow-alert (orange) vs
+           dark-pool (blue) counts by time-of-day -- see mountActivityTimeline's
+           module comment for why this is single-session, not multi-day. -->
+      <div class="activity-timeline-head muted" style="margin-top:10px;font-size:11px">
+        Activity timeline <span style="color:#f59e0b">\u25a0 flow alerts</span> &middot; <span style="color:#60a5fa">\u25a0 dark-pool</span>
+      </div>
+      <div id="activityTimelineContainer"></div>
     </div>
     <div class="card evidence-primary-card">
       <div class="card-head"><strong>Evidence &mdash; what the chart above is based on</strong></div>
