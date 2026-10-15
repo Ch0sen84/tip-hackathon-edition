@@ -105,13 +105,13 @@
       "scan_date": "2026-10-14",
       "any_gate_passed": true,
       "state": "NEW",
-      "created_at": "2026-10-15 00:19:23"
+      "created_at": "2026-10-15 01:02:40"
     },
     {
       "scan_date": "2026-10-14",
       "any_gate_passed": true,
       "state": "CONFIRMED",
-      "created_at": "2026-10-15 00:19:24"
+      "created_at": "2026-10-15 01:02:40"
     }
   ],
   "raw": {

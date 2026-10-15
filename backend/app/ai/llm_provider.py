@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Protocol
+from typing import Optional, Protocol
 
 import requests
 
@@ -313,18 +313,137 @@ Hard rules, no exceptions:
 # step (and a human reviewing raw/ in the UI) can see it happened.
 MAX_RECORDS_PER_TOOL_IN_PROMPT = 8
 
+# ROOT-CAUSE FOLLOW-UP (2026-10-14, Chad approved): pure "newest N" can
+# silently drop the single most decision-relevant record -- a huge
+# outlier trade buried at position #50, or the one contradictory data
+# point that belongs in conflicting_observations. Replaced with a
+# bounded DIVERSE sample, same 8-record cap, same token cost: 4 most
+# recent + 2 highest-magnitude + 2 minority-direction (potential
+# outlier/conflicting) records, deduped, backfilled from recency if a
+# category has nothing to contribute. Field names below are the REAL
+# ones measured directly against a live NVDA MCP call on N5 (see
+# tests/test_investigate.py for the exact sample captured) -- not
+# guessed. Tools with no reliable magnitude/direction field (insider
+# activity is a roster of people, not transactions; analyst ratings,
+# short data, company info, max pain, greek exposure are not list-
+# shaped or already small) simply fall back to pure recency, unchanged.
+MAGNITUDE_FIELD_BY_TOOL = {
+    "get_flow_alerts": "total_premium",
+    "get_dark_pool_trades": "premium",
+    "get_option_trades": "premium",
+}
+DIRECTION_FIELD_BY_TOOL = {
+    "get_flow_alerts": "type",          # "call" / "put"
+    "get_option_trades": "option_type",  # "call" / "put"
+}
+
+
+def _as_float(v):
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _record_key(rec: dict, fallback_index: int) -> object:
+    # Real UW records consistently carry a unique "id" (flow_alerts,
+    # option_trades) or "tracking_id" (dark_pool_trades) -- prefer those
+    # for dedup; fall back to the record's original position only if
+    # neither is present (keeps dedup correct even for odd/malformed data).
+    return rec.get("id") or rec.get("tracking_id") or fallback_index
+
+
+def _diverse_sample_records(tool: Optional[str], data: list) -> list:
+    """Select up to MAX_RECORDS_PER_TOOL_IN_PROMPT records: recency +
+    magnitude + outlier-direction, deduped, backfilled from recency.
+    `data` is assumed newest-first (true for every real UW list endpoint
+    used here). Never drops a genuinely higher-signal record just
+    because an equally-sized "first N" window would have missed it."""
+    cap = MAX_RECORDS_PER_TOOL_IN_PROMPT
+    mag_field = MAGNITUDE_FIELD_BY_TOOL.get(tool)
+    dir_field = DIRECTION_FIELD_BY_TOOL.get(tool)
+
+    selected: list = []
+    selected_ids: set = set()
+
+    def _add(rec, idx) -> bool:
+        if len(selected) >= cap:
+            return False
+        k = _record_key(rec, idx)
+        if k in selected_ids:
+            return False
+        selected.append(rec)
+        selected_ids.add(k)
+        return True
+
+    # 1) up to 4 most recent (data is already newest-first)
+    for i, rec in enumerate(data[:4]):
+        _add(rec, i)
+
+    # 2) up to 2 highest-magnitude (across the FULL list, not just the
+    # already-selected recent window -- the point is to surface a big
+    # record recency alone would have missed)
+    if mag_field:
+        ranked = sorted(
+            enumerate(data), key=lambda pair: (_as_float(pair[1].get(mag_field)) is None, -(_as_float(pair[1].get(mag_field)) or 0))
+        )
+        picked = 0
+        for idx, rec in ranked:
+            if picked >= 2:
+                break
+            if _add(rec, idx):
+                picked += 1
+
+    # 3) up to 2 minority-direction records (e.g. a put among mostly
+    # calls, or vice versa) -- the genuinely contradictory signal this
+    # whole feature exists to surface, not something to lose to a
+    # recency window. Prefer the highest-magnitude minority record for
+    # salience when a magnitude field is also known.
+    if dir_field:
+        counts: dict = {}
+        for rec in data:
+            v = rec.get(dir_field)
+            if v:
+                counts[v] = counts.get(v, 0) + 1
+        if len(counts) >= 2:
+            minority_val = min(counts, key=lambda k: counts[k])
+            minority = [(i, r) for i, r in enumerate(data) if r.get(dir_field) == minority_val]
+            if mag_field:
+                minority.sort(key=lambda pair: -(_as_float(pair[1].get(mag_field)) or 0))
+            picked = 0
+            for idx, rec in minority:
+                if picked >= 2:
+                    break
+                if _add(rec, idx):
+                    picked += 1
+
+    # 4) backfill any remaining slots from recency order (dedup-safe)
+    if len(selected) < cap:
+        for i, rec in enumerate(data):
+            if len(selected) >= cap:
+                break
+            _add(rec, i)
+
+    return selected
+
 
 def _summarize_tool_result_for_prompt(result: dict) -> dict:
     data = result.get("data")
     if isinstance(data, list) and len(data) > MAX_RECORDS_PER_TOOL_IN_PROMPT:
+        sampled = _diverse_sample_records(result.get("tool"), data)
+        has_strategy = result.get("tool") in MAGNITUDE_FIELD_BY_TOOL or result.get("tool") in DIRECTION_FIELD_BY_TOOL
+        strategy_desc = (
+            "most recent + highest-magnitude + minority-direction outliers, deduped"
+            if has_strategy else "most recent (no reliable magnitude/direction field for this tool)"
+        )
         return {
             **result,
-            "data": data[:MAX_RECORDS_PER_TOOL_IN_PROMPT],
+            "data": sampled,
             "_truncated_from": len(data),
             "_truncation_note": (
-                f"showing the {MAX_RECORDS_PER_TOOL_IN_PROMPT} most recent of {len(data)} real "
-                "records returned by this tool call (newest-first, per UW's own ordering) -- "
-                "not a different/smaller real result, just fewer rows shown to the synthesis step"
+                f"bounded diverse sample of {len(sampled)} of {len(data)} real records returned by "
+                f"this tool call ({strategy_desc}) -- this is NOT a complete dataset; omitted records "
+                "may still be materially relevant and must not be treated as nonexistent"
             ),
         }
     return result

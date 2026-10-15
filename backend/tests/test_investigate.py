@@ -14,6 +14,7 @@ from app.ai.allowlist import MAX_TOOLS_PER_INVESTIGATION
 from app.ai.llm_provider import (
     MAX_RECORDS_PER_TOOL_IN_PROMPT,
     build_synthesis_user_prompt,
+    _diverse_sample_records,
     _summarize_tool_result_for_prompt,
 )
 from app.ai.schemas import (
@@ -469,3 +470,121 @@ def test_server_side_caps_leave_a_compact_realistic_response_completely_untouche
     assert result.server_truncated is False
     assert len(result.observed_facts) == 2
     assert result.ai_interpretation == raw["ai_interpretation"]
+
+
+# ---------------------------------------------------------------------------
+# Follow-up fix (2026-10-14, Chad-approved): pure "newest N" can silently
+# drop the single most decision-relevant record. These tests use the REAL
+# field names measured directly against a live NVDA MCP call on N5 (not
+# guessed) -- total_premium/type for flow_alerts, premium/option_type for
+# option_trades, premium for dark_pool_trades (no reliable direction field
+# there, confirmed from the real sample: no bullish/bearish flag exists).
+# ---------------------------------------------------------------------------
+
+def _realistic_flow_alerts(n=120, outlier_premium=9_000_000, outlier_at=57):
+    """120 real-shaped flow_alerts: overwhelmingly 'call', one buried 'put'
+    outlier at a non-recent position, AND one buried huge-premium 'call'
+    at a different non-recent position -- both must survive sampling even
+    though neither is in the newest-4 window."""
+    records = []
+    for i in range(n):
+        records.append({
+            "id": f"alert-{i}",
+            "ticker": "NVDA",
+            "type": "put" if i == outlier_at else "call",
+            "total_premium": str(outlier_premium if i == 80 else (50_000 + i * 100)),
+            "strike": "220",
+            "has_sweep": False,
+        })
+    return records
+
+
+def test_diverse_sample_recovers_a_buried_high_magnitude_record_recency_alone_would_miss():
+    data = _realistic_flow_alerts()
+    sampled = _diverse_sample_records("get_flow_alerts", data)
+    assert len(sampled) == MAX_RECORDS_PER_TOOL_IN_PROMPT
+    ids = {r["id"] for r in sampled}
+    assert "alert-80" in ids, "the single highest-total_premium record (buried at position 80) was dropped"
+
+
+def test_diverse_sample_recovers_a_buried_minority_direction_record():
+    data = _realistic_flow_alerts()
+    sampled = _diverse_sample_records("get_flow_alerts", data)
+    ids = {r["id"] for r in sampled}
+    assert "alert-57" in ids, "the one 'put' among 119 'call' records (buried, not in newest-4) was dropped"
+
+
+def test_diverse_sample_always_includes_the_newest_records():
+    data = _realistic_flow_alerts()
+    sampled = _diverse_sample_records("get_flow_alerts", data)
+    ids = {r["id"] for r in sampled}
+    for i in range(4):
+        assert f"alert-{i}" in ids, f"newest record alert-{i} was dropped -- recency must never be fully sacrificed"
+
+
+def test_diverse_sample_never_duplicates_a_record_selected_by_multiple_criteria():
+    # Make the newest record ALSO the highest-magnitude AND the minority
+    # direction -- every selection path points at the same record; the
+    # cap must still leave room for 7 OTHERS, not silently shrink to 1.
+    data = _realistic_flow_alerts(outlier_at=0, outlier_premium=99_000_000)
+    sampled = _diverse_sample_records("get_flow_alerts", data)
+    ids = [r["id"] for r in sampled]
+    assert len(ids) == len(set(ids)) == MAX_RECORDS_PER_TOOL_IN_PROMPT
+
+
+def test_diverse_sample_falls_back_to_pure_recency_for_a_tool_with_no_known_fields():
+    # get_insider_activity_by_ticker's real schema is a roster of PEOPLE
+    # (id/name/cik), not transactions -- no magnitude/direction field
+    # exists, confirmed from the real sample. Must still behave sanely:
+    # newest N, no crash, no spurious "diverse" selection attempted.
+    data = [{"id": i, "name": f"Person {i}"} for i in range(50)]
+    sampled = _diverse_sample_records("get_insider_activity_by_ticker", data)
+    assert len(sampled) == MAX_RECORDS_PER_TOOL_IN_PROMPT
+    assert [r["id"] for r in sampled[:4]] == [0, 1, 2, 3]
+
+
+def test_summarize_tool_result_discloses_the_diverse_sampling_strategy_honestly():
+    data = _realistic_flow_alerts()
+    result = {"tool": "get_flow_alerts", "ok": True, "data": data}
+    summarized = _summarize_tool_result_for_prompt(result)
+    assert summarized["_truncated_from"] == 120
+    note = summarized["_truncation_note"]
+    assert "NOT a complete dataset" in note
+    assert "highest-magnitude" in note and "minority-direction" in note
+
+
+def test_summarize_tool_result_discloses_pure_recency_when_no_fields_known():
+    data = [{"id": i, "name": f"Person {i}"} for i in range(50)]
+    result = {"tool": "get_insider_activity_by_ticker", "ok": True, "data": data}
+    summarized = _summarize_tool_result_for_prompt(result)
+    note = summarized["_truncation_note"]
+    assert "no reliable magnitude/direction field" in note
+
+
+def test_option_trades_diverse_sample_uses_its_own_real_field_names():
+    # Real schema: premium (string numeric), option_type ("call"/"put") --
+    # different field names than flow_alerts, must not be hardcoded/shared.
+    records = [
+        {"id": f"opt-{i}", "premium": str(100 + i), "option_type": "put" if i == 33 else "call"}
+        for i in range(100)
+    ]
+    records[70]["premium"] = "5000000"  # buried high-magnitude outlier
+    sampled = _diverse_sample_records("get_option_trades", records)
+    ids = {r["id"] for r in sampled}
+    assert "opt-70" in ids, "buried highest-premium option trade was dropped"
+    assert "opt-33" in ids, "buried minority option_type ('put' among mostly 'call') was dropped"
+
+
+def test_dark_pool_trades_diverse_sample_handles_magnitude_only_no_direction_field():
+    # Real schema confirmed from the live NVDA sample: dark_pool_trades
+    # has "premium" but genuinely no bullish/bearish/direction field --
+    # this exercises the magnitude-only branch (DIRECTION_FIELD_BY_TOOL
+    # has no entry for this tool, step 3 must just no-op, not crash).
+    records = [{"id": f"dp-{i}", "premium": str(1000 + i)} for i in range(200)]
+    records[150]["premium"] = "9999999"  # buried high-magnitude outlier
+    sampled = _diverse_sample_records("get_dark_pool_trades", records)
+    assert len(sampled) == MAX_RECORDS_PER_TOOL_IN_PROMPT
+    ids = {r["id"] for r in sampled}
+    assert "dp-150" in ids, "buried highest-premium dark-pool print was dropped"
+    for i in range(4):
+        assert f"dp-{i}" in ids
