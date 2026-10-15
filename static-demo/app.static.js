@@ -32,7 +32,8 @@ async function loadRadar() {
 
     const featured = data.highest[0] || null;
     document.getElementById("featuredSignalSlot").innerHTML = renderFeaturedSignal(featured);
-    document.getElementById("breakdownSlot").innerHTML = renderSignalBreakdown(featured);
+    document.getElementById("breakdownSlot").innerHTML =
+      renderSignalBreakdown(featured, (data.highest.length + data.other.length) > 0);
 
     // Stage 2 (P3): same filters/cards/counts/history-chip rendering as
     // the local edition -- see app.core.js's

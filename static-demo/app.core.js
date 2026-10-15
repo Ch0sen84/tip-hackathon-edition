@@ -759,6 +759,17 @@ function renderRadarLists(data, filters, loadTickerDetailFn) {
 
   const highestGridEl = document.getElementById("highestGrid");
   if (highestGridEl) highestGridEl.innerHTML = filteredRest.map(renderCard).join("") || "";
+  // 2026-10-15 fix: when ZERO tickers genuinely qualify for Highest
+  // Attention (allHighest.length === 0, not merely filtered down to zero),
+  // Featured Signal's own honest "No featured signal right now" message
+  // already covers this tier -- a second, bare "Highest Attention" heading
+  // sitting over an empty grid right below it was redundant and looked
+  // broken, not like one compact empty state. Hide the whole redundant
+  // heading+grid section in that specific case; a filter-induced zero
+  // (allHighest.length > 0 but filteredRest is empty) still shows the
+  // heading normally since there IS a featured entry above it.
+  const highestSectionEl = document.getElementById("highestAttentionSection");
+  if (highestSectionEl) highestSectionEl.style.display = allHighest.length === 0 ? "none" : "";
   const otherGridEl = document.getElementById("otherGrid");
   if (otherGridEl) otherGridEl.innerHTML = filteredOther.map(renderCard).join("") || "";
   // Other Noteworthy's table is now the primary (visible) presentation,
@@ -1057,9 +1068,18 @@ function renderFeaturedSignal(entry) {
 
 // Signal Breakdown: contextual panel for whichever candidate is currently
 // selected/featured -- shows its REAL evidence[] entries (family/text).
-function renderSignalBreakdown(entry) {
+// hasAnyQualifying (optional): whether ANY ticker currently qualifies for
+// Highest Attention or Other Noteworthy at all. 2026-10-15 fix: the old
+// unconditional "Select a ticker above..." message was shown even when
+// NO featured ticker existed and nothing was clickable above it either --
+// misleading in the zero-qualifying case. Default true preserves the
+// original wording for every existing call site that already has a real
+// ticker list to select from.
+function renderSignalBreakdown(entry, hasAnyQualifying = true) {
   if (!entry) {
-    return `<div class="breakdown-panel empty">Select a ticker above to see its evidence breakdown.</div>`;
+    return hasAnyQualifying
+      ? `<div class="breakdown-panel empty">Select a ticker above to see its evidence breakdown.</div>`
+      : `<div class="breakdown-panel empty">No evidence breakdown available -- no ticker currently qualifies for Highest Attention or Other Noteworthy.</div>`;
   }
   const rows = (entry.evidence || []).map((e) => `
     <div class="breakdown-row">

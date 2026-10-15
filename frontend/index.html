@@ -87,8 +87,16 @@
             <span class="muted radar-filter-counts" id="radarFilterCounts"></span>
           </div>
 
-          <h2 class="section-title eyebrow">Highest Attention</h2>
-          <div class="attn-grid" id="highestGrid"></div>
+          <!-- 2026-10-15 fix: wrapped so renderRadarLists() can hide this
+               whole heading+grid when zero tickers qualify for Highest
+               Attention -- otherwise the page showed Featured Signal's
+               honest empty message AND a second, bare "Highest Attention"
+               heading with nothing under it, which read as broken rather
+               than as one compact empty state. -->
+          <div id="highestAttentionSection">
+            <h2 class="section-title eyebrow">Highest Attention</h2>
+            <div class="attn-grid" id="highestGrid"></div>
+          </div>
 
           <h2 class="section-title eyebrow">Other Noteworthy</h2>
           <!-- Production-style compact DATA TABLE is now the primary

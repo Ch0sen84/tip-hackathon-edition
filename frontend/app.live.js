@@ -76,7 +76,11 @@ async function loadRadar() {
 
     const featured = data.highest[0] || null;
     document.getElementById("featuredSignalSlot").innerHTML = renderFeaturedSignal(featured);
-    document.getElementById("breakdownSlot").innerHTML = renderSignalBreakdown(featured);
+    // 2026-10-15 fix: pass whether ANY ticker qualifies at all (Highest
+    // Attention or Other Noteworthy) so the empty-breakdown message never
+    // says "Select a ticker above" when there's genuinely nothing to select.
+    document.getElementById("breakdownSlot").innerHTML =
+      renderSignalBreakdown(featured, (data.highest.length + data.other.length) > 0);
 
     // Stage 2 (P3): filters + cards + counts + history chips, all
     // rendered from this same already-fetched payload -- see
@@ -218,7 +222,14 @@ async function loadTickerDetail(ticker) {
 // loadSettings) with whether THIS investigation will be/was simulated
 // (avail.simulated / d.simulated) -- both real, fetched flags, nothing
 // invented.
-function modeLabelFor(simulated, transport) {
+// confirmed: true when `transport` reflects an investigation that has
+// ACTUALLY RUN (d.transport, post-execution -- the default, for every
+// existing post-run call site). false when `transport` is merely the
+// CONFIGURED value from the pre-run availability check (avail.transport)
+// -- 2026-10-15 fix: these are two different facts ("this is what's
+// configured to run" vs "this is what actually ran") and must say so
+// distinctly rather than both using the same unqualified phrasing.
+function modeLabelFor(simulated, transport, confirmed = true) {
   const modePart = _currentMode === "live" ? "LIVE mode" : "DEMO mode";
   // REAL BUG FIX (2026-10-15, Priority 3): this used to hardcode "live AI +
   // MCP calls" for every non-simulated investigation, regardless of which
@@ -232,11 +243,14 @@ function modeLabelFor(simulated, transport) {
   // (e.g. the pre-run availability check) -- say so plainly rather than
   // calling transportLabel(undefined), which would print a confusing
   // "Unknown (older response or unset)" before anything has even started.
+  const transportPhrase = transport
+    ? (confirmed
+        ? `live AI + ${transportLabel(transport).toLowerCase()}`
+        : `live AI + configured transport: ${transportLabel(transport).toLowerCase()}`)
+    : null;
   const aiPart = simulated
     ? "simulated AI transcript"
-    : transport
-      ? `live AI + ${transportLabel(transport).toLowerCase()}`
-      : "live AI + UW tool calls (transport confirmed once the investigation runs)";
+    : transportPhrase || "live AI + UW tool calls (transport confirmed once the investigation runs)";
   return `${modePart} \u2014 ${aiPart}`;
 }
 
@@ -297,7 +311,14 @@ async function loadInvestigateSection(ticker, navSeq) {
   try {
     const avail = await apiGet("/api/investigate/availability");
     if (navSeq != null && navSeq !== _navSeq) return; // superseded mid-fetch -- never render for a ticker the user has since left
-    const modeLabel = modeLabelFor(avail.simulated);
+    // 2026-10-15 fix: avail.transport already carries the CONFIGURED
+    // transport (mcp/rest) from the same availability check used two
+    // lines below for transportNote -- pass it through here too so the
+    // mode-label line never falls back to the vague "transport confirmed
+    // once the investigation runs" wording when the configured transport
+    // is already known before anything has run. Reusing existing
+    // availability data, no new backend field.
+    const modeLabel = modeLabelFor(avail.simulated, avail.transport, false);
     if (!avail.available) {
       el.innerHTML = `
         <div class="ai-card">
