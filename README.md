@@ -1,5 +1,25 @@
 # TIP Hackathon Edition
 
+> ⚠️ **EARLY DEVELOPMENT — NOT PRODUCTION READY**
+>
+> TIP Hackathon Edition is an experimental, actively developed trading
+> intelligence application built for the Unusual Whales hackathon.
+>
+> This software is being released for evaluation, demonstration, feedback,
+> and development testing.
+>
+> Features, interfaces, configuration, and installation procedures may
+> change. Bugs, incomplete functionality, inaccurate analysis, and
+> installation problems may occur.
+>
+> **Not recommended for production use or making live trading decisions.**
+> Financial analysis is informational and should be independently
+> verified.
+>
+> Users should run the application locally, protect their API
+> credentials, and avoid exposing the application or its Settings API to
+> untrusted networks.
+
 Standalone hackathon build of TIP (Trading Intelligence Platform) for the
 Unusual Whales Hackathon. A FastAPI backend ports the production app's
 **pure decision logic** (named gate evaluation, confidence scoring, and the
@@ -267,14 +287,51 @@ tools/check_deployment_binding.sh <your-compose-project-name>
 This fails loudly if the container is published on `0.0.0.0`/`::` (every
 interface) unless you explicitly set `ALLOW_PUBLIC_BIND=1` first.
 
-## AI-assisted installation
+## Install with an AI Coding Agent
 
-For handing this repo to a coding agent, see `INSTALL_AGENT.md` at the
-repo root for a standalone, agent-executable install walkthrough, and
-`skills/tip-hackathon/SKILL.md` for an Agent Skills-compatible reference
-covering installation plus day-2 operation (mode switching, health checks,
-logs, Settings API). Both reuse the exact Docker Compose workflow above
-rather than a different one.
+This repo includes `INSTALL_AGENT.md`, a standalone install walkthrough
+written for coding agents (Claude Code and compatible tools), and
+`skills/tip-hackathon/SKILL.md`, an Agent Skills-compatible reference for
+day-2 operation (mode switching, health checks, logs, Settings API). Both
+reuse the exact Docker Compose workflow described above rather than a
+different one — there is no hidden alternate install path.
+
+To use it, copy the prompt below into your coding agent (Claude Code,
+or any compatible agent with shell + file access):
+
+```
+Install and verify "TIP Hackathon Edition" on this machine.
+
+1. Inspect this machine's OS and check for prerequisites (Docker,
+   Docker Compose, git). If anything required is missing, propose how
+   to install it and ask for my approval before installing anything.
+2. Clone https://github.com/Ch0sen84/tip-hackathon-edition into a
+   directory of your choosing on this machine.
+3. Follow README.md and INSTALL_AGENT.md in the cloned repo as the
+   authoritative installation steps — don't invent a different
+   install path.
+4. Install using the documented Docker Compose workflow and initialize
+   persistent storage (the SQLite volume) as described.
+5. Start the app in credential-free Demo Mode (the default — no API
+   key required) and confirm /api/health reports success with a
+   nonzero scenarios_loaded count.
+6. Open the app in a browser and verify Market Radar, Ticker Analysis
+   (including the price chart), and the Settings page all load and
+   work using the synthetic demo data.
+7. Recreate the container (docker compose down && docker compose up)
+   and confirm Settings/state persisted across the restart.
+8. Keep the app bound to localhost only — do not change the binding
+   to listen on all interfaces or expose it to the network.
+9. After Demo Mode is confirmed working, OPTIONALLY offer to help me
+   configure a real Unusual Whales API key (Live Mode) and/or an AI
+   provider key for the Investigate feature — only if I explicitly
+   want to. Never ask me for these secrets in chat; have me enter
+   them through the app's own Settings UI, and never make a paid AI
+   request without my explicit approval first.
+10. Report a clear PASS / PARTIAL / FAIL verdict for each step above,
+    and document any installation blockers you hit and how you
+    resolved (or couldn't resolve) them.
+```
 
 ## Tests
 

@@ -41,16 +41,16 @@ Date: 2026-10-12
   and after frontend changes — backend untouched).
 - `static-demo/check_static_demo.sh` → **ALL CHECKS PASSED** (before and
   after).
-- N5 test deployment (`ssh root@10.10.10.2`, `/mnt/user/appdata/tip-hackathon-test`,
-  `docker compose -p tip-hackathon-test`): synced new `frontend/`, rebuilt
-  the image, restarted the container on port 8842. Confirmed via real
+- Author's private LAN test deployment (via Docker Compose on a separate
+  host, redacted from this public doc): synced new `frontend/`, rebuilt
+  the image, restarted the container. Confirmed via real
   HTTP calls: `/api/health`, `/api/radar`, `/api/ticker/FLUX`,
   `POST /api/investigate/FLUX`, `/api/settings`, and that `/`,
   `/app.core.js`, `/app.live.js` serve 200.
 - Browser-driven (real headless Chromium via the Hermes browser tool,
   not described-only) verification against both the static demo
-  (`python -m http.server` locally) and the live N5 deployment
-  (`http://10.10.10.2:8842/`):
+  (`python -m http.server` locally) and the author's private LAN test
+  deployment (address redacted from this public doc):
   - Market Radar renders Featured Signal / activity strip / Signal
     Breakdown / Other Noteworthy table with the new markup, no console
     errors observed in rendered output.
@@ -78,7 +78,7 @@ Date: 2026-10-12
 4. `04_market_radar_1920.png` — static demo, Market Radar, 1920px
 5. `05_market_radar_1024.png` — static demo, Market Radar, 1024px
 6. `06_market_radar_390_mobile.png` — static demo, Market Radar, 390px mobile viewport
-7. `07_n5_docker_live_radar.png` — **live N5 Docker deployment** (10.10.10.2:8842), Market Radar, demo mode
+7. `07_n5_docker_live_radar.png` — **author's private LAN Docker deployment** (address redacted), Market Radar, demo mode
 
 ## Known scope/design tradeoffs to flag before hackathon submission
 
@@ -103,5 +103,5 @@ Date: 2026-10-12
 - No disposable nginx:alpine container was needed for static-demo testing
   since the local `python3 -m http.server` + the Hermes browser tool's
   shared network namespace reached it directly; nothing was deployed or
-  left running on the N5 box as a result of this check (only the
-  pre-existing `tip-hackathon-test` container was touched, as instructed).
+  left running on the author's private test host as a result of this
+  check (only the pre-existing test container was touched, as instructed).

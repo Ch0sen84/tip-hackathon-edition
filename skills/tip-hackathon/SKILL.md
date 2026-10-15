@@ -25,7 +25,7 @@ fresh install. In short, once in the repo root:
 ```bash
 cp .env.example .env     # demo mode needs no edits
 docker compose up --build
-curl -s http://localhost:8000/api/health   # expect scenarios_loaded: 5
+curl -s http://localhost:8000/api/health   # expect scenarios_loaded: 11
 ```
 
 Serves at `http://localhost:8000/`.
@@ -59,7 +59,7 @@ docker compose up --build
 ### Switching Demo <-> Live mode
 
 Demo mode (`TIP_MODE=demo`, the default) needs no API key and serves the
-five synthetic fixtures described below. Live mode needs a real Unusual
+synthetic fixtures described below. Live mode needs a real Unusual
 Whales API key, entered by the user — never by this skill on the user's
 behalf — either through the app's own Settings UI at
 `http://localhost:8000/` or via the Settings API:
@@ -102,7 +102,7 @@ the `curl` command they run themselves.
 | `GET /api/investigate/availability` | Whether the Investigate-with-AI button should be enabled, and why not if disabled |
 | `POST /api/investigate/{ticker}` | Bounded AI investigation; demo mode always returns a static, clearly-labeled simulated transcript |
 
-### The five synthetic scenarios (demo mode)
+### The synthetic scenarios (demo mode)
 
 Source: `fixtures/README_SYNTHETIC.md`. All fabricated demo data
 (`"synthetic": true`), shaped like real UW API fields, fed through the

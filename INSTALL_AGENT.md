@@ -7,8 +7,9 @@ needing to read the rest of the repo first. It documents exactly the same
 Docker Compose workflow already described in `README.md`'s "Running with
 Docker" section — nothing here is a new or alternate install path.
 
-Repository: https://github.com/Ch0sen84/tip-hackathon-edition (private —
-the user must have granted you access; do not attempt to make it public).
+Repository: https://github.com/Ch0sen84/tip-hackathon-edition (public —
+this is an early-development, non-production release; see the warning
+banner in README.md).
 
 ## Ground rules (read before doing anything)
 
@@ -98,10 +99,11 @@ Once the container reports it's up (or after a few seconds if detached):
 curl -s http://localhost:8000/api/health
 ```
 
-Confirm the response is successful and that it reports
-`"scenarios_loaded": 5` (the five bundled synthetic fixtures under
-`fixtures/`). If `scenarios_loaded` is not `5`, something is wrong with the
-fixtures mount/build — see Troubleshooting.
+Confirm the response is successful and that it reports a nonzero
+`scenarios_loaded` count matching the number of `scenario_*.json` files
+under `fixtures/` (currently 11). If `scenarios_loaded` is `0` or doesn't
+match, something is wrong with the fixtures mount/build — see
+Troubleshooting.
 
 You can also sanity-check the mode and radar endpoints:
 
@@ -197,9 +199,10 @@ were told in chat — the user must supply it directly (e.g. by running the
   docker compose logs
   docker compose logs -f   # follow
   ```
-- **`scenarios_loaded` isn't 5**: confirm the `fixtures/` directory exists
-  in the checkout and wasn't excluded by a `.dockerignore`/build-context
-  issue; re-run `docker compose up --build` after confirming.
+- **`scenarios_loaded` is 0 or doesn't match the fixture count**: confirm
+  the `fixtures/` directory exists in the checkout and wasn't excluded by
+  a `.dockerignore`/build-context issue; re-run `docker compose up --build`
+  after confirming.
 
 ### k. Shutdown and uninstall
 
