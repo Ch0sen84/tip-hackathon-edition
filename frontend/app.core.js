@@ -2051,22 +2051,38 @@ function renderInvestigateList(items) {
 }
 
 // Visible step sequence of the ACTUAL tools_used list. Per-tool
-// success/failure detail is NOT part of backend/app/ai/schemas.py's
-// InvestigationResult -- rather than inventing a field that doesn't
-// exist, that absence is surfaced as an honest, explicit gap.
-function renderToolsUsed(toolsUsed) {
+// success/failure detail (tool_outcomes) was added 2026-10-15 (item 5) to
+// backend/app/ai/schemas.py::InvestigationResult -- render it when present;
+// fall back to the older honest-gap note only for an older/simulated
+// response shape that doesn't carry tool_outcomes at all (e.g. a prior
+// cached response from before this field existed -- see item 7).
+function renderToolsUsed(toolsUsed, toolOutcomes) {
   const tools = toolsUsed || [];
   if (!tools.length) {
     return `<div class="tools-used"><span class="tools-used-label">Tools queried:</span> <span class="muted">none</span></div>`;
   }
-  const steps = tools.map((t, i) => `<li class="tool-step"><span class="tool-step-n">${i + 1}</span>${esc(t)}</li>`).join("");
+  const outcomeByTool = {};
+  (toolOutcomes || []).forEach((o) => { outcomeByTool[o.tool] = o; });
+  const hasOutcomes = (toolOutcomes || []).length > 0;
+  const steps = tools.map((t, i) => {
+    const o = outcomeByTool[t];
+    const statusHtml = o
+      ? (o.ok
+          ? `<span class="tool-step-status tool-step-ok">OK</span>`
+          : `<span class="tool-step-status tool-step-fail">FAILED${o.error ? `: ${esc(o.error)}` : ""}</span>`)
+      : "";
+    return `<li class="tool-step"><span class="tool-step-n">${i + 1}</span>${esc(t)} ${statusHtml}</li>`;
+  }).join("");
+  const gapNote = hasOutcomes
+    ? ""
+    : `<p class="muted tools-used-gap">Per-tool success/failure detail is not available for this response
+        (older response shape, before backend/app/ai/schemas.py::InvestigationResult.tool_outcomes existed) --
+        that absence is surfaced here honestly, not hidden.</p>`;
   return `
     <div class="tools-used">
       <span class="tools-used-label">Tools queried (${tools.length}):</span>
       <ol class="tool-steps">${steps}</ol>
-      <p class="muted tools-used-gap">Per-tool success/failure detail is not part of the API response schema
-        (backend/app/ai/schemas.py::InvestigationResult) -- that is a real gap in what's surfaced today, not
-        rendered here as if it existed.</p>
+      ${gapNote}
     </div>`;
 }
 
@@ -2110,6 +2126,41 @@ function transportLabel(transport) {
   return "Unknown (older response or unset)";
 }
 
+// Evidence-limitation/truncation disclosure (item 4/5): server_truncated
+// means the LLM's own response exceeded the stated size limits and had to
+// be capped server-side (schemas.py) -- distinct from the sampling
+// disclosure already embedded per-tool in the raw prompt (not surfaced in
+// the response at all today, since it only affects what the model SAW, not
+// what it said). Rendered only when true -- never shown as a false alarm.
+function renderTruncationDisclosure(d) {
+  if (!d.server_truncated) return "";
+  return `<div class="ai-disabled-note" style="margin-top:8px">
+    <strong>Note:</strong> the AI's response exceeded the stated size limits and was capped server-side
+    (some facts/evidence entries and/or long strings were shortened or dropped) -- this is disclosed, not hidden.
+  </div>`;
+}
+
+// Evidence-integrity warnings (items #1/#2, 2026-10-15): a non-empty list
+// means validate_investigation_result() (backend/app/ai/schemas.py) could
+// not corroborate a specific claim in the text against the actual tool
+// data this investigation retrieved -- either a uniform buying/selling
+// claim against genuinely mixed ask/bid-side flow, or a "several"/"heavy"-
+// style quantified claim backed by too few observed_facts. Rendered as its
+// own prominent, visually distinct warning block -- never folded silently
+// into Limitations, since these are warnings ABOUT the response's own
+// honesty, not a property of the underlying market data.
+function renderEvidenceIntegrityWarnings(warnings) {
+  if (!warnings || !warnings.length) return "";
+  const items = warnings.map((w) => `<li>${esc(w)}</li>`).join("");
+  return `
+    <div class="ai-section ai-integrity-warning">
+      <h4>Evidence Integrity Warnings</h4>
+      <p class="muted">The AI's own wording made a claim this app's validator could not corroborate against the
+        actual tool data retrieved this run. Read the flagged claim(s) above with that caveat in mind.</p>
+      <ul class="ai-list">${items}</ul>
+    </div>`;
+}
+
 function renderInvestigateResult(d, ticker, modeLabel) {
   const simBanner = d.simulated
     ? `<div class="ai-simulated-banner ai-simulated-banner-strong">
@@ -2124,8 +2175,9 @@ function renderInvestigateResult(d, ticker, modeLabel) {
   return `
     ${headerHtml}
     ${simBanner}
+    ${renderTruncationDisclosure(d)}
     ${renderInvestigateProcessSteps()}
-    ${renderToolsUsed(d.tools_used)}
+    ${renderToolsUsed(d.tools_used, d.tool_outcomes)}
     <div class="ai-section">
       <h4>Observed Facts</h4>
       ${renderInvestigateFacts(d.observed_facts)}
@@ -2142,6 +2194,7 @@ function renderInvestigateResult(d, ticker, modeLabel) {
       <h4>Limitations</h4>
       ${renderInvestigateList(d.limitations)}
     </div>
+    ${renderEvidenceIntegrityWarnings(d.evidence_integrity_warnings)}
     <div class="ai-interpretation">
       <h4>AI Interpretation (model's reasoning, not a retrieved fact)</h4>
       <p>${esc(d.ai_interpretation)}</p>

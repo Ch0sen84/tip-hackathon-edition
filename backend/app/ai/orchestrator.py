@@ -94,7 +94,7 @@ def investigate(
     logger.info("synthesis round (round 2) completed for %s", safe_ticker)
     if not isinstance(raw_synthesis, dict):
         raise MalformedAIResponse(f"synthesis round did not return a JSON object (got {type(raw_synthesis).__name__})")
-    result = validate_investigation_result(raw_synthesis, safe_ticker, called_tools)
+    result = validate_investigation_result(raw_synthesis, safe_ticker, called_tools, tool_results)
     result.rejected_tool_selections = rejected_selection
     result.transport = transport
     return result

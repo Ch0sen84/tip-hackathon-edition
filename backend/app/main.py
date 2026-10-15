@@ -890,16 +890,22 @@ def investigate_availability():
     button, and why not, without triggering any network call. Demo mode is
     always available (it only ever serves a static simulated transcript);
     live mode additionally needs both an AI provider key and a UW key."""
+    # Item 5 (2026-10-15): expose the CONFIGURED transport (mcp/rest) here,
+    # before any investigation runs, so the UI can tell the user plainly
+    # which backend will actually execute the real tool calls -- a plain
+    # transport name carries no credential and is safe to disclose. None
+    # for the simulated path (no transport is used -- see simulated.py).
     data = _settings_store.get_all()
     mode = data["mode"]
     if settings.public_demo or mode != "live":
-        return {"available": True, "simulated": True, "reason": None}
+        return {"available": True, "simulated": True, "reason": None, "transport": None}
     ai_key = data.get("ai_api_key")
     if not ai_key:
         return {
             "available": False,
             "simulated": False,
             "reason": "No AI provider key is configured. Add one in Settings to enable Investigate with AI.",
+            "transport": settings.investigate_transport,
         }
     uw_key, _source = _effective_uw_key(data)
     if not uw_key:
@@ -907,8 +913,9 @@ def investigate_availability():
             "available": False,
             "simulated": False,
             "reason": "Live mode requires a Unusual Whales API key (Settings) before Investigate with AI can run.",
+            "transport": settings.investigate_transport,
         }
-    return {"available": True, "simulated": False, "reason": None}
+    return {"available": True, "simulated": False, "reason": None, "transport": settings.investigate_transport}
 
 
 @app.post("/api/investigate/{ticker}")

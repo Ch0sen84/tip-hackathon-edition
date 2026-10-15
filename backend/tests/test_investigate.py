@@ -558,7 +558,7 @@ def test_summarize_tool_result_discloses_pure_recency_when_no_fields_known():
     result = {"tool": "get_insider_activity_by_ticker", "ok": True, "data": data}
     summarized = _summarize_tool_result_for_prompt(result)
     note = summarized["_truncation_note"]
-    assert "no reliable magnitude/direction field" in note
+    assert "no reliable magnitude/direction/sweep field" in note
 
 
 def test_option_trades_diverse_sample_uses_its_own_real_field_names():

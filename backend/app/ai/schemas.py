@@ -9,7 +9,12 @@ from typing import Optional
 
 from pydantic import BaseModel, Field, ValidationError as PydanticValidationError
 
-from .validation import contains_forbidden_prediction_language
+from .validation import (
+    contains_forbidden_prediction_language,
+    contains_unidirectional_claim_without_mixed_disclosure,
+    contains_unsupported_quantified_claim,
+    summarize_execution_side_mix,
+)
 
 # ROOT-CAUSE FIX (2026-10-14): defense in depth for the real NVDA/PLTR
 # truncation bug. The system prompt now asks the model to self-limit
@@ -72,9 +77,29 @@ class InvestigationResult(BaseModel):
     # (array length and/or per-string length) rather than passed through
     # untouched. Never silently hide this -- the UI shows it when true.
     server_truncated: bool = False
+    # Per-tool-call outcome (success/fail) for the real UW calls this
+    # investigation made -- added 2026-10-15 (item 5) so the result view can
+    # show which of the (up to 4) tool calls actually succeeded, rather than
+    # only the aggregate tools_used list. Empty for simulated transcripts
+    # (simulated.py never populates tool_results at all).
+    tool_outcomes: list[dict] = Field(default_factory=list)
+    # Evidence-integrity warnings (added 2026-10-15, items #1/#2): a
+    # non-empty list means the synthesis text made a claim this validator
+    # could not corroborate against the actual tool-result data -- either a
+    # uniform buying/selling claim against genuinely mixed ask/bid-side
+    # evidence, or a "several"/"heavy"/"numerous"-style quantified claim
+    # backed by fewer than MIN_RECORDS_FOR_QUANTIFIED_CLAIM observed_facts.
+    # Flagged, not silently dropped -- the UI must show this prominently
+    # (see frontend/app.core.js renderInvestigateResult).
+    evidence_integrity_warnings: list[str] = Field(default_factory=list)
 
 
-def validate_investigation_result(raw: dict, ticker: str, called_tools: list[str]) -> InvestigationResult:
+def validate_investigation_result(
+    raw: dict,
+    ticker: str,
+    called_tools: list[str],
+    tool_results: list[dict] | None = None,
+) -> InvestigationResult:
     """Validate the LLM's round-2 synthesis output against the required
     shape, then apply the fact/interpretation separation guardrails:
 
@@ -153,17 +178,54 @@ def validate_investigation_result(raw: dict, ticker: str, called_tools: list[str
     if capped_interpretation != interpretation:
         truncated = True
 
+    supporting_evidence = _clean_str_list("supporting_evidence", MAX_SUPPORTING_EVIDENCE)
+    conflicting_observations = _clean_str_list("conflicting_observations", MAX_CONFLICTING_OBSERVATIONS)
+    limitations = _clean_str_list("limitations", MAX_LIMITATIONS)
+
+    # --- Evidence-integrity checks (items #1/#2) against the ACTUAL tool
+    # data, not just the text's own internal consistency -- see
+    # validation.py's module docstring for the real NVDA findings these
+    # catch. `tool_results` is optional (None for callers that haven't been
+    # updated, or in tests exercising schema shape alone) -- skip silently
+    # when not provided rather than raising.
+    integrity_warnings: list[str] = []
+    side_mix = summarize_execution_side_mix(tool_results) if tool_results is not None else {"ask": 0, "bid": 0, "unknown": 0}
+    texts_to_check = [capped_interpretation, *supporting_evidence, *conflicting_observations]
+    for text in texts_to_check:
+        if contains_unidirectional_claim_without_mixed_disclosure(text, side_mix):
+            integrity_warnings.append(
+                f"Unsupported directional claim: \"{text}\" asserts a uniform buying/selling direction, but the "
+                f"actual get_flow_alerts data this investigation retrieved was mixed ({side_mix['ask']} ask-side, "
+                f"{side_mix['bid']} bid-side) -- read this as mixed activity, not a one-sided flow."
+            )
+    accepted_fact_count = len(accepted_facts)
+    for text in texts_to_check:
+        if contains_unsupported_quantified_claim(text, accepted_fact_count):
+            integrity_warnings.append(
+                f"Unsupported quantified claim: \"{text}\" implies broad corroboration, but only "
+                f"{accepted_fact_count} observed_facts record(s) actually survived validation this investigation -- "
+                "treat this as a single/small-sample observation, not a widespread pattern."
+            )
+
+    tool_outcomes = [
+        {"tool": r.get("tool"), "ok": bool(r.get("ok")), "error": (None if r.get("ok") else r.get("error"))}
+        for r in (tool_results or [])
+        if isinstance(r, dict)
+    ]
+
     try:
         return InvestigationResult(
             ticker=ticker,
             tools_used=list(called_tools),
             observed_facts=accepted_facts,
-            supporting_evidence=_clean_str_list("supporting_evidence", MAX_SUPPORTING_EVIDENCE),
-            conflicting_observations=_clean_str_list("conflicting_observations", MAX_CONFLICTING_OBSERVATIONS),
-            limitations=_clean_str_list("limitations", MAX_LIMITATIONS),
+            supporting_evidence=supporting_evidence,
+            conflicting_observations=conflicting_observations,
+            limitations=limitations,
             ai_interpretation=capped_interpretation,
             rejected_observed_facts=rejected_facts,
             server_truncated=truncated,
+            tool_outcomes=tool_outcomes,
+            evidence_integrity_warnings=integrity_warnings,
         )
     except PydanticValidationError as e:
         raise MalformedAIResponse(f"synthesis response failed schema validation: {e}") from e

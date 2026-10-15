@@ -261,6 +261,37 @@ async function runInvestigate(ticker, navSeq, modeLabel) {
   }
 }
 
+// Item 5 (2026-10-15): a confirmation step before the paid "Investigate
+// with AI" action actually fires -- a real two-click confirm, not just a
+// disabled-state check, and NOT a once-per-session dismissal: every single
+// click sequence starts back at the unconfirmed state. First click only
+// arms the button (changes its own label/state); the real fetch only
+// happens on the SECOND click while still armed. Any other UI action that
+// re-renders this card (a fresh ticker load, a mode switch) naturally
+// resets this by re-running loadInvestigateSection from scratch -- there is
+// no persisted "already confirmed" flag anywhere.
+function wireInvestigateConfirm(ticker, navSeq, modeLabel) {
+  const btn = document.getElementById("runInvestigateBtn");
+  if (!btn) return;
+  const originalLabel = btn.textContent;
+  let armed = false;
+  const disarm = () => {
+    armed = false;
+    btn.textContent = originalLabel;
+    btn.classList.remove("btn-confirm-armed");
+  };
+  btn.addEventListener("click", () => {
+    if (!armed) {
+      armed = true;
+      btn.textContent = `Confirm: this makes a real call (click again to run)`;
+      btn.classList.add("btn-confirm-armed");
+      return;
+    }
+    disarm();
+    runInvestigate(ticker, navSeq, modeLabel);
+  });
+}
+
 async function loadInvestigateSection(ticker, navSeq) {
   const el = document.getElementById("investigateSection");
   try {
@@ -276,6 +307,13 @@ async function loadInvestigateSection(ticker, navSeq) {
         </div>`;
       return;
     }
+    // Item 5: disclose the CONFIGURED transport before anything runs, so
+    // the user knows whether genuine MCP or the REST fallback will
+    // actually execute the real UW tool calls -- avail.transport carries
+    // no credential, just the "mcp"/"rest" config switch (main.py).
+    const transportNote = avail.simulated
+      ? ""
+      : `<p class="ai-disabled-note">Configured transport: <strong>${esc(transportLabel(avail.transport))}</strong></p>`;
     const simNote = avail.simulated
       ? `<p class="ai-disabled-note">Demo mode: running this will show a pre-written simulated transcript, not a real AI/UW call.</p>`
       : `<p class="ai-disabled-note">Live mode: this will make a few bounded, read-only Unusual Whales lookups plus two AI calls using your saved keys, entirely from your local backend. Bounded, read-only investigation; the full LLM-directed tool-selection/synthesis workflow has not yet been verified end-to-end with a real provider -- see README.</p>`;
@@ -284,10 +322,11 @@ async function loadInvestigateSection(ticker, navSeq) {
         <h3>Investigate with AI</h3>
         ${renderInvestigateHeader(ticker, modeLabel)}
         ${simNote}
+        ${transportNote}
         <button class="btn" id="runInvestigateBtn">Investigate ${esc(ticker)} with AI</button>
         <div id="investigateBody" style="margin-top:10px"></div>
       </div>`;
-    document.getElementById("runInvestigateBtn").addEventListener("click", () => runInvestigate(ticker, navSeq, modeLabel));
+    wireInvestigateConfirm(ticker, navSeq, modeLabel);
   } catch (err) {
     el.innerHTML = `<div class="ai-card"><h3>Investigate with AI</h3><p class="ai-disabled-note">Unavailable: ${esc(err.message)}</p></div>`;
   }

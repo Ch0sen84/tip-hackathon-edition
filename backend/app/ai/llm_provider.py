@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Optional, Protocol
+from typing import Any, Optional, Protocol
 
 import requests
 
@@ -301,7 +301,30 @@ Hard rules, no exceptions:
 - If the tool data is sparse, empty, or inconclusive, say so plainly in "limitations" -- do not invent facts.
 - NEVER drop or omit genuinely conflicting evidence to stay within the size limits above -- if something
   material doesn't fit, shorten a less important supporting point instead, or note in "limitations" that
-  more conflicting signal exists than could be enumerated here."""
+  more conflicting signal exists than could be enumerated here.
+
+EXECUTION-SIDE ACCURACY (real bug found in production -- do not repeat it): get_flow_alerts records carry
+real ask-side vs bid-side premium fields (total_ask_side_prem / total_bid_side_prem, or total_ask_premium /
+total_bid_premium). Ask-side execution is generally associated with BUYING pressure; bid-side with SELLING
+pressure. Before describing any options-flow activity with a single directional word ("buying", "selling",
+"accumulation", "distribution"), you MUST check whether the specific records you are citing actually agree
+on side:
+- If every cited record for that claim is ask-side (or every one is bid-side), the single directional word is
+  accurate -- use it.
+- If the cited records DISAGREE on side (some ask-side, some bid-side), you MUST NOT collapse them into one
+  directional word. Say so honestly instead, e.g. "mixed ask/bid activity (2 ask-side, 1 bid-side)" or
+  "no clear direction -- split between ask-side and bid-side execution". Never describe genuinely mixed
+  evidence as uniform "buying" or "selling".
+- If a record's ask/bid split is missing or zero on both sides, its side is "unknown" -- do not guess a side
+  for it, and do not let an unknown-side record silently get folded into either direction.
+
+CLAIM-SUPPORT ACCURACY (real bug found in production -- do not repeat it): every factual claim you make,
+especially one using a quantifying word like "several", "many", "heavy", "numerous", or "multiple" (e.g.
+"heavy near-dated put prints at several strikes"), must be traceable to that many ACTUAL distinct records
+you are citing in observed_facts. Do not write "several strikes" if you are only actually citing one or two
+records. When you are not sure you have enough corroborating records for a quantified claim, say so plainly
+instead -- e.g. "a single large put print" rather than implying broader support than you were actually
+given. When genuinely uncertain, disclose the uncertainty in "limitations" rather than writing around it."""
 
 
 # How many raw records of a list-shaped tool result to keep in the prompt
@@ -336,6 +359,15 @@ DIRECTION_FIELD_BY_TOOL = {
     "get_flow_alerts": "type",          # "call" / "put"
     "get_option_trades": "option_type",  # "call" / "put"
 }
+# REAL BUG FIX (2026-10-15, item #3): a real NVDA investigation's 8 sampled
+# flow alerts were ALL non-sweep, even though the larger available response
+# contained sweep activity -- recency + magnitude + minority-direction alone
+# don't track sweep-vs-non-sweep at all, so a sweep record with ordinary
+# premium/direction could be dropped entirely. Real field confirmed by
+# scan_service.py's own live-mode usage: "has_sweep" (boolean).
+SWEEP_FIELD_BY_TOOL = {
+    "get_flow_alerts": "has_sweep",
+}
 
 
 def _as_float(v):
@@ -362,6 +394,7 @@ def _diverse_sample_records(tool: Optional[str], data: list) -> list:
     cap = MAX_RECORDS_PER_TOOL_IN_PROMPT
     mag_field = MAGNITUDE_FIELD_BY_TOOL.get(tool)
     dir_field = DIRECTION_FIELD_BY_TOOL.get(tool)
+    sweep_field = SWEEP_FIELD_BY_TOOL.get(tool)
 
     selected: list = []
     selected_ids: set = set()
@@ -376,8 +409,12 @@ def _diverse_sample_records(tool: Optional[str], data: list) -> list:
         selected_ids.add(k)
         return True
 
-    # 1) up to 4 most recent (data is already newest-first)
-    for i, rec in enumerate(data[:4]):
+    # 1) up to 3 most recent (data is already newest-first). Reduced from a
+    # flat 4 (2026-10-15) to make deterministic room for step 2b below
+    # (sweep representation) within the same total cap -- the newest record
+    # not explicitly reserved here is still very likely to be recovered by
+    # the recency backfill at the end if nothing else needs its slot.
+    for i, rec in enumerate(data[:3]):
         _add(rec, i)
 
     # 2) up to 2 highest-magnitude (across the FULL list, not just the
@@ -393,6 +430,24 @@ def _diverse_sample_records(tool: Optional[str], data: list) -> list:
                 break
             if _add(rec, idx):
                 picked += 1
+
+    # 2b) up to 2 sweep-flagged records (highest-magnitude sweep first, when
+    # a magnitude field is also known) -- ONLY runs when this tool actually
+    # carries a sweep flag AND at least one real sweep record exists in the
+    # full response; never fabricates a sweep that isn't there. This is the
+    # direct fix for the real bug: sweep activity existing in the response
+    # but never making it into the bounded sample given to the LLM.
+    if sweep_field:
+        sweeps = [(i, r) for i, r in enumerate(data) if r.get(sweep_field)]
+        if sweeps:
+            if mag_field:
+                sweeps.sort(key=lambda pair: -(_as_float(pair[1].get(mag_field)) or 0))
+            picked = 0
+            for idx, rec in sweeps:
+                if picked >= 2:
+                    break
+                if _add(rec, idx):
+                    picked += 1
 
     # 3) up to 2 minority-direction records (e.g. a put among mostly
     # calls, or vice versa) -- the genuinely contradictory signal this
@@ -427,18 +482,79 @@ def _diverse_sample_records(tool: Optional[str], data: list) -> list:
     return selected
 
 
+# ---------------------------------------------------------------------------
+# Nested-structure/character budget (added 2026-10-15, item #4). ROOT CAUSE:
+# the real NVDA synthesis call measured ~55K input tokens. Record-count
+# capping (MAX_RECORDS_PER_TOOL_IN_PROMPT) alone does not bound the SIZE of
+# an individual record -- a deeply nested sub-object or a very long string
+# value inside even one of the (already capped) 8 records per tool can still
+# blow up the prompt. These bound the SHAPE of every record (depth, string
+# length, list/dict fan-out), not just how many records are kept, applied
+# unconditionally (even to the handful of records below the count cap) so a
+# small-count-but-deeply-nested response can't sneak past the record-count
+# guard that only looks at list length.
+# ---------------------------------------------------------------------------
+MAX_NESTED_DEPTH = 3
+MAX_STR_CHARS_IN_NESTED_VALUE = 300
+MAX_LIST_ITEMS_IN_NESTED_VALUE = 5
+MAX_DICT_KEYS_IN_NESTED_VALUE = 20
+_NESTED_STR_TRUNCATION_SUFFIX = "...[truncated]"
+
+# Final hard backstop on the whole assembled tool-results JSON blob, applied
+# in build_synthesis_user_prompt AFTER per-record bounding above. Per-record
+# bounding should make this a no-op in the overwhelming majority of real
+# cases; this exists only so a pathological response (e.g. many tools each
+# individually near their own bound) can never silently exceed a defensible
+# total prompt size. ~40K characters is comfortably under the budget that
+# produced the real ~55K-token NVDA call (tokens run roughly 1 per 4 chars
+# for English/JSON text, so this is a materially smaller real cap, not a
+# cosmetic one).
+MAX_TOTAL_SYNTHESIS_PROMPT_CHARS = 40_000
+
+
+def _bound_nested_value(v: Any, depth: int = 0) -> Any:
+    """Recursively shrink an arbitrary JSON-shaped value to the limits
+    above. Never raises; any value type not explicitly handled (int, float,
+    bool, None) is returned unchanged."""
+    if isinstance(v, str):
+        if len(v) > MAX_STR_CHARS_IN_NESTED_VALUE:
+            return v[: MAX_STR_CHARS_IN_NESTED_VALUE - len(_NESTED_STR_TRUNCATION_SUFFIX)] + _NESTED_STR_TRUNCATION_SUFFIX
+        return v
+    if isinstance(v, list):
+        if depth >= MAX_NESTED_DEPTH:
+            return f"[list of {len(v)} items, omitted beyond nesting depth {MAX_NESTED_DEPTH}]"
+        bounded = [_bound_nested_value(item, depth + 1) for item in v[:MAX_LIST_ITEMS_IN_NESTED_VALUE]]
+        if len(v) > MAX_LIST_ITEMS_IN_NESTED_VALUE:
+            bounded.append(f"...{len(v) - MAX_LIST_ITEMS_IN_NESTED_VALUE} more items omitted")
+        return bounded
+    if isinstance(v, dict):
+        if depth >= MAX_NESTED_DEPTH:
+            return f"{{object with {len(v)} keys, omitted beyond nesting depth {MAX_NESTED_DEPTH}}}"
+        keys = list(v.keys())[:MAX_DICT_KEYS_IN_NESTED_VALUE]
+        out = {k: _bound_nested_value(v[k], depth + 1) for k in keys}
+        if len(v) > MAX_DICT_KEYS_IN_NESTED_VALUE:
+            out["_omitted_keys_count"] = len(v) - MAX_DICT_KEYS_IN_NESTED_VALUE
+        return out
+    return v
+
+
 def _summarize_tool_result_for_prompt(result: dict) -> dict:
     data = result.get("data")
     if isinstance(data, list) and len(data) > MAX_RECORDS_PER_TOOL_IN_PROMPT:
         sampled = _diverse_sample_records(result.get("tool"), data)
-        has_strategy = result.get("tool") in MAGNITUDE_FIELD_BY_TOOL or result.get("tool") in DIRECTION_FIELD_BY_TOOL
+        bounded_sampled = [_bound_nested_value(r) for r in sampled]
+        has_strategy = (
+            result.get("tool") in MAGNITUDE_FIELD_BY_TOOL
+            or result.get("tool") in DIRECTION_FIELD_BY_TOOL
+            or result.get("tool") in SWEEP_FIELD_BY_TOOL
+        )
         strategy_desc = (
-            "most recent + highest-magnitude + minority-direction outliers, deduped"
-            if has_strategy else "most recent (no reliable magnitude/direction field for this tool)"
+            "most recent + highest-magnitude + sweep-flagged + minority-direction outliers, deduped"
+            if has_strategy else "most recent (no reliable magnitude/direction/sweep field for this tool)"
         )
         return {
             **result,
-            "data": sampled,
+            "data": bounded_sampled,
             "_truncated_from": len(data),
             "_truncation_note": (
                 f"bounded diverse sample of {len(sampled)} of {len(data)} real records returned by "
@@ -446,16 +562,51 @@ def _summarize_tool_result_for_prompt(result: dict) -> dict:
                 "may still be materially relevant and must not be treated as nonexistent"
             ),
         }
+    if isinstance(data, list):
+        bounded = [_bound_nested_value(r) for r in data]
+        if bounded != data:
+            return {
+                **result,
+                "data": bounded,
+                "_nested_content_bounded": True,
+                "_truncation_note": (
+                    "some deeply-nested or oversized fields within these records were shortened to keep the "
+                    "prompt bounded; the record COUNT itself was not reduced"
+                ),
+            }
+        return result
+    if isinstance(data, dict):
+        bounded = _bound_nested_value(data)
+        if bounded != data:
+            return {**result, "data": bounded, "_nested_content_bounded": True}
+        return result
     return result
 
 
 def build_synthesis_user_prompt(ticker: str, tool_results: list[dict]) -> str:
     called_tools = [r["tool"] for r in tool_results]
     summarized = [_summarize_tool_result_for_prompt(r) for r in tool_results]
+    body = json.dumps(summarized, indent=2, default=str)
+    # Final hard backstop (item #4): per-record bounding above should make
+    # this a no-op in the overwhelming majority of real cases, but never
+    # silently let a pathological combination of tool results (several
+    # tools each individually near their own bound) exceed a defensible
+    # total prompt size. Compact (no indent) first before resorting to a
+    # hard character cut, since indentation alone can account for a lot of
+    # the size; disclose honestly if a hard cut was still needed.
+    if len(body) > MAX_TOTAL_SYNTHESIS_PROMPT_CHARS:
+        body = json.dumps(summarized, default=str)
+    if len(body) > MAX_TOTAL_SYNTHESIS_PROMPT_CHARS:
+        cut_chars = len(body) - MAX_TOTAL_SYNTHESIS_PROMPT_CHARS
+        body = (
+            body[:MAX_TOTAL_SYNTHESIS_PROMPT_CHARS]
+            + f"... [HARD TRUNCATION: {cut_chars} more characters of raw tool-result JSON were cut to stay "
+            "within the total prompt budget -- treat this payload as incomplete, not exhaustive]"
+        )
     return (
         f"Ticker: {ticker}\n"
         f"Tools actually called this investigation: {called_tools}\n"
-        f"Raw tool results:\n{json.dumps(summarized, indent=2, default=str)}\n\n"
+        f"Raw tool results:\n{body}\n\n"
         "Produce the JSON object described in the system prompt. Respond with the JSON object only. "
         "Stay within the stated size limits -- a complete, concise response is required, not an exhaustive one."
     )
