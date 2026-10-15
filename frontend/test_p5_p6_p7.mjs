@@ -138,10 +138,16 @@ async function main() {
       `evidenceIdx=${evidenceIdx} investigateIdx=${investigateIdx} lifecycleIdx=${lifecycleIdx}`);
   });
   check("raw JSON stays inside a collapsed <details> after the evidence/timeline sections", () => {
+    // 2026-10-15 (item #2): the old prominent "Raw adapter data" <details>
+    // was replaced by a readable Evidence Detail summary, with the full
+    // raw JSON demoted into a nested, clearly-labeled "Developer / Debug"
+    // <details> -- still collapsed, still reachable, just de-prioritized
+    // and relabeled; this test now checks for that real label.
     const detailsIdx = fluxHtml.lastIndexOf("<details");
     const evidenceIdx = fluxHtml.indexOf("evidence-primary-card");
     assert.ok(detailsIdx > evidenceIdx, "raw <details> appears before the evidence card");
-    assert.ok(fluxHtml.slice(detailsIdx).includes("Raw adapter data"));
+    assert.ok(fluxHtml.slice(detailsIdx).includes("Developer / Debug"));
+    assert.ok(fluxHtml.slice(detailsIdx).includes("raw adapter JSON"));
   });
   check("every gate item in the rendered output carries a why-this-matters explanation", () => {
     for (const [name] of Object.entries(fluxDetail.gates)) {

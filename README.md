@@ -287,6 +287,47 @@ tools/check_deployment_binding.sh <your-compose-project-name>
 This fails loudly if the container is published on `0.0.0.0`/`::` (every
 interface) unless you explicitly set `ALLOW_PUBLIC_BIND=1` first.
 
+## Checking for updates
+
+Settings → **Application Updates** shows the installed build and can
+check the public GitHub repo for newer commits. This is a **check-and-
+inform feature only** -- it never runs `git`, Docker, or anything
+destructive by itself; updating is always a manual or AI-agent-assisted
+step you run yourself (see the "Copy AI-agent update prompt" button,
+which gives you a ready-to-paste prompt that explicitly preserves
+`.env`, the `tip-data` volume, and your saved credentials).
+
+**How the installed version is known.** There is no `.git` directory
+inside the running container (the Dockerfile only `COPY`s source), so
+the commit can't be discovered at runtime. It is baked in at **image
+build time** instead, via Docker build ARGs written to a plain
+`/srv/VERSION` file (see `backend/app/version.py`):
+
+```bash
+# Build with real version info instead of plain `docker compose build`:
+tools/build_with_version.sh
+# ...or equivalently:
+BUILD_COMMIT=$(git rev-parse HEAD) BUILD_VERSION=$(git describe --tags --always) \
+  docker compose build
+```
+
+If you build with a plain `docker compose build` (no version args), the
+app honestly shows "unknown installed version" rather than guessing.
+
+**The four states** `GET /api/settings/update-check` (and the Settings
+UI) can report:
+
+| State | Meaning |
+|---|---|
+| **Up to date** | The installed commit is identical to (or ahead of) the latest commit on `main`. |
+| **Update available** | GitHub confirms `main` has commits the installed commit doesn't (via GitHub's compare API, not just "the hashes differ"). |
+| **Unable to check** | A network failure, GitHub rate limit, a 404 for an unrecognized commit, or a diverged history that can't be cleanly compared. Never silently retried. |
+| **Unknown installed version** | No resolvable commit was baked in at build time (see above) -- nothing to compare. |
+
+The check is **one unauthenticated HTTPS call** to GitHub's public REST
+API per click (never automatic, never polled) -- no GitHub token and no
+app credential of any kind is ever sent.
+
 ## Install with an AI Coding Agent
 
 This repo includes `INSTALL_AGENT.md`, a standalone install walkthrough

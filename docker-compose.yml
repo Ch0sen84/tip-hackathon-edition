@@ -1,6 +1,17 @@
 services:
   tip-hackathon:
-    build: .
+    build:
+      context: .
+      # Build-time version/commit info (2026-10-15) -- see Dockerfile's
+      # ARG comment and backend/app/version.py. Pass real values with,
+      # e.g.: BUILD_COMMIT=$(git rev-parse HEAD) BUILD_VERSION=$(git
+      # describe --tags --always) docker compose build. Left at the
+      # default "unknown" if unset, which the app shows honestly as
+      # "unknown installed version" rather than guessing.
+      args:
+        BUILD_COMMIT: ${BUILD_COMMIT:-unknown}
+        BUILD_VERSION: ${BUILD_VERSION:-unknown}
+        BUILD_DATE: ${BUILD_DATE:-unknown}
     ports:
       # Configurable bind address/port, SAFE-BY-DEFAULT (loopback only).
       # See .env.example's BIND_HOST/BIND_PORT for how to open this to your

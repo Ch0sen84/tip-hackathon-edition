@@ -96,12 +96,21 @@ async function loadRadar() {
     // regardless of qualification; merge it in, deduped, so they stay
     // selectable and loadable via /api/ticker/{t} (which already works
     // for any ticker in the adapter's universe).
+    // REAL BUG FIX (2026-10-15, Chad's live-mode item #13): /api/scenarios
+    // is explicitly demo-mode-only server-side (see its docstring in
+    // main.py) -- calling it in Live Mode was a pointless extra request
+    // every single Radar load, always resulting in nothing useful (no
+    // demo scenarios exist to merge in while running against the real
+    // UW API). Skipped entirely when _currentMode is "live"; Demo Mode
+    // behavior is completely unchanged.
     let scenarioTickers = [];
-    try {
-      const scenariosResp = await apiGet("/api/scenarios");
-      scenarioTickers = (scenariosResp.scenarios || []).map((s) => s.ticker);
-    } catch (e) {
-      /* non-fatal: select falls back to Radar-qualifying tickers only */
+    if (_currentMode !== "live") {
+      try {
+        const scenariosResp = await apiGet("/api/scenarios");
+        scenarioTickers = (scenariosResp.scenarios || []).map((s) => s.ticker);
+      } catch (e) {
+        /* non-fatal: select falls back to Radar-qualifying tickers only */
+      }
     }
     const radarTickers = [...data.highest, ...data.other].map((e) => e.ticker);
     const allTickers = Array.from(new Set([...radarTickers, ...scenarioTickers])).sort();
@@ -372,11 +381,61 @@ async function loadSettings() {
       if (testAiBtn) testAiBtn.addEventListener("click", testAiKey);
       const testMcpBtn = document.getElementById("testMcpBtn");
       if (testMcpBtn) testMcpBtn.addEventListener("click", testMcpConnection);
+    }
+    wireUpdatesSection(d);
+    // Watchlist editor now lives on Market Radar's "My Watchlist" panel,
+    // not Settings (2026-10-15 move) -- re-rendered from this same
+    // /api/settings payload every time loadSettings() runs (including
+    // after every add/remove save, see initWatchlistEditor() below).
+    const wlRoot = document.getElementById("radarWatchlistEditor");
+    if (wlRoot) {
+      wlRoot.innerHTML = renderWatchlistEditor(d);
       initWatchlistEditor();
     }
     return d;
   } catch (err) {
     document.getElementById("modePill").textContent = "mode: unknown";
+  }
+}
+
+// Application Updates (Settings): "Check for Updates" makes ONE explicit,
+// user-triggered GET /api/settings/update-check call -- never fetched
+// automatically on page load, so this app never makes an unprompted
+// outbound call to GitHub. Copy-prompt uses the clipboard API with a
+// manual-select fallback for browsers/contexts where it's unavailable.
+function wireUpdatesSection(d) {
+  const checkBtn = document.getElementById("checkUpdatesBtn");
+  const resultEl = document.getElementById("updateCheckResult");
+  if (checkBtn && resultEl) {
+    checkBtn.addEventListener("click", async () => {
+      checkBtn.disabled = true;
+      resultEl.textContent = "Checking GitHub for newer commits...";
+      try {
+        const result = await apiGet("/api/settings/update-check");
+        resultEl.innerHTML = renderUpdateCheckResult(result);
+      } catch (err) {
+        resultEl.textContent = `Check failed: ${err.message}`;
+      } finally {
+        checkBtn.disabled = false;
+      }
+    });
+  }
+  const copyBtn = document.getElementById("copyUpdatePromptBtn");
+  const copyStatus = document.getElementById("copyUpdatePromptStatus");
+  if (copyBtn && copyStatus) {
+    copyBtn.addEventListener("click", async () => {
+      const text = buildAgentUpdatePrompt(d.build);
+      try {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          await navigator.clipboard.writeText(text);
+          copyStatus.textContent = "Copied to clipboard.";
+        } else {
+          throw new Error("Clipboard API unavailable");
+        }
+      } catch (err) {
+        copyStatus.textContent = "Could not copy automatically -- select and copy the prompt manually.";
+      }
+    });
   }
 }
 

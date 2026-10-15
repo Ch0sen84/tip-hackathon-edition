@@ -36,6 +36,12 @@
       </div>
 
       <div id="watchlistRadarSection">
+      <!-- Watchlist editor (moved here 2026-10-15 from the Settings page,
+           per Chad's live-mode feedback -- same controls, same
+           /api/settings/watchlist persistence, same 20-symbol limit;
+           see renderWatchlistEditor()/initWatchlistEditor(). Settings no
+           longer has a second copy of this editor. -->
+      <div id="radarWatchlistEditor"></div>
       <div class="status-strip">
         <span id="radarStatus">Loading Market Radar...</span>
         <button class="btn-link" id="refreshRadar">refresh</button>

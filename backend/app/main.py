@@ -54,6 +54,8 @@ from .core import scan_service, tip_evidence
 from .core.candles import build_markers
 from .settings_store import MAX_WATCHLIST_SIZE, SettingsStore, last4
 from .storage import QualifyingDaysStore
+from . import update_check as _update_check
+from . import version as _version
 
 app = FastAPI(title="TIP Hackathon Edition", version="0.1.0")
 
@@ -267,6 +269,12 @@ def get_settings():
             "tickers": _settings_store.get_watchlist(default=settings.live_watchlist),
             "max_size": MAX_WATCHLIST_SIZE,
         },
+        # Application Updates (2026-10-15): bundled here too so Settings
+        # can render the "Installed version" line from the same call it
+        # already makes -- no network call involved (see version.py).
+        # The actual GitHub check is a separate, explicitly-triggered
+        # GET /api/settings/update-check (never auto-fetched).
+        "build": {**_version.get_build_info(), "repo_url": f"https://github.com/{_update_check.GITHUB_REPO}"},
     }
 
 
@@ -462,6 +470,27 @@ def test_mcp():
     return {**result, "proves_ai_synthesis_works": False}
 
 
+@app.get("/api/settings/version")
+def get_version():
+    """Build-time version/commit info (see version.py docstring for why
+    this can't just shell out to `git` inside the running container). No
+    network call -- safe to fetch on every Settings page load."""
+    info = _version.get_build_info()
+    return {**info, "repo_url": f"https://github.com/{_update_check.GITHUB_REPO}"}
+
+
+@app.get("/api/settings/update-check")
+def get_update_check():
+    """Checks the PUBLIC GitHub repo for newer commits than the baked-in
+    installed commit. ONE unauthenticated outbound call to GitHub per
+    request -- no credential of this app's is ever sent. Deliberately not
+    called automatically by the frontend; the user must click "Check for
+    Updates". Never raises: any network/rate-limit/shape failure comes
+    back as status=unable_to_check, see update_check.py."""
+    info = _version.get_build_info()
+    return _update_check.check_for_updates(info.get("commit"))
+
+
 @app.get("/api/radar")
 def radar():
     """Market Radar: scan every ticker in the adapter's universe and return
@@ -543,12 +572,66 @@ class DiscoverFiltersBody(BaseModel):
     limit: int = 20  # also hard-clamped server-side by the adapter regardless of this value
 
 
+def _coerce_number(v):
+    """UW's live screener sometimes returns numeric fields as strings
+    (confirmed from Chad's real Live Mode test) -- never trust a raw
+    value's Python type. Returns a float, or None when the value is
+    missing/unparseable (never a guessed 0)."""
+    if v is None:
+        return None
+    if isinstance(v, bool):
+        return None
+    if isinstance(v, (int, float)):
+        return float(v)
+    if isinstance(v, str):
+        try:
+            return float(v.strip())
+        except ValueError:
+            return None
+    return None
+
+
+def _normalize_discovery_candidate(raw: dict) -> dict:
+    """Normalizes ONE raw /api/screener/stocks row into the shape this
+    app's ranking/frontend rely on. Fixes two real bugs found in Chad's
+    live-mode test:
+      * UW's real per-day percent-change field is `one_day_perc`, not
+        `change` (this app previously read a field UW doesn't send,
+        which is why change always rendered n/a in live mode). `change`
+        is kept as a defensive fallback only, in case an older/synthetic
+        shape still uses it.
+      * UW returns some numeric fields (net_premium, call/put volume,
+        iv_rank, repeated_hits) as strings on at least some responses --
+        coerced to float here rather than left to break arithmetic later.
+    Also carries through `is_index` (real screener rows can be index
+    instruments, e.g. SPXW) and UW's own per-row snapshot `date` (renamed
+    `source_date` so it's never confused with this app's OWN fetch
+    timestamp, `snapshot_at`, set by discover_candidates() -- see Chad's
+    item #8). Never invents a field the row didn't actually have."""
+    out = dict(raw)
+    out["ticker"] = raw.get("ticker") or raw.get("symbol")
+    out["net_premium"] = _coerce_number(raw.get("net_premium"))
+    out["call_volume"] = _coerce_number(raw.get("call_volume"))
+    out["put_volume"] = _coerce_number(raw.get("put_volume"))
+    out["iv_rank"] = _coerce_number(raw.get("iv_rank"))
+    out["repeated_hits"] = _coerce_number(raw.get("repeated_hits"))
+    change_pct = raw.get("one_day_perc")
+    if change_pct is None:
+        change_pct = raw.get("change")  # defensive fallback only -- one_day_perc is the real field
+    out["change_percent"] = _coerce_number(change_pct)
+    out["is_index"] = bool(raw.get("is_index")) if raw.get("is_index") is not None else False
+    out["source_date"] = raw.get("date")
+    return out
+
+
 def _rank_discovery_candidates(candidates: list) -> list:
     """Rank by |net_premium| magnitude primarily, repeated_hits as a
     tiebreaker -- a sensible, documented, non-mysterious ranking. Never
-    alters the raw candidate dicts; only reorders them."""
+    alters the raw candidate dicts; only reorders them. Candidates are
+    expected to already be normalized (see _normalize_discovery_candidate)
+    so net_premium/repeated_hits are real floats, never a raw string."""
     def _key(c: dict):
-        return (abs(float(c.get("net_premium") or 0)), int(c.get("repeated_hits") or 0))
+        return (abs(float(c.get("net_premium") or 0)), float(c.get("repeated_hits") or 0))
     return sorted(candidates, key=_key, reverse=True)
 
 
@@ -573,13 +656,24 @@ def radar_discover(body: DiscoverFiltersBody):
         "limit": body.limit,
     }
     result = adapter.discover_candidates(filters)
-    candidates = _rank_discovery_candidates(result.get("candidates") or [])
+    normalized = [_normalize_discovery_candidate(c) for c in (result.get("candidates") or [])]
+    candidates = _rank_discovery_candidates(normalized)
     for c in candidates:
         # Explicit state model (item 1c of the Market Discovery spec):
         # a raw screener row is ALWAYS "candidate" here -- never
         # "evaluating"/"evaluated"/a signal_engine state. Those only
         # ever come from a real GET /api/ticker/{ticker} call.
         c["discovery_state"] = "candidate"
+        # Chad's item #10: a real screener row can be an index instrument
+        # (observed: SPXW with is_index=true) -- the per-ticker
+        # scan_service/signal_engine pipeline this app's "Evaluate in TIP"
+        # reuses is built and tested against equities (flow-alert/dark-
+        # pool/stock-state calls keyed by a stock ticker), never verified
+        # against an index/derivative symbol. Rather than silently offer
+        # an action that may error or produce meaningless gates for an
+        # unsupported instrument type, mark it explicitly so the frontend
+        # can disable Evaluate for it instead of guessing it's safe.
+        c["evaluate_supported"] = not c.get("is_index")
     return {
         "candidates": candidates,
         "count": len(candidates),
