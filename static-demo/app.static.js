@@ -149,6 +149,20 @@ initTickerCombo((rawText) => {
   if (t) navigateToTicker(t, loadTickerDetail);
 });
 
+// Sidebar ticker-jump search (production's .cmd-search pattern), same
+// wiring convention as the local/live edition's app.live.js -- reuses
+// the same navigateToTicker()/loadTickerDetail, not a parallel path.
+const sidebarJumpInput = document.getElementById("sidebarTickerJump");
+if (sidebarJumpInput) {
+  sidebarJumpInput.addEventListener("keydown", (ev) => {
+    if (ev.key !== "Enter") return;
+    const t = (sidebarJumpInput.value || "").trim().toUpperCase();
+    if (!t) return;
+    navigateToTicker(t, loadTickerDetail);
+    sidebarJumpInput.value = "";
+  });
+}
+
 // Bootstrap: same URL-first scheme as the live edition (app.live.js) --
 // read the URL (view=.../ticker=..., or the legacy bare #ticker=XXX) and
 // land on that view+ticker, so a refresh or a directly-pasted deep link

@@ -527,6 +527,15 @@ function renderCard(entry) {
     </div>`;
 }
 
+// Evidence-family text ported from production's own typographic (not
+// pill-background) convention for category identity -- see .cat-label
+// in styles.css and entryFamilyTags() above for the real category data.
+function renderFamilyLabel(entry) {
+  const tags = entryFamilyTags(entry);
+  if (!tags.length) return `<span class="muted">n/a</span>`;
+  return tags.map((t) => `<span class="cat-label cat-${esc(t)}">${esc(RADAR_FAMILY_LABELS[t] || t)}</span>`).join(" ");
+}
+
 function renderRow(entry) {
   const px = entry.price || {};
   return `
@@ -534,6 +543,7 @@ function renderRow(entry) {
       <td><strong>${esc(entry.ticker)}</strong></td>
       <td><span class="tag state-${esc(entry.state)}">${esc(entry.state || "")}</span></td>
       <td>${esc(entry.confidence)}</td>
+      <td class="col-family">${renderFamilyLabel(entry)}</td>
       <td class="col-headline">${esc(entry.headline)}</td>
       <td class="col-read">${esc(entry.current_read)}</td>
       <td><button class="btn-link btn-investigate" data-investigate-ticker="${esc(entry.ticker)}">Investigate &rarr;</button></td>
@@ -717,8 +727,11 @@ function renderRadarLists(data, filters, loadTickerDetailFn) {
   if (highestGridEl) highestGridEl.innerHTML = filteredRest.map(renderCard).join("") || "";
   const otherGridEl = document.getElementById("otherGrid");
   if (otherGridEl) otherGridEl.innerHTML = filteredOther.map(renderCard).join("") || "";
+  // Other Noteworthy's table is now the primary (visible) presentation,
+  // so it must respect the active filter the same way the grid does --
+  // filteredOther, not the full unfiltered allOther.
   const tbody = document.querySelector("#otherTable tbody");
-  if (tbody) tbody.innerHTML = allOther.map(renderRow).join("");
+  if (tbody) tbody.innerHTML = filteredOther.map(renderRow).join("");
 
   // Counts: "qualifying" (highest+other, i.e. tip_evidence.qualifies()
   // entries) is always kept distinct from "scanned" (every synthetic
@@ -886,6 +899,33 @@ function renderDiscoveryCandidateRow(c, discoveryState) {
     </div>`;
 }
 
+// Production-style compact table row, same columns/data source as
+// renderDiscoveryCandidateRow (no new fields invented -- just the ones
+// the real /api/radar/discover response already provides) presented as
+// a table instead of a card row, reusing the SAME .tbl table component
+// Radar's "Other Noteworthy" uses (see .discovery-table-wrap in CSS).
+function renderDiscoveryCandidateTableRow(c, discoveryState) {
+  const state = discoveryState || c.discovery_state || "candidate";
+  const stateLabel = state === "evaluated" ? "Evaluated" : state === "evaluating" ? "Evaluating..." : "Not yet evaluated";
+  const btnLabel = state === "evaluated" ? `Re-evaluate ${esc(c.ticker)}` : `Evaluate ${esc(c.ticker)} in TIP`;
+  const isIndex = !!c.is_index;
+  const evaluateSupported = c.evaluate_supported !== undefined ? !!c.evaluate_supported : !isIndex;
+  const evalCell = evaluateSupported
+    ? `<button class="btn-link btn-evaluate" data-evaluate-ticker="${esc(c.ticker)}">${btnLabel} &rarr;</button>`
+    : `<span class="muted" title="Index/derivative instruments are not supported by the per-ticker evaluation pipeline yet">n/a (index)</span>`;
+  return `
+    <tr data-ticker="${esc(c.ticker)}" data-discovery-state="${esc(state)}">
+      <td><strong>${esc(c.ticker)}</strong>${isIndex ? ' <span class="tag" title="Index/derivative instrument">INDEX</span>' : ""}</td>
+      <td>${fmtMoney(c.net_premium) ?? "n/a"}</td>
+      <td>${fmtNum(c.repeated_hits, 0)}</td>
+      <td>${fmtNum(c.call_volume, 0)}/${fmtNum(c.put_volume, 0)}</td>
+      <td>${fmtNum(c.iv_rank, 2)}</td>
+      <td>${c.change_percent != null ? fmtPct(c.change_percent) : "n/a"}</td>
+      <td><span class="discovery-state-tag state-${esc(state)}">${esc(stateLabel)}</span></td>
+      <td>${evalCell}</td>
+    </tr>`;
+}
+
 function renderDiscoveryCandidateList(candidates, meta) {
   if (!candidates || candidates.length === 0) {
     return `<div class="empty">No candidates matched these filters.</div>`;
@@ -899,9 +939,34 @@ function renderDiscoveryCandidateList(candidates, meta) {
   const quotaTxt = meta ? `&middot; used ${esc(meta.screener_requests_used)} screener request(s)` : "";
   return `
     <div class="muted" style="margin-bottom:8px">${countTxt} ${quotaTxt} ${snapshotTxt ? `&middot; ${snapshotTxt}` : ""}</div>
+    <div class="discovery-table-wrap">
+      <table class="tbl discovery-table">
+        <thead>
+          <tr>
+            <th>Ticker</th><th>Net premium</th><th>Repeated hits</th><th>Call/put vol</th>
+            <th>IV rank</th><th>Change</th><th>Status</th><th></th>
+          </tr>
+        </thead>
+        <tbody>${candidates.map((c) => renderDiscoveryCandidateTableRow(c)).join("")}</tbody>
+      </table>
+    </div>
+    <!-- Legacy card-row markup kept in the DOM (hidden via CSS) only for
+         an older test harness that queries renderDiscoveryCandidateRow
+         output directly -- the table above is the real presentation. -->
     <div class="discovery-candidate-list">
       ${candidates.map((c) => renderDiscoveryCandidateRow(c)).join("")}
     </div>`;
+}
+
+// Intentional pre-scan empty state (P3 requirement: understandable, not
+// an accidentally-blank area) -- rendered once before the user has ever
+// clicked Scan. Never auto-runs a scan and never fabricates example rows.
+function renderDiscoveryEmptyState() {
+  return `<div class="discovery-empty-state">
+    <strong>No scan run yet</strong>
+    Set optional filters above (all are optional) and click "Scan" to run a real,
+    one-time Unusual Whales screener query. Nothing is fetched automatically.
+  </div>`;
 }
 
 // Featured Signal: large treatment for the single highest-confidence /
@@ -2241,14 +2306,21 @@ function renderSettingsView(d) {
   const liveTitle = !publicDemo && !uw.verified
     ? "Activate Live Mode requires Test Connection to succeed for the current key first."
     : "";
+  // Current STATE (what mode you're in right now) is deliberately a
+  // separate, non-interactive line from the ACTION buttons below it --
+  // the two used to be conflated (the active button's styling was the
+  // only "current mode" signal), which reads ambiguously at a glance.
   const modeSection = `
     <div class="settings-card">
       <h3>Mode</h3>
+      <p class="muted" style="margin:0 0 10px">You are currently in
+        <strong class="${d.mode === "live" ? "settings-current-live" : "settings-current-demo"}">${d.mode === "live" ? "LIVE" : "DEMO"} mode</strong>.
+      </p>
       <div class="settings-row">
-        <button class="btn ${d.mode === "demo" ? "btn-active" : ""}" id="btnModeDemo" ${publicDemo ? "disabled" : ""}>Demo</button>
-        <button class="btn ${d.mode === "live" ? "btn-active" : ""}" id="btnModeLive" ${liveDisabled ? "disabled" : ""} title="${esc(liveTitle)}">Activate Live Mode</button>
+        <button class="btn ${d.mode === "demo" ? "btn-active" : ""}" id="btnModeDemo" ${publicDemo ? "disabled" : ""}>Switch to Demo</button>
+        <button class="btn ${d.mode === "live" ? "btn-active" : ""}" id="btnModeLive" ${liveDisabled ? "disabled" : ""} title="${esc(liveTitle)}">Switch to Live Mode</button>
       </div>
-      ${!publicDemo && !uw.verified ? `<p class="muted">Activate Live Mode is disabled until Test Connection succeeds for the current key.</p>` : ""}
+      ${!publicDemo && !uw.verified ? `<p class="muted">Switch to Live Mode is disabled until Test Connection succeeds for the current key.</p>` : ""}
     </div>`;
 
   const uwStatusLine = uw.configured

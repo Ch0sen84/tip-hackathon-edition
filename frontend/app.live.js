@@ -354,6 +354,11 @@ function renderDiscoveryFilterFormOnce() {
     ev.preventDefault();
     runDiscoveryScan();
   });
+  // Intentional, legible "no scan run yet" state -- never auto-runs a
+  // scan and never fills this with fabricated example rows; it stays
+  // exactly this until the user explicitly clicks Scan (see P3 scope).
+  const listEl = document.getElementById("discoveryCandidateList");
+  if (listEl && !_lastDiscoveryData) listEl.innerHTML = renderDiscoveryEmptyState();
 }
 
 async function runDiscoveryScan() {
@@ -732,6 +737,25 @@ initTickerCombo((rawText) => {
   }
   navigateToTicker(t, loadTickerDetail);
 });
+
+// Sidebar ticker-jump search (production's .cmd-search pattern): reuses
+// the EXACT same validation + navigateToTicker() call as the Ticker
+// Analysis "Analyze" field above -- not a parallel navigation path, just
+// a second entry point into it.
+const sidebarJumpInput = document.getElementById("sidebarTickerJump");
+if (sidebarJumpInput) {
+  sidebarJumpInput.addEventListener("keydown", (ev) => {
+    if (ev.key !== "Enter") return;
+    const t = (sidebarJumpInput.value || "").trim().toUpperCase();
+    if (!t) return;
+    if (_currentMode === "live" && !/^[A-Z]{1,5}(\.[A-Z])?$/.test(t)) {
+      alert(`"${t}" doesn't look like a valid ticker symbol (1-5 letters, optional .suffix like BRK.A).`);
+      return;
+    }
+    navigateToTicker(t, loadTickerDetail);
+    sidebarJumpInput.value = "";
+  });
+}
 
 // Bootstrap: read the URL (view=.../ticker=..., or the legacy bare
 // #ticker=XXX) and land on THAT view+ticker instead of unconditionally

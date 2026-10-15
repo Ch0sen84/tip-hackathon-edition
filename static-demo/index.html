@@ -16,12 +16,18 @@
   <aside id="sidebar">
     <div class="brand-block">
       <div class="brand-name">TIP</div>
-      <span class="brand-sub">Hackathon Edition &middot; Public Demo</span>
+      <span class="brand-product">Hackathon Edition</span>
+      <span class="brand-tagline">Public Demo &middot; simulated data</span>
       <div class="mode-pill" id="modePill">mode: ...</div>
     </div>
+    <div class="cmd-search">
+      <input type="text" id="sidebarTickerJump" placeholder="Jump to ticker..." autocomplete="off" maxlength="7" />
+    </div>
     <nav id="nav">
+      <div class="nav-group-label">Workspace</div>
       <button class="nav-item active" data-view="radar"><span class="ic">&#9673;</span>Market Radar</button>
       <button class="nav-item" data-view="ticker"><span class="ic">&#128269;</span>Ticker Analysis</button>
+      <div class="nav-group-label">App</div>
       <button class="nav-item" data-view="settings"><span class="ic">&#9881;</span>Settings</button>
       <button class="nav-item" data-view="about"><span class="ic">&#8505;</span>About / Beyond the Hackathon</button>
     </nav>
@@ -59,14 +65,14 @@
           <div class="attn-grid" id="highestGrid"></div>
 
           <h2 class="section-title eyebrow">Other Noteworthy</h2>
-          <div class="attn-grid attn-grid-compact" id="otherGrid"></div>
-          <div class="table-wrap table-wrap-legacy">
+          <div class="table-wrap" id="otherNoteworthyTable">
             <table class="tbl" id="otherTable">
               <thead>
                 <tr>
                   <th>Ticker</th>
                   <th>State</th>
                   <th>Confidence</th>
+                  <th class="col-family">Evidence family</th>
                   <th class="col-headline">Headline</th>
                   <th class="col-read">Current read</th>
                   <th></th>
@@ -75,6 +81,7 @@
               <tbody></tbody>
             </table>
           </div>
+          <div class="attn-grid attn-grid-compact attn-grid-legacy-hidden" id="otherGrid"></div>
           <div class="empty" id="radarEmpty" style="display:none">No tickers qualify right now.</div>
         </div>
       </div>
@@ -108,22 +115,23 @@
 
     <section id="view-about" class="view">
       <h2 class="section-title eyebrow">About / Beyond the Hackathon</h2>
-      <div class="how-body" style="padding:0">
-        <p>This is a standalone hackathon build of TIP (Trading Intelligence
-        Platform). The gate / confidence / state-transition logic in
-        <code>backend/app/core/signal_engine.py</code> is ported verbatim
-        from the production app and runs identically whether the backend is
-        in <code>demo</code> mode (synthetic fixtures, clearly marked
-        <code>synthetic: true</code>) or <code>live</code> mode (real
-        Unusual Whales API). Nothing shown here is a canned conclusion --
-        every NEW / BUILDING / CONFIRMED / STABLE / FADING / INVALIDATED
-        label is computed from whatever data the active adapter returned.</p>
-        <p class="muted">Beyond this hackathon build, the full production TIP platform
-        additionally includes: Databento/futures collectors, a production TimescaleDB
-        history spanning weeks of continuous scanning, scheduled Discord reporting,
-        an experimental Research Lab, and home-lab infrastructure automation. None of
-        that is included here by design -- this public demo is credential-free, static,
-        and limited to pre-captured simulated output.</p>
+      <div class="how-body settings-card" style="padding:18px 20px; max-width:620px">
+        <p>TIP (Trading Intelligence Platform) is a signal-detection app built on the
+        Unusual Whales API. This page is the <strong>public, static demo</strong> of its
+        <strong>Hackathon Edition</strong> -- credential-free, backend-free, and limited
+        to pre-captured simulated output. The downloadable local edition runs the exact
+        same shared rendering code (<code>app.core.js</code>) against a real backend, in
+        either synthetic <code>demo</code> mode or real-API <code>live</code> mode. Every
+        NEW / BUILDING / CONFIRMED / STABLE / FADING / INVALIDATED label on this page is
+        computed from the pre-captured simulated data, never a canned conclusion.</p>
+        <p class="muted">Production TIP is a separate, continuously-running home-lab
+        deployment with infrastructure this build doesn't include by design
+        (futures/market-data collectors, a multi-week scanning history, scheduled
+        reporting, and home-lab automation) -- this build's logic is ported/equivalent
+        to production's, not claimed identical.</p>
+        <p class="muted">This is a public, open-source project -- see the
+        <a href="https://github.com/Ch0sen84/tip-hackathon-edition" target="_blank" rel="noopener">GitHub repository</a>
+        for source, issues, and participation.</p>
       </div>
     </section>
   </main>

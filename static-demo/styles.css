@@ -28,6 +28,15 @@
   --sp-3: 12px;
   --sp-4: 16px;
   --sp-5: 24px;
+  /* Evidence-family identity colors (typographic, not pill backgrounds --
+     ported by value from production's own CSS comment on this exact
+     convention). Not present in production's :root (it reuses --blue/
+     --accent/--amber directly); defined here as named aliases so
+     app.core.js can reference a stable --cat-* name per family without
+     hardcoding which base color backs it. */
+  --cat-dp: var(--blue);
+  --cat-opt: var(--accent);
+  --cat-flow: var(--amber);
 }
 
 * { box-sizing: border-box; }
@@ -67,11 +76,46 @@ body {
   border-right: 1px solid var(--border); display: flex; flex-direction: column;
   position: sticky; top: 0; height: 100vh; flex-shrink: 0;
 }
+/* Brand block rhythm ported from production's .brand (name / product /
+   tagline stacked, same spacing cadence) -- content below stays
+   Hackathon Edition's own (name "TIP", product "Hackathon Edition"); only
+   the typography/spacing pattern is adapted. */
 .brand-block { padding: 20px 20px 15px; border-bottom: 1px solid var(--border); }
 .brand-block .brand-name { font-size: 19px; font-weight: 800; letter-spacing: .5px; line-height: 1; }
-.brand-block .brand-sub { display: block; margin-top: 4px; font-size: 11px; color: var(--muted); font-weight: 600; }
-.brand-block .mode-pill { display: inline-block; margin-top: 10px; }
-nav#nav { display: flex; flex-direction: column; padding: 10px 0; flex: 1; }
+.brand-block .brand-product { display: block; margin-top: 5px; font-size: 10.5px; color: var(--text2); font-weight: 600; letter-spacing: .2px; }
+.brand-block .brand-tagline { display: block; margin-top: 4px; font-size: 10px; color: var(--muted); letter-spacing: .2px; }
+/* Deliberately NOT subdued like production's static research badge --
+   Demo/Live is a genuinely more safety-relevant distinction here
+   (bring-your-own-key Live Mode vs synthetic fixtures), so the mode pill
+   stays a prominent, bordered, colored badge; this box-shadow just makes
+   it read as deliberately designed rather than slapped on. */
+.brand-block .mode-pill { display: inline-block; margin-top: 12px; box-shadow: 0 0 0 1px rgba(255,255,255,0.03); }
+
+/* Ticker-jump search box, ported by value from production's .cmd-search
+   (box styling only) -- wired to the SAME navigateToTicker() the
+   existing Ticker Analysis "Analyze" input already uses; see
+   app.live.js's sidebarTickerJump wiring, no parallel nav path. */
+.cmd-search { margin: 12px 16px 2px; }
+.cmd-search input {
+  width: 100%; box-sizing: border-box; font-size: 12.5px; padding: 8px 10px;
+  background: var(--panel2); border: 1px solid var(--border); color: var(--text);
+  border-radius: var(--radius-sm);
+}
+.cmd-search input:focus { outline: none; border-color: var(--accent); }
+.cmd-search input::placeholder { color: var(--muted2); }
+
+/* Grouped nav section labels, ported by value from production's
+   .nav-group-label -- only 2 meaningful groups at this item count
+   (Workspace: the 2 real working views; App: Settings/About), not
+   production's full 5-group structure, since Hackathon Edition doesn't
+   have the features those extra groups would need. */
+.nav-group-label {
+  padding: 14px 18px 5px; font-size: 9.5px; font-weight: 700;
+  text-transform: uppercase; letter-spacing: .6px; color: var(--muted2);
+}
+.nav-group-label:first-child { padding-top: 10px; }
+
+nav#nav { display: flex; flex-direction: column; padding: 4px 0 10px; flex: 1; }
 nav#nav button {
   display: flex; align-items: center; gap: 10px; text-align: left; background: none; border: none;
   border-left: 3px solid transparent; color: var(--muted); padding: 10px 18px; cursor: pointer;
@@ -189,6 +233,20 @@ nav#nav .ic { font-size: 13px; width: 16px; text-align: center; opacity: .7; }
 @media (max-width: 760px) { .attn-grid-compact { grid-template-columns: 1fr; } }
 .table-wrap-legacy { display: none; }
 
+/* "Other Noteworthy" is now the PRIMARY presentation for its table (the
+   card grid below is kept in the DOM, hidden, for the existing
+   otherGrid-filter test harness -- see renderRadarLists()). Production's
+   evidence-category identity is applied here as TEXT COLOR per its own
+   CSS comment ("typographic, not saturated-pill colors"), via the
+   --cat-dp/--cat-opt/--cat-flow tokens already defined in :root. */
+.attn-grid-legacy-hidden { display: none; }
+.cat-label { font-weight: 700; font-size: 10.5px; text-transform: uppercase; letter-spacing: .3px; }
+.cat-label.cat-dark_pool { color: var(--cat-dp); }
+.cat-label.cat-options { color: var(--cat-opt); }
+.cat-label.cat-uw_flow { color: var(--cat-flow); }
+.cat-label.cat-multi-signal { color: var(--text2); }
+.col-family { white-space: nowrap; }
+
 .history-chip { display: flex; align-items: center; flex-wrap: wrap; gap: 3px; margin: 6px 0; font-size: 10.5px; }
 .history-chip .hc-step { padding: 1px 6px; border-radius: 3px; background: var(--panel2); border: 1px solid var(--border2); color: var(--text2); }
 .history-chip .hc-step.state-NEW { color: var(--amber); }
@@ -218,6 +276,7 @@ nav#nav .ic { font-size: 13px; width: 16px; text-align: center; opacity: .7; }
 .tbl th { text-align: left; color: var(--muted); font-weight: 600; font-size: 10px; text-transform: uppercase; letter-spacing: .4px; padding: 9px 12px; border-bottom: 1px solid var(--border); white-space: nowrap; }
 .tbl td { padding: 8px 12px; border-bottom: 1px solid var(--border); vertical-align: middle; }
 .tbl tr:hover td { background: var(--panel2); }
+@media (max-width: 860px) { .col-family { display: none; } }
 @media (max-width: 760px) { .col-read { display: none; } }
 @media (max-width: 560px) { .col-headline { display: none; } }
 
@@ -238,11 +297,16 @@ pre.raw { background: var(--panel3); padding: 12px; border-radius: 8px; overflow
 
 .settings-card {
   border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--panel);
-  padding: 16px 18px; margin-bottom: 18px; max-width: 540px;
+  padding: 18px 20px; margin-bottom: 18px; max-width: 540px;
 }
-.settings-card h3 { margin: 0 0 8px; font-size: 14px; }
+.settings-card h3 { margin: 0 0 10px; font-size: 14px; letter-spacing: .2px; }
 .settings-card input, .settings-card select { width: 100%; display: block; margin: 8px 0; }
 .settings-row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 6px; }
+.settings-divider { border: none; border-top: 1px solid var(--border); margin: 14px 0; }
+/* Current-mode state indicator (distinct from the switch-mode action
+   buttons below it, per Chad's Settings-clarity scope item). */
+.settings-current-live { color: var(--bull); }
+.settings-current-demo { color: var(--amber); }
 .btn.btn-active { border-color: var(--accent); color: var(--accent); }
 .btn:disabled { opacity: .5; cursor: not-allowed; }
 .public-demo-banner {
@@ -396,6 +460,13 @@ pre.raw { background: var(--panel3); padding: 12px; border-radius: 8px; overflow
 
 .radar-with-breakdown { display: grid; grid-template-columns: 1fr; gap: 18px; align-items: start; margin-top: 22px; }
 .radar-sidebar { position: sticky; top: 14px; }
+/* Grid items default to min-width:auto, which lets a child with an
+   intrinsic min-width (the "Other Noteworthy" table's min-width:560px)
+   stretch this track -- and the whole page -- wider than the viewport on
+   narrow/mobile screens, even though .table-wrap already has its own
+   overflow-x:auto. min-width:0 lets the grid item actually shrink so the
+   table's own horizontal scrollbar does the work instead of the page. */
+.radar-main { min-width: 0; }
 
 /* Market Radar mode toggle + Market Discovery panel (C2b/C2c, 2026-10-15) */
 .radar-mode-toggle { display: flex; gap: 8px; margin-bottom: 16px; }
@@ -416,7 +487,19 @@ pre.raw { background: var(--panel3); padding: 12px; border-radius: 8px; overflow
 }
 .discovery-quota-note { font-size: 11.5px; color: var(--amber); margin-right: auto; align-self: center; }
 
-.discovery-candidate-list { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
+/* Market Discovery populated results: compact table, reusing the SAME
+   .tbl component/styling Radar's "Other Noteworthy" table uses -- per
+   scope, presentation-only, the real screener integration/filter
+   form/Evaluate action below are unchanged. The pre-#tbl row markup
+   (.discovery-candidate-row) stays for its own test harness compat but
+   is visually retired in favor of .discovery-table below. */
+.discovery-table-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--panel); margin-top: 10px; }
+.discovery-table { width: 100%; border-collapse: collapse; font-size: 12.5px; min-width: 640px; }
+.discovery-table th { text-align: left; color: var(--muted); font-weight: 600; font-size: 10px; text-transform: uppercase; letter-spacing: .4px; padding: 9px 12px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+.discovery-table td { padding: 8px 12px; border-bottom: 1px solid var(--border); vertical-align: middle; white-space: nowrap; }
+.discovery-table tr:hover td { background: var(--panel2); }
+
+.discovery-candidate-list { display: none; }
 .discovery-candidate-row {
   display: flex; flex-wrap: wrap; align-items: center; gap: 14px;
   border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--panel); padding: 10px 14px;
@@ -432,6 +515,14 @@ pre.raw { background: var(--panel3); padding: 12px; border-radius: 8px; overflow
 .discovery-state-tag.state-evaluating { color: var(--accent); border-color: var(--accent); }
 .discovery-state-tag.state-evaluated { color: var(--bull); border-color: var(--bull); }
 .btn-evaluate { margin-left: auto; font-size: 12px; }
+
+/* Intentional, legible pre-scan empty state (not an accidentally-blank
+   area) -- see renderDiscoveryEmptyState() in app.core.js. */
+.discovery-empty-state {
+  border: 1px dashed var(--border2); border-radius: var(--radius-md);
+  padding: 28px 20px; text-align: center; color: var(--muted); font-size: 13px; margin-top: 10px;
+}
+.discovery-empty-state strong { color: var(--text2); display: block; margin-bottom: 6px; font-size: 13.5px; }
 
 /* td-attn-grid: production's featured-signal + supporting-grid pattern,
    ported by value (2fr primary / 3fr support, same breakpoint). Applied
