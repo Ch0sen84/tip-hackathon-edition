@@ -98,7 +98,7 @@ function navigateToView(view, opts = {}) {
 // above (populated with every currently-valid ticker) is "a way to pick a
 // valid one"; this message doesn't duplicate that control.
 function renderTickerUnavailable(ticker) {
-  return `<div class="empty">"${esc(ticker)}" is not available in demo mode. Use the dropdown above to pick a valid ticker.</div>`;
+  return `<div class="empty">"${esc(ticker)}" is not available in demo mode. Use the ticker search above to pick a valid scenario.</div>`;
 }
 
 // applyNavState: the one shared function both adapters' bootstrap AND
@@ -184,23 +184,197 @@ function wireHistoryHandling() {
 // one shared, byte-identical file.
 function clearTickerView() {
   TIP_STATE.currentTicker = null;
-  const sel = document.getElementById("tickerSelect");
-  if (sel) sel.value = "";
+  setTickerComboValue("");
   const detailEl = document.getElementById("tickerDetail");
   if (detailEl) detailEl.innerHTML = `<div class="empty">Select a ticker to analyze.</div>`;
   const investigateEl = document.getElementById("investigateSection");
   if (investigateEl) investigateEl.innerHTML = "";
 }
 
-// renderTickerOptions: builds the Ticker Analysis <select> options from a
-// merged/deduped ticker list, always with a leading placeholder so "no
-// ticker selected" is a real, visible state instead of silently defaulting
-// to whatever option happened to be first.
-function renderTickerOptions(tickers, selected) {
-  const opts = tickers
-    .map((t) => `<option value="${esc(t)}" ${t === selected ? "selected" : ""}>${esc(t)}</option>`)
-    .join("");
-  return `<option value="">-- select a ticker --</option>${opts}`;
+// --- Unified ticker combobox (2026-10-14) -----------------------------
+//
+// REPLACES the old separate <select id="tickerSelect"> dropdown + a
+// second manual-entry <input> pair (Chad tested both and found the
+// combination awkward/inconsistent with the rest of TIP). ONE editable,
+// searchable text field now does both jobs: pick a suggested ticker OR
+// type any symbol directly. Shared between the local (app.live.js) and
+// static-demo (app.static.js) editions -- both wire it the same way,
+// only their `onSubmit` validation differs (Live allows an arbitrary
+// format-valid ticker; Demo's unknown-ticker rejection already happens
+// downstream in applyNavState/the 404 path, unchanged).
+//
+// Persistence: "recently analyzed" is genuinely a client-side concept
+// (which tickers THIS browser looked at), so it lives in localStorage,
+// not the backend -- guarded with try/catch since some browsers refuse
+// storage access entirely (private mode, locked-down embeds) and that
+// must never break ticker analysis itself, just silently skip the
+// recency feature.
+const RECENT_TICKERS_KEY = "tip_recent_tickers";
+const MAX_RECENT_TICKERS = 8;
+const MAX_SUGGESTIONS_SHOWN = 8;
+
+function getRecentTickers() {
+  try {
+    const raw = localStorage.getItem(RECENT_TICKERS_KEY);
+    const arr = raw ? JSON.parse(raw) : [];
+    return Array.isArray(arr) ? arr.filter((t) => typeof t === "string") : [];
+  } catch (e) {
+    return [];
+  }
+}
+
+function addRecentTicker(ticker) {
+  if (!ticker) return;
+  try {
+    const existing = getRecentTickers().filter((t) => t !== ticker);
+    const updated = [ticker, ...existing].slice(0, MAX_RECENT_TICKERS);
+    localStorage.setItem(RECENT_TICKERS_KEY, JSON.stringify(updated));
+  } catch (e) {
+    /* storage unavailable -- recency suggestions just won't appear, not fatal */
+  }
+}
+
+// Module-level combo state -- one combo exists per page (Ticker Analysis
+// has exactly one), so this doesn't need to be instance-scoped.
+let _comboKnownTickers = [];
+let _comboFilteredSuggestions = [];
+let _comboActiveIndex = -1;
+let _comboOnSubmit = null;
+
+// setTickerComboOptions: sets the pool of "known" suggestable tickers
+// (Radar-qualifying + full scenario/watchlist universe) -- replaces the
+// old renderTickerOptions()/<select>.innerHTML assignment. Does NOT
+// touch the input's current typed value or open the dropdown.
+function setTickerComboOptions(tickers) {
+  _comboKnownTickers = Array.from(new Set(tickers)).sort();
+}
+
+// setTickerComboValue: sets the input's displayed text only (used by
+// navigateToTicker/clearTickerView on bootstrap/popstate/programmatic
+// navigation) -- never opens the suggestion dropdown or triggers onSubmit.
+function setTickerComboValue(ticker) {
+  const input = document.getElementById("tickerInput");
+  if (input) input.value = ticker || "";
+}
+
+function _comboPool() {
+  // Recent tickers first (most-recently-analyzed first), then the
+  // remaining known tickers alphabetically -- deduped either way.
+  const seen = new Set();
+  const pool = [];
+  for (const t of getRecentTickers()) {
+    if (!seen.has(t)) { pool.push({ ticker: t, recent: true }); seen.add(t); }
+  }
+  for (const t of _comboKnownTickers) {
+    if (!seen.has(t)) { pool.push({ ticker: t, recent: false }); seen.add(t); }
+  }
+  return pool;
+}
+
+function _comboFilter(query) {
+  const q = (query || "").trim().toUpperCase();
+  const pool = _comboPool();
+  const matched = q ? pool.filter((e) => e.ticker.toUpperCase().startsWith(q)) : pool;
+  return matched.slice(0, MAX_SUGGESTIONS_SHOWN);
+}
+
+function _comboRenderSuggestions() {
+  const list = document.getElementById("tickerSuggestions");
+  const input = document.getElementById("tickerInput");
+  if (!list) return;
+  if (!_comboFilteredSuggestions.length) {
+    list.hidden = true;
+    list.innerHTML = "";
+    if (input) input.setAttribute("aria-expanded", "false");
+    return;
+  }
+  list.hidden = false;
+  if (input) input.setAttribute("aria-expanded", "true");
+  list.innerHTML = _comboFilteredSuggestions.map((e, i) => `
+    <li role="option" data-ticker="${esc(e.ticker)}" class="${i === _comboActiveIndex ? "active" : ""}"
+        aria-selected="${i === _comboActiveIndex}">
+      <span>${esc(e.ticker)}</span>${e.recent ? '<span class="ticker-suggestion-tag">recent</span>' : ""}
+    </li>`).join("");
+}
+
+function _comboOpen(query) {
+  _comboFilteredSuggestions = _comboFilter(query);
+  _comboActiveIndex = -1;
+  _comboRenderSuggestions();
+}
+
+function _comboClose() {
+  _comboFilteredSuggestions = [];
+  _comboActiveIndex = -1;
+  _comboRenderSuggestions();
+}
+
+function _comboSelect(ticker) {
+  setTickerComboValue(ticker);
+  _comboClose();
+  if (_comboOnSubmit) _comboOnSubmit(ticker);
+}
+
+// initTickerCombo: wires the combobox's events exactly once. `onSubmit`
+// is called with the raw text to analyze whenever the user presses Enter
+// (with no suggestion highlighted), clicks a suggestion, or clicks the
+// Analyze button -- callers (app.live.js/app.static.js) own validation
+// (Live Mode's arbitrary-ticker format check; Demo's unknown-ticker
+// rejection already happens downstream, unchanged) and the actual
+// navigateToTicker() call.
+function initTickerCombo(onSubmit) {
+  _comboOnSubmit = onSubmit;
+  const input = document.getElementById("tickerInput");
+  const list = document.getElementById("tickerSuggestions");
+  const analyzeBtn = document.getElementById("loadTicker");
+  if (!input || !list) return;
+
+  input.addEventListener("input", () => _comboOpen(input.value));
+  input.addEventListener("focus", () => _comboOpen(input.value));
+  input.addEventListener("keydown", (ev) => {
+    if (ev.key === "ArrowDown") {
+      ev.preventDefault();
+      if (!_comboFilteredSuggestions.length) { _comboOpen(input.value); return; }
+      _comboActiveIndex = (_comboActiveIndex + 1) % _comboFilteredSuggestions.length;
+      _comboRenderSuggestions();
+    } else if (ev.key === "ArrowUp") {
+      ev.preventDefault();
+      if (!_comboFilteredSuggestions.length) return;
+      _comboActiveIndex = (_comboActiveIndex - 1 + _comboFilteredSuggestions.length) % _comboFilteredSuggestions.length;
+      _comboRenderSuggestions();
+    } else if (ev.key === "Enter") {
+      ev.preventDefault();
+      if (_comboActiveIndex >= 0 && _comboFilteredSuggestions[_comboActiveIndex]) {
+        _comboSelect(_comboFilteredSuggestions[_comboActiveIndex].ticker);
+      } else {
+        _comboClose();
+        if (_comboOnSubmit) _comboOnSubmit(input.value);
+      }
+    } else if (ev.key === "Escape") {
+      _comboClose();
+    }
+  });
+  // mousedown (not click) on a suggestion: fires BEFORE the input's blur
+  // event, so the list is still open and readable when the selection is
+  // made -- a plain click handler here would lose the race to blur's
+  // close, a classic combobox pitfall.
+  list.addEventListener("mousedown", (ev) => {
+    const li = ev.target.closest("li[data-ticker]");
+    if (!li) return;
+    ev.preventDefault();
+    _comboSelect(li.dataset.ticker);
+  });
+  input.addEventListener("blur", () => {
+    // Small delay so a suggestion's mousedown (which also blurs the
+    // input) still gets to run its handler before the list disappears.
+    setTimeout(_comboClose, 120);
+  });
+  if (analyzeBtn) {
+    analyzeBtn.addEventListener("click", () => {
+      _comboClose();
+      if (_comboOnSubmit) _comboOnSubmit(input.value);
+    });
+  }
 }
 
 // navigateToTicker: switches to the Ticker Analysis view, pre-selects the
@@ -216,8 +390,13 @@ function navigateToTicker(ticker, loadTickerDetailFn, opts = {}) {
   const { push = true, focusInvestigate = false } = opts;
   if (push) pushNav("ticker", ticker); else replaceNav("ticker", ticker);
   switchView("ticker");
-  const sel = document.getElementById("tickerSelect");
-  if (sel) sel.value = ticker;
+  setTickerComboValue(ticker);
+  // Record every successfully-navigated ticker as "recently analyzed"
+  // regardless of entry point (combo submit, a suggestion click, Market
+  // Radar's row/Investigate links, a deep link/refresh) -- the recency
+  // list should reflect everything this browser actually looked at, not
+  // just one specific UI path into this same function.
+  addRecentTicker(ticker);
   const result = loadTickerDetailFn(ticker);
   if (focusInvestigate && result && typeof result.then === "function") {
     result.then(() => {

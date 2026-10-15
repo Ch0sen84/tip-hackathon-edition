@@ -82,7 +82,17 @@
 
     <section id="view-ticker" class="view">
       <div class="toolbar">
-        <select id="tickerSelect"></select>
+        <!-- Unified ticker selector (2026-10-14), shared markup/logic with
+             the Live-mode edition (frontend/index.html + app.core.js's
+             initTickerCombo()) -- Demo here only ever has the 11 named
+             synthetic scenarios as suggestions/valid input. -->
+        <div class="ticker-combo" id="tickerCombo">
+          <input type="text" id="tickerInput" class="ticker-combo-input"
+                 placeholder="Search a demo scenario ticker"
+                 autocomplete="off" maxlength="7" role="combobox" aria-expanded="false"
+                 aria-controls="tickerSuggestions" aria-autocomplete="list" />
+          <ul id="tickerSuggestions" class="ticker-suggestions" role="listbox" hidden></ul>
+        </div>
         <button class="btn" id="loadTicker">Analyze</button>
       </div>
       <!-- investigateSection's container div is rendered INSIDE

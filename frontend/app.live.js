@@ -88,8 +88,7 @@ async function loadRadar() {
     const radarTickers = [...data.highest, ...data.other].map((e) => e.ticker);
     const allTickers = Array.from(new Set([...radarTickers, ...scenarioTickers])).sort();
     _knownTickers = allTickers;
-    const sel = document.getElementById("tickerSelect");
-    sel.innerHTML = renderTickerOptions(allTickers, TIP_STATE.currentTicker);
+    setTickerComboOptions(allTickers);
   } catch (err) {
     statusEl.textContent = `Error loading Market Radar: ${err.message}`;
   }
@@ -199,13 +198,6 @@ async function loadSettings() {
     const d = await apiGet("/api/settings");
     _currentMode = d.mode || "demo";
     renderModePill(d.mode, d.public_demo);
-    // REAL BUG FIX (2026-10-14): manual ticker entry only makes sense in
-    // Live Mode -- Demo's fixtures genuinely only exist for the dropdown's
-    // 11 named scenarios, so showing a free-text box there would just
-    // produce a confusing 404. Toggled here (not guessed) because this is
-    // exactly where the real, just-fetched mode becomes known.
-    const manualInput = document.getElementById("tickerManualInput");
-    if (manualInput) manualInput.style.display = _currentMode === "live" ? "" : "none";
     const { publicDemo } = renderSettingsView(d);
     document.getElementById("btnModeDemo").addEventListener("click", () => setMode("demo"));
     if (!publicDemo) {
@@ -398,26 +390,23 @@ document.querySelectorAll(".nav-item").forEach((b) => {
   b.addEventListener("click", () => navigateToView(b.dataset.view));
 });
 document.getElementById("refreshRadar").addEventListener("click", loadRadar);
-document.getElementById("loadTicker").addEventListener("click", () => {
-  // REAL BUG FIX (2026-10-14): prefer the manually-typed ticker (Live
-  // Mode only -- see loadSettings()'s visibility toggle above) over the
-  // fixed-watchlist dropdown, so a real UW ticker outside the configured
-  // TIP_LIVE_WATCHLIST can actually be analyzed. Basic client-side format
-  // check mirrors the backend's TICKER_RE (1-5 letters, optional .suffix)
-  // purely for an immediate, friendly error -- the backend's own
-  // validate_ticker() remains the real enforcement point.
-  const manualInput = document.getElementById("tickerManualInput");
-  const manualRaw = manualInput ? manualInput.value.trim().toUpperCase() : "";
-  if (manualRaw) {
-    if (!/^[A-Z]{1,5}(\.[A-Z])?$/.test(manualRaw)) {
-      alert(`"${manualRaw}" doesn't look like a valid ticker symbol (1-5 letters, optional .suffix like BRK.A).`);
-      return;
-    }
-    navigateToTicker(manualRaw, loadTickerDetail);
+// Unified ticker combobox (2026-10-14, replaces the old separate
+// <select> + manual-entry <input>): initTickerCombo() (app.core.js)
+// wires the one input's typing/suggestions/keyboard-nav/Analyze-click,
+// and calls this with whatever raw text the user wants analyzed. In
+// Live Mode any format-valid ticker is allowed (same TICKER_RE the
+// backend's validate_ticker() enforces for real -- this is just an
+// immediate, friendly client-side error, not the actual enforcement
+// point). In Demo Mode an unknown ticker is simply left to the existing
+// 404 -> renderTickerUnavailable() path, unchanged.
+initTickerCombo((rawText) => {
+  const t = (rawText || "").trim().toUpperCase();
+  if (!t) return;
+  if (_currentMode === "live" && !/^[A-Z]{1,5}(\.[A-Z])?$/.test(t)) {
+    alert(`"${t}" doesn't look like a valid ticker symbol (1-5 letters, optional .suffix like BRK.A).`);
     return;
   }
-  const t = document.getElementById("tickerSelect").value;
-  if (t) navigateToTicker(t, loadTickerDetail);
+  navigateToTicker(t, loadTickerDetail);
 });
 
 // Bootstrap: read the URL (view=.../ticker=..., or the legacy bare

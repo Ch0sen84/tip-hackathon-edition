@@ -251,6 +251,26 @@ pre.raw { background: var(--panel3); padding: 12px; border-radius: 8px; overflow
 }
 .muted { color: var(--muted); font-size: 12px; }
 
+/* --- Unified ticker combobox (2026-10-14) ----------------------------- */
+.ticker-combo { position: relative; flex: 1; max-width: 360px; }
+.ticker-combo-input {
+  width: 100%; background: var(--panel2); border: 1px solid var(--border); color: var(--text);
+  border-radius: 6px; padding: 8px 10px; font-size: 14px; box-sizing: border-box;
+}
+.ticker-combo-input:focus { outline: none; border-color: var(--accent, #22d3a8); }
+.ticker-suggestions {
+  position: absolute; top: calc(100% + 4px); left: 0; right: 0; z-index: 20;
+  background: var(--panel2); border: 1px solid var(--border); border-radius: 6px;
+  list-style: none; margin: 0; padding: 4px 0; max-height: 280px; overflow-y: auto;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+}
+.ticker-suggestions li {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 7px 10px; cursor: pointer; font-size: 13px;
+}
+.ticker-suggestions li:hover, .ticker-suggestions li.active { background: var(--panel); }
+.ticker-suggestion-tag { font-size: 10px; color: var(--muted); border: 1px solid var(--border); border-radius: 4px; padding: 1px 5px; }
+
 /* --- Chart evidence markers (2026-10-14 fix) ------------------------- */
 .chart-markers-info { font-size: 12px; }
 .chart-markers-detail summary { cursor: pointer; padding: 4px 0; }

@@ -87,16 +87,21 @@
 
     <section id="view-ticker" class="view">
       <div class="toolbar">
-        <select id="tickerSelect"></select>
-        <!-- Manual ticker entry (Live Mode only -- hidden in Demo, where
-             fixtures genuinely only exist for the 11 named scenarios in
-             the dropdown above). Shown/hidden by loadSettings() in
-             app.live.js based on the real mode, not guessed client state.
-             REAL BUG FIX (2026-10-14): Live Mode previously had no way to
-             analyze any ticker outside the small fixed TIP_LIVE_WATCHLIST
-             dropdown at all. -->
-        <input type="text" id="tickerManualInput" placeholder="Or type any ticker (Live Mode)"
-               autocomplete="off" style="display:none" maxlength="7" />
+        <!-- Unified ticker selector (2026-10-14 -- replaces the old
+             separate <select> + manual-entry <input> pair, which Chad
+             tested and found awkward/inconsistent). ONE editable,
+             searchable field: typing filters suggestions (watchlisted +
+             recently analyzed), arrow keys navigate them, Enter either
+             selects the highlighted suggestion or submits whatever text
+             is typed, Escape closes the list. See initTickerCombo() in
+             app.core.js for the real logic -- this is just the markup. -->
+        <div class="ticker-combo" id="tickerCombo">
+          <input type="text" id="tickerInput" class="ticker-combo-input"
+                 placeholder="Search ticker (type to search or enter any symbol)"
+                 autocomplete="off" maxlength="7" role="combobox" aria-expanded="false"
+                 aria-controls="tickerSuggestions" aria-autocomplete="list" />
+          <ul id="tickerSuggestions" class="ticker-suggestions" role="listbox" hidden></ul>
+        </div>
         <button class="btn" id="loadTicker">Analyze</button>
       </div>
       <!-- investigateSection's container div is rendered INSIDE

@@ -159,19 +159,27 @@ async function main() {
       "setMode", "loadRadar", "loadTickerDetail", "navigateToTicker", "TIP_STATE",
       "loadSettings", "testUwKey", "saveUwKey", "disconnectUwKey", "apiPost", "apiGet",
       "mountCandlestickChart",
+      // Unified ticker combobox (2026-10-14) -- _comboFilter is a plain
+      // `function` declaration, so (unlike the `let`-declared pool/state
+      // variables it closes over) it IS exposed as a global by indirect
+      // eval, same mechanism every other name in this list relies on.
+      "_comboFilter", "getRecentTickers", "setTickerComboValue",
     ],
   );
 
-  console.log(`\n=== Bug 2: all 5 scenario tickers reachable via the <select> ===`);
+  console.log(`\n=== Bug 2: all 5 scenario tickers reachable via the ticker combobox ===`);
   await liveB.loadRadar();
-  const selHtml = el("tickerSelect").innerHTML;
-  check("tickerSelect includes all 5 scenario tickers (FLUX,QRVX,ZYNC,DRFT,NADA)", () => {
+  // Unified combobox (2026-10-14): _comboFilter("") returns the full
+  // suggestion pool (empty query -> everything, capped at
+  // MAX_SUGGESTIONS_SHOWN=8) -- 5 tickers fits under that cap.
+  const pool = liveB._comboFilter("").map((e) => e.ticker);
+  check("ticker combobox suggestions include all 5 scenario tickers (FLUX,QRVX,ZYNC,DRFT,NADA)", () => {
     for (const t of ["FLUX", "QRVX", "ZYNC", "DRFT", "NADA"]) {
-      assert.ok(selHtml.includes(`value="${t}"`), `missing ${t} in <select>: ${selHtml}`);
+      assert.ok(pool.includes(t), `missing ${t} in combobox pool: ${JSON.stringify(pool)}`);
     }
   });
-  check("tickerSelect has a placeholder option", () => {
-    assert.ok(selHtml.startsWith('<option value="">'), selHtml.slice(0, 80));
+  check("ticker combobox has no stale/placeholder entries in the suggestion pool", () => {
+    assert.ok(!pool.includes(""), JSON.stringify(pool));
   });
 
   console.log(`\n=== Bug 1: mode switch clears ticker/investigate state ===`);
@@ -197,8 +205,8 @@ async function main() {
   check("#investigateSection cleared after setMode", () => {
     assert.equal(el("investigateSection").innerHTML, "");
   });
-  check("#tickerSelect value reset to placeholder after setMode", () => {
-    assert.equal(el("tickerSelect").value, "");
+  check("#tickerInput value reset to empty after setMode", () => {
+    assert.equal(el("tickerInput").value, "");
   });
 
   console.log(`\n=== Bug 3: DRFT/NADA load without crashing Investigate ===`);

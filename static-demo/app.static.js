@@ -55,8 +55,7 @@ async function loadRadar() {
     const radarTickers = [...data.highest, ...data.other].map((e) => e.ticker);
     const allTickers = Array.from(new Set([...radarTickers, ...scenarioTickers])).sort();
     _knownTickers = allTickers;
-    const sel = document.getElementById("tickerSelect");
-    sel.innerHTML = renderTickerOptions(allTickers, TIP_STATE.currentTicker);
+    setTickerComboOptions(allTickers);
   } catch (err) {
     statusEl.textContent = `Error loading Market Radar: ${err.message}`;
   }
@@ -140,8 +139,13 @@ document.querySelectorAll(".nav-item").forEach((b) => {
   b.addEventListener("click", () => navigateToView(b.dataset.view));
 });
 document.getElementById("refreshRadar").addEventListener("click", loadRadar);
-document.getElementById("loadTicker").addEventListener("click", () => {
-  const t = document.getElementById("tickerSelect").value;
+// Unified ticker combobox (2026-10-14, shared logic/markup with the
+// local edition, see app.core.js's initTickerCombo()). This build has
+// no Live Mode, so there's no arbitrary-ticker format check here --
+// typing an unknown ticker simply hits the existing 404 ->
+// renderTickerUnavailable() path below, unchanged.
+initTickerCombo((rawText) => {
+  const t = (rawText || "").trim().toUpperCase();
   if (t) navigateToTicker(t, loadTickerDetail);
 });
 
