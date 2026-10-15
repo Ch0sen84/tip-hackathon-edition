@@ -91,6 +91,19 @@ function navigateToView(view, opts = {}) {
   switchView(view);
 }
 
+// formatAgo: compact relative-time string for a unix-seconds timestamp
+// (e.g. Market Radar's last_scan_at) -- production-inspired pattern
+// (its own `ago()` helper), reimplemented here rather than imported
+// since production's version isn't a standalone module.
+function formatAgo(unixSeconds) {
+  if (unixSeconds == null) return "never";
+  const deltaS = Math.max(0, Date.now() / 1000 - unixSeconds);
+  if (deltaS < 60) return "just now";
+  if (deltaS < 3600) return `${Math.floor(deltaS / 60)}m ago`;
+  if (deltaS < 86400) return `${Math.floor(deltaS / 3600)}h ago`;
+  return `${Math.floor(deltaS / 86400)}d ago`;
+}
+
 // renderTickerUnavailable: shown in #tickerDetail when the URL names a
 // ticker that doesn't exist in the current mode's universe/scenario set
 // (typo, or a ticker valid in Demo but not Live or vice versa) -- never a
@@ -1496,6 +1509,33 @@ function renderSettingsView(d) {
       ${!publicDemo && !uw.verified ? `<p class="muted">Activate Live Mode is disabled until Test Connection succeeds for the current key.</p>` : ""}
     </div>`;
 
+  // Market Radar watchlist editor (2026-10-14, Phase A): not shown in
+  // the public demo build (its 11 synthetic scenarios are fixed, not a
+  // user-editable watchlist concept at all). Chips + an add input,
+  // matching the mode/key sections' settings-card style. Each
+  // add/remove PUTs the FULL updated list (see initWatchlistEditor() in
+  // app.live.js) -- simpler and atomic, no partial-update races.
+  const watchlist = d.watchlist || { tickers: [], max_size: 20 };
+  const watchlistSection = publicDemo ? "" : `
+    <div class="settings-card">
+      <h3>Market Radar Watchlist</h3>
+      <p class="muted">Each ticker costs a real UW API call per Scan Now -- limit ${watchlist.max_size} symbols.
+        This is watchlist-based scanning only, not broader-market discovery
+        (Unusual Whales does offer a market-wide screener; it is not wired up here yet).</p>
+      <div class="watchlist-chips" id="watchlistChips">
+        ${watchlist.tickers.map((t) => `
+          <span class="watchlist-chip" data-ticker="${esc(t)}">
+            ${esc(t)}<button class="watchlist-chip-remove" data-remove-ticker="${esc(t)}" title="Remove ${esc(t)}">&times;</button>
+          </span>`).join("")}
+        ${watchlist.tickers.length === 0 ? '<span class="muted">No tickers configured -- Market Radar has nothing to scan.</span>' : ""}
+      </div>
+      <div class="settings-row" style="margin-top:8px">
+        <input type="text" id="watchlistAddInput" placeholder="Add ticker (e.g. AMD)" autocomplete="off" maxlength="7" />
+        <button class="btn" id="watchlistAddBtn" ${watchlist.tickers.length >= watchlist.max_size ? "disabled" : ""}>Add</button>
+      </div>
+      <div id="watchlistStatus" class="muted" style="margin-top:6px"></div>
+    </div>`;
+
   const uwStatusLine = uw.configured
     ? `configured (source: ${esc(uw.source)}, ending •••${esc(uw.last4 || "")})${uw.verified ? " · verified (passed Test Connection)" : " · not yet verified"}${uw.last_test_result ? ` · last test: ${esc(uw.last_test_result)}` : ""}`
     : "not configured";
@@ -1575,7 +1615,7 @@ function renderSettingsView(d) {
         <div id="mcpTestStatus" class="muted" style="margin-top:6px"></div>
       </div>`;
 
-  root.innerHTML = `${banner}${modeSection}${uwSection}${aiSection}`;
+  root.innerHTML = `${banner}${modeSection}${watchlistSection}${uwSection}${aiSection}`;
   return { publicDemo };
 }
 

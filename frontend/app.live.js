@@ -27,6 +27,17 @@ async function apiPost(path, body) {
   return data;
 }
 
+async function apiPut(path, body) {
+  const res = await fetch(`${API_BASE}${path}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body || {}),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.detail || `${path} -> HTTP ${res.status}`);
+  return data;
+}
+
 async function apiDelete(path) {
   const res = await fetch(`${API_BASE}${path}`, { method: "DELETE" });
   const data = await res.json().catch(() => ({}));
@@ -53,7 +64,14 @@ async function loadRadar() {
   try {
     const data = await apiGet("/api/radar");
     _lastRadarData = data;
-    statusEl.textContent = `Scanned ${data.scanned} ticker(s) · ${data.highest.length} highest attention · ${data.other.length} other`;
+    // Honest scan-scope + freshness disclosure (2026-10-14, Phase A):
+    // never implies broader-market discovery that isn't happening, and
+    // states plainly when this scan actually ran (persisted server-side,
+    // survives container recreation -- see settings_store.record_scan()).
+    const scopeLabel = data.scan_scope === "watchlist" ? "watchlist scan" : data.scan_scope || "scan";
+    statusEl.textContent =
+      `${scopeLabel}: ${data.scanned} ticker(s) · ${data.highest.length} highest attention · ` +
+      `${data.other.length} other · last scanned ${formatAgo(data.last_scan_at)}`;
     document.getElementById("activityStrip").innerHTML = renderActivitySummary(data);
 
     const featured = data.highest[0] || null;
@@ -211,11 +229,60 @@ async function loadSettings() {
       if (testAiBtn) testAiBtn.addEventListener("click", testAiKey);
       const testMcpBtn = document.getElementById("testMcpBtn");
       if (testMcpBtn) testMcpBtn.addEventListener("click", testMcpConnection);
+      initWatchlistEditor();
     }
     return d;
   } catch (err) {
     document.getElementById("modePill").textContent = "mode: unknown";
   }
+}
+
+// Market Radar watchlist editor (2026-10-14, Phase A). Whole-list PUT on
+// every add/remove -- reads the current chips from the DOM (already the
+// source of truth after each render) rather than tracking a separate
+// JS-side array, so there's exactly one place the current list lives.
+function initWatchlistEditor() {
+  const addBtn = document.getElementById("watchlistAddBtn");
+  const addInput = document.getElementById("watchlistAddInput");
+  const chipsEl = document.getElementById("watchlistChips");
+  const statusEl = document.getElementById("watchlistStatus");
+  if (!addBtn || !chipsEl) return; // public demo build has no watchlist editor at all
+
+  function currentTickers() {
+    return Array.from(chipsEl.querySelectorAll("[data-ticker]")).map((el) => el.dataset.ticker);
+  }
+
+  async function saveWatchlist(tickers) {
+    statusEl.textContent = "Saving...";
+    try {
+      await apiPut("/api/settings/watchlist", { watchlist: tickers });
+      statusEl.textContent = "";
+      await loadSettings(); // re-render chips from the server's normalized/persisted list
+    } catch (err) {
+      statusEl.textContent = `Error: ${err.message}`;
+    }
+  }
+
+  addBtn.addEventListener("click", () => {
+    const raw = (addInput.value || "").trim().toUpperCase();
+    if (!raw) return;
+    if (!/^[A-Z]{1,5}(\.[A-Z])?$/.test(raw)) {
+      statusEl.textContent = `"${raw}" doesn't look like a valid ticker symbol.`;
+      return;
+    }
+    const updated = Array.from(new Set([...currentTickers(), raw]));
+    addInput.value = "";
+    saveWatchlist(updated);
+  });
+  addInput.addEventListener("keydown", (ev) => {
+    if (ev.key === "Enter") { ev.preventDefault(); addBtn.click(); }
+  });
+  chipsEl.addEventListener("click", (ev) => {
+    const btn = ev.target.closest("[data-remove-ticker]");
+    if (!btn) return;
+    const updated = currentTickers().filter((t) => t !== btn.dataset.removeTicker);
+    saveWatchlist(updated);
+  });
 }
 
 async function setMode(mode) {

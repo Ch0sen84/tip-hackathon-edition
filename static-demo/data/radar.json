@@ -359,5 +359,7 @@
       "history_states": []
     }
   ],
-  "scanned": 11
+  "scanned": 11,
+  "scan_scope": "watchlist",
+  "last_scan_at": 1792027551.1445377
 }

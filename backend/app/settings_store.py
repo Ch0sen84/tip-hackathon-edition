@@ -38,6 +38,15 @@ _FIELDS = (
     # exact key tested, not just "a key exists".
     "verified_uw_key_hash",
     "verified_uw_key_at",
+    # Market Radar (2026-10-14, Phase A): user-editable watchlist +
+    # last-scan telemetry, persisted the same way everything else here
+    # is -- survives container recreation, same file. `watchlist` is
+    # None until the user ever saves one (falls back to the env-seeded
+    # default, see get_watchlist() below); `last_scan_at`/`last_scan_count`
+    # are None until the first /api/radar call actually runs.
+    "watchlist",
+    "last_scan_at",
+    "last_scan_count",
 )
 
 
@@ -50,7 +59,13 @@ def _defaults() -> dict:
         "ai_api_key": None,
         "verified_uw_key_hash": None,
         "verified_uw_key_at": None,
+        "watchlist": None,
+        "last_scan_at": None,
+        "last_scan_count": None,
     }
+
+
+MAX_WATCHLIST_SIZE = int(os.environ.get("TIP_MAX_WATCHLIST_SIZE", "20"))
 
 
 def hash_key(api_key: Optional[str]) -> Optional[str]:
@@ -166,6 +181,67 @@ class SettingsStore:
         data = self.get_all()
         stored = data.get("verified_uw_key_hash")
         return stored is not None and stored == hash_key(api_key)
+
+    def get_watchlist(self, default: list[str]) -> list[str]:
+        """Returns the persisted watchlist, or `default` (the env-seeded
+        TIP_LIVE_WATCHLIST) if the user has never saved one. `default` is
+        passed in rather than read from os.environ here so this module
+        stays free of any dependency on config.py (matches the rest of
+        this file's existing style -- config/env reading lives in
+        config.py, this file only persists what it's given)."""
+        data = self.get_all()
+        wl = data.get("watchlist")
+        if wl is None:
+            return list(default)
+        return list(wl)
+
+    def set_watchlist(self, tickers: list[str]) -> dict:
+        """Validates (format + size cap), normalizes (upper, deduped,
+        order-preserving), and persists a new watchlist. Raises
+        ValueError on any violation -- the caller (main.py's route) is
+        responsible for turning that into an HTTP 400, never silently
+        truncating or dropping an invalid entry."""
+        from .ai.validation import TICKER_RE  # local import avoids a circular import at module load
+
+        if not isinstance(tickers, list):
+            raise ValueError("watchlist must be a list of ticker strings")
+        normalized: list[str] = []
+        seen = set()
+        for t in tickers:
+            if not isinstance(t, str):
+                raise ValueError(f"watchlist entries must be strings, got {type(t).__name__}")
+            up = t.strip().upper()
+            if not up:
+                continue
+            if not TICKER_RE.match(up):
+                raise ValueError(f"'{up}' is not a valid ticker symbol")
+            if up not in seen:
+                normalized.append(up)
+                seen.add(up)
+        if len(normalized) > MAX_WATCHLIST_SIZE:
+            raise ValueError(
+                f"watchlist has {len(normalized)} symbols, which is over the {MAX_WATCHLIST_SIZE}-symbol "
+                "limit -- each watchlist ticker costs a real UW API call per scan, so this cap exists to "
+                "keep Scan Now's quota usage predictable, not arbitrarily"
+            )
+        with self._lock:
+            data = self._read()
+            data["watchlist"] = normalized
+            self._write(data)
+            return data
+
+    def record_scan(self, ticker_count: int) -> dict:
+        """Called once per real /api/radar scan -- persists when it ran
+        and how many tickers it covered, so a container restart doesn't
+        lose "last scanned" context (the honest alternative to either
+        showing nothing or silently claiming the data is fresher than
+        it is)."""
+        with self._lock:
+            data = self._read()
+            data["last_scan_at"] = time.time()
+            data["last_scan_count"] = ticker_count
+            self._write(data)
+            return data
 
     def set_ai_key(self, provider: str, api_key: str) -> dict:
         with self._lock:

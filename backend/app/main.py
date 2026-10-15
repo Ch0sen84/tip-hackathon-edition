@@ -52,7 +52,7 @@ from .ai.validation import ValidationError as AiValidationError
 from .config import settings
 from .core import scan_service, tip_evidence
 from .core.candles import build_markers
-from .settings_store import SettingsStore, last4
+from .settings_store import MAX_WATCHLIST_SIZE, SettingsStore, last4
 from .storage import QualifyingDaysStore
 
 app = FastAPI(title="TIP Hackathon Edition", version="0.1.0")
@@ -93,7 +93,14 @@ def get_adapter() -> UWDataAdapter:
     data = _settings_store.get_all()
     mode = data["mode"]
     key, _source = _effective_uw_key(data)
-    sig = (mode, key)
+    # Market Radar (2026-10-14, Phase A): the watchlist is now user-
+    # editable and persisted (SettingsStore.get_watchlist(), falling back
+    # to TIP_LIVE_WATCHLIST only as the seed default) -- included in the
+    # adapter cache signature so saving a new watchlist actually takes
+    # effect on the NEXT /api/radar call instead of silently continuing
+    # to scan the old one until some unrelated cache-busting event.
+    watchlist = tuple(_settings_store.get_watchlist(default=settings.live_watchlist))
+    sig = (mode, key, watchlist)
     if _adapter is None or _adapter_sig != sig:
         if mode != "live":
             _adapter = SyntheticDataAdapter(settings.fixtures_dir)
@@ -102,7 +109,7 @@ def get_adapter() -> UWDataAdapter:
                 api_key=key or "",
                 base_url=settings.uw_base_url,
                 client_api_id=settings.uw_client_api_id,
-                watchlist=settings.live_watchlist,
+                watchlist=list(watchlist),
             )
         _adapter_sig = sig
     return _adapter
@@ -252,7 +259,42 @@ def get_settings():
             "provider": data.get("ai_provider"),
             "last4": last4(ai_key),
         },
+        # Market Radar (2026-10-14, Phase A): included here too (not just
+        # the dedicated /api/settings/watchlist GET) so the Settings page
+        # can render the watchlist editor from the same /api/settings
+        # call it already makes, without a second round-trip.
+        "watchlist": {
+            "tickers": _settings_store.get_watchlist(default=settings.live_watchlist),
+            "max_size": MAX_WATCHLIST_SIZE,
+        },
     }
+
+
+class WatchlistBody(BaseModel):
+    watchlist: list[str]
+
+
+@app.get("/api/settings/watchlist")
+def get_watchlist():
+    """Market Radar (2026-10-14, Phase A): the persisted watchlist (or
+    the env-seeded default if never saved), plus the size cap so the UI
+    can disclose it rather than discovering it only on a rejected save."""
+    wl = _settings_store.get_watchlist(default=settings.live_watchlist)
+    return {"watchlist": wl, "max_size": MAX_WATCHLIST_SIZE, "default": settings.live_watchlist}
+
+
+@app.put("/api/settings/watchlist")
+def set_watchlist(body: WatchlistBody):
+    """Whole-list replace (not incremental add/remove) -- simpler and
+    atomic; the frontend maintains the current list client-side and PUTs
+    the full updated array on every add/remove click. Resets the adapter
+    cache immediately so the very next /api/radar scan reflects it."""
+    try:
+        data = _settings_store.set_watchlist(body.watchlist)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    _reset_adapter_cache()
+    return {"watchlist": data["watchlist"], "max_size": MAX_WATCHLIST_SIZE}
 
 
 @app.post("/api/settings/mode")
@@ -423,12 +465,21 @@ def test_mcp():
 @app.get("/api/radar")
 def radar():
     """Market Radar: scan every ticker in the adapter's universe and return
-    the ones that qualify (tip_evidence.qualifies), highest-attention first."""
+    the ones that qualify (tip_evidence.qualifies), highest-attention first.
+
+    Market Radar (2026-10-14, Phase A): records when this scan ran and
+    how many tickers it covered (persisted -- survives container
+    recreation), and explicitly discloses `scan_scope: "watchlist"` so
+    the UI never implies broader-market discovery that isn't actually
+    happening. UW's REST API does offer a genuine stock/options screener
+    capable of real market-wide discovery (confirmed, not assumed) --
+    that is NOT wired up here; this remains honest watchlist-only
+    scanning until that's a separately-scoped feature."""
     adapter = get_adapter()
     store = get_store()
     universe = adapter.get_universe()
     if not universe:
-        return {"highest": [], "other": [], "scanned": 0}
+        return {"highest": [], "other": [], "scanned": 0, "scan_scope": "watchlist", "last_scan_at": None}
 
     items = []
     scans_by_ticker = {}
@@ -465,10 +516,16 @@ def radar():
         entry["history_states"] = [h["state"] for h in hist] if len(hist) > 1 else []
         return entry
 
+    scan_record = _settings_store.record_scan(len(universe))
     return {
         "highest": [_attach(e) for e in highest],
         "other": [_attach(e) for e in other],
         "scanned": len(universe),
+        # Honest disclosure (2026-10-14, Phase A): this is a scan of the
+        # user's configured watchlist, never broader-market discovery --
+        # see this function's docstring for why that distinction matters.
+        "scan_scope": "watchlist",
+        "last_scan_at": scan_record["last_scan_at"],
     }
 
 
