@@ -10,7 +10,7 @@ never guaranteed) and discarded 2 of every 3 requested raw rows -- the
 actual cause of the "UW only returns 1/3 of requested candles" finding.
 """
 from app.core.candles import (
-    build_candles, raw_limit_for_trading_days, select_regular_session_bars,
+    build_candles, build_markers, raw_limit_for_trading_days, select_regular_session_bars,
 )
 
 
@@ -146,6 +146,26 @@ class TestBuildCandlesWithSessionSelection:
         assert len(candles) == 84
         assert all(c["v"] == 5000 - 1000 for c in candles)  # regular-only volume, not cumulative
 
+class TestBuildMarkersValueField:
+    """2026-10-15 compact evidence interface: markers now carry a real
+    `value` (premium) field so day/category aggregates are genuine, not
+    estimated -- None when the source data has no premium, never 0 or
+    a guessed figure."""
+
+    def test_darkpool_trade_value_is_the_real_premium(self):
+        markers = build_markers([], [{"executed_at": "2026-10-14T20:00:00Z", "price": 45.0, "premium": 8_000_000}])
+        assert markers[0]["value"] == 8_000_000.0
+
+    def test_flow_alert_value_is_the_real_total_premium(self):
+        markers = build_markers([{"created_at": "2026-10-14T19:00:00Z", "total_premium": 1_800_000, "is_call": True}], [])
+        assert markers[0]["value"] == 1_800_000.0
+
+    def test_missing_premium_is_none_not_zero_or_estimated(self):
+        markers = build_markers([{"created_at": "2026-10-14T19:00:00Z", "is_call": True}], [])
+        assert markers[0]["value"] is None
+
+
+class TestIntradayRowsUnaffected:
     def test_intraday_rows_are_never_session_filtered_or_deduped(self):
         """5m/other intraday rows each have a distinct start_time already
         -- selection logic must be a no-op for them (caller passes

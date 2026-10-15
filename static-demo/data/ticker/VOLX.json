@@ -1,13 +1,13 @@
 {
   "ticker": "VOLX",
-  "state": "CONFIRMED",
-  "previous_state": "NEW",
-  "transition_rule": "multi_signal_or_persistence_on_first_reeval",
+  "state": "STABLE",
+  "previous_state": "CONFIRMED",
+  "transition_rule": ">= 3_qualifying_days_and_price_confirmed",
   "confidence": "high",
   "signal_type": "multi-signal",
   "confidence_reason": "Multi-signal confirmation: options_flow_anomaly, historical_percentile",
   "qualifies": true,
-  "qualifying_days_count": 1,
+  "qualifying_days_count": 3,
   "gates": {
     "dark_pool_anomaly": {
       "passed": false,
@@ -83,12 +83,6 @@
   "current_read": "Dark-pool activity well above normal; stock rose 1.9%.",
   "evidence": [
     {
-      "family": "lifecycle",
-      "text": "TIP signal state CONFIRMED",
-      "key": false,
-      "short": "TIP signal state CONFIRMED"
-    },
-    {
       "family": "price",
       "text": "Price +1.9% at 155.10",
       "key": true,
@@ -102,16 +96,28 @@
   },
   "history": [
     {
-      "scan_date": "2026-10-14",
+      "scan_date": "2026-10-13",
       "any_gate_passed": true,
       "state": "NEW",
-      "created_at": "2026-10-15 03:08:19"
+      "created_at": "2026-10-15 04:55:10"
     },
     {
       "scan_date": "2026-10-14",
       "any_gate_passed": true,
       "state": "CONFIRMED",
-      "created_at": "2026-10-15 03:08:19"
+      "created_at": "2026-10-15 04:55:10"
+    },
+    {
+      "scan_date": "2026-10-15",
+      "any_gate_passed": true,
+      "state": "CONFIRMED",
+      "created_at": "2026-10-15 04:55:10"
+    },
+    {
+      "scan_date": "2026-10-15",
+      "any_gate_passed": true,
+      "state": "STABLE",
+      "created_at": "2026-10-15 04:55:10"
     }
   ],
   "raw": {

@@ -174,11 +174,17 @@ def build_markers(flow_alerts: list, darkpool_trades: list) -> list:
         price = t.get("price")
         if not ts:
             continue
+        premium = t.get("premium")
         markers.append({
             "kind": "darkpool_trade",
             "time": ts,
             "price": float(price) if price is not None else None,
             "label": "Dark pool print",
+            # 2026-10-15 (compact evidence interface): real recorded trade
+            # premium (price*size, as reported by UW), used for honest
+            # day/category aggregate $ totals -- never estimated when
+            # absent (None, not 0 or a derived guess).
+            "value": float(premium) if premium is not None else None,
         })
     for a in flow_alerts:
         ts = a.get("created_at")
@@ -186,11 +192,13 @@ def build_markers(flow_alerts: list, darkpool_trades: list) -> list:
             continue
         price = a.get("underlying_price")
         side = "call" if a.get("is_call") else ("put" if a.get("is_put") else None)
+        premium = a.get("total_premium")
         markers.append({
             "kind": "flow_alert",
             "time": ts,
             "price": float(price) if price is not None else None,
             "label": f"Flow alert{f' ({side})' if side else ''}",
+            "value": float(premium) if premium is not None else None,
         })
     markers.sort(key=lambda m: m["time"])
     return markers

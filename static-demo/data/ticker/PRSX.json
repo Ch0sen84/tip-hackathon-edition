@@ -102,28 +102,28 @@
   },
   "history": [
     {
-      "scan_date": "2026-10-12",
-      "any_gate_passed": true,
-      "state": "NEW",
-      "created_at": "2026-10-15 03:08:19"
-    },
-    {
       "scan_date": "2026-10-13",
       "any_gate_passed": true,
+      "state": "NEW",
+      "created_at": "2026-10-15 04:55:10"
+    },
+    {
+      "scan_date": "2026-10-14",
+      "any_gate_passed": true,
       "state": "BUILDING",
-      "created_at": "2026-10-15 03:08:19"
+      "created_at": "2026-10-15 04:55:10"
     },
     {
-      "scan_date": "2026-10-14",
+      "scan_date": "2026-10-15",
       "any_gate_passed": true,
       "state": "CONFIRMED",
-      "created_at": "2026-10-15 03:08:19"
+      "created_at": "2026-10-15 04:55:10"
     },
     {
-      "scan_date": "2026-10-14",
+      "scan_date": "2026-10-15",
       "any_gate_passed": true,
       "state": "CONFIRMED",
-      "created_at": "2026-10-15 03:08:19"
+      "created_at": "2026-10-15 04:55:10"
     }
   ],
   "raw": {

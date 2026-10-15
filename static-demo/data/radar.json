@@ -1,6 +1,48 @@
 {
   "highest": [
     {
+      "ticker": "VOLX",
+      "name": null,
+      "families": [
+        "dark_pool",
+        "options"
+      ],
+      "evidence": [
+        {
+          "family": "lifecycle",
+          "text": "TIP signal state CONFIRMED",
+          "key": false,
+          "short": "TIP signal state CONFIRMED"
+        },
+        {
+          "family": "price",
+          "text": "Price +1.9% at 155.10",
+          "key": true,
+          "short": "Price +1.9% at 155.10"
+        }
+      ],
+      "current_read": "Dark-pool activity well above normal; stock rose 1.9%.",
+      "headline": "Dark-pool activity above normal \u00b7 Options flow anomaly",
+      "label": "MULTI-SOURCE",
+      "categories": [
+        "dark_pool",
+        "options"
+      ],
+      "index_context": false,
+      "question": null,
+      "research": [],
+      "enriched": true,
+      "state": "CONFIRMED",
+      "confidence": "high",
+      "signal_type": "multi-signal",
+      "qualifying_days_count": 2,
+      "history_states": [
+        "NEW",
+        "CONFIRMED",
+        "CONFIRMED"
+      ]
+    },
+    {
       "ticker": "FLUX",
       "name": null,
       "families": [
@@ -29,44 +71,6 @@
       ],
       "current_read": "Dark-pool activity well above normal; stock rose 2.1%.",
       "headline": "Dark pool ~3.8x recent average (short history) \u00b7 Options flow anomaly",
-      "label": "MULTI-SOURCE",
-      "categories": [
-        "dark_pool",
-        "options"
-      ],
-      "index_context": false,
-      "question": null,
-      "research": [],
-      "enriched": true,
-      "state": "NEW",
-      "confidence": "high",
-      "signal_type": "multi-signal",
-      "qualifying_days_count": 0,
-      "history_states": []
-    },
-    {
-      "ticker": "VOLX",
-      "name": null,
-      "families": [
-        "dark_pool",
-        "options"
-      ],
-      "evidence": [
-        {
-          "family": "lifecycle",
-          "text": "TIP signal state NEW",
-          "key": false,
-          "short": "TIP signal state NEW"
-        },
-        {
-          "family": "price",
-          "text": "Price +1.9% at 155.10",
-          "key": true,
-          "short": "Price +1.9% at 155.10"
-        }
-      ],
-      "current_read": "Dark-pool activity well above normal; stock rose 1.9%.",
-      "headline": "Dark-pool activity above normal \u00b7 Options flow anomaly",
       "label": "MULTI-SOURCE",
       "categories": [
         "dark_pool",
@@ -361,5 +365,5 @@
   ],
   "scanned": 11,
   "scan_scope": "watchlist",
-  "last_scan_at": 1792033699.4374936
+  "last_scan_at": 1792040110.8034873
 }

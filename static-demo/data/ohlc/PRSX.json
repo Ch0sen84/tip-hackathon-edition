@@ -125,12 +125,16 @@
       "kind": "darkpool_trade",
       "time": "2026-10-13T11:15:00Z",
       "price": 38.4,
-      "label": "Dark pool print"
+      "label": "Dark pool print",
+      "value": 9800000.0
     }
   ],
   "candle_count": 14,
   "earliest_candle": "2026-09-24",
   "latest_candle": "2026-10-13",
   "range_fully_satisfied": null,
-  "available_span_days": null
+  "available_span_days": null,
+  "raw_records_requested": null,
+  "raw_records_returned": null,
+  "regular_session_records_retained": null
 }

@@ -125,18 +125,23 @@
       "kind": "darkpool_trade",
       "time": "2026-10-12T12:00:00Z",
       "price": 31.05,
-      "label": "Dark pool print"
+      "label": "Dark pool print",
+      "value": 610000.0
     },
     {
       "kind": "flow_alert",
       "time": "2026-10-12T15:10:01Z",
       "price": 31.02,
-      "label": "Flow alert (call)"
+      "label": "Flow alert (call)",
+      "value": 42000.0
     }
   ],
   "candle_count": 14,
   "earliest_candle": "2026-09-23",
   "latest_candle": "2026-10-12",
   "range_fully_satisfied": null,
-  "available_span_days": null
+  "available_span_days": null,
+  "raw_records_requested": null,
+  "raw_records_returned": null,
+  "regular_session_records_retained": null
 }

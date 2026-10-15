@@ -282,7 +282,28 @@ pre.raw { background: var(--panel3); padding: 12px; border-radius: 8px; overflow
 .chart-card-prominent .chart-container { min-height: 340px; }
 .gate-groups-summary { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0 10px; }
 .gate-group-count-pill { font-size: 11px; font-weight: 600; border: 1px solid var(--border); border-radius: 4px; padding: 2px 8px; }
+.gate-group-count-pill.gcp-supporting { color: var(--bull); border-color: rgba(62,207,142,0.4); }
+.gate-group-count-pill.gcp-conflicting { color: var(--bear); border-color: rgba(241,99,110,0.4); }
+.gate-group-count-pill.gcp-unmet { color: var(--text2); }
+.gate-group-count-pill.gcp-datalimit { color: var(--amber); border-color: rgba(232,179,57,0.4); }
 .gate-details > summary { cursor: pointer; font-size: 13px; margin-bottom: 6px; }
+
+/* --- Compact paginated evidence interface (2026-10-15) ----------------- */
+.evidence-summary-table { width: 100%; border-collapse: collapse; margin-top: 4px; font-size: 12px; }
+.evidence-summary-table th, .evidence-summary-table td { text-align: left; padding: 3px 8px 3px 0; border-bottom: 1px solid var(--border2); }
+.evidence-detail-panel { margin-top: 10px; }
+.evidence-detail-panel > summary { cursor: pointer; font-size: 12.5px; margin-bottom: 8px; }
+.evidence-controls { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+.evidence-controls select, .evidence-controls input {
+  background: var(--panel2); border: 1px solid var(--border); color: var(--text);
+  border-radius: 6px; padding: 4px 8px; font-size: 12px;
+}
+.evidence-pagination { display: flex; align-items: center; gap: 10px; margin-top: 8px; font-size: 12px; }
+.btn-sm {
+  background: var(--panel2); border: 1px solid var(--border); color: var(--text);
+  border-radius: 6px; padding: 3px 10px; font-size: 12px; cursor: pointer;
+}
+.btn-sm:disabled { opacity: .4; cursor: not-allowed; }
 
 /* --- Market Radar watchlist editor (2026-10-14, Phase A) -------------- */
 .watchlist-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; min-height: 24px; }

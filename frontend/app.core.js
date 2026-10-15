@@ -224,7 +224,12 @@ function clearTickerView() {
 // recency feature.
 const RECENT_TICKERS_KEY = "tip_recent_tickers";
 const MAX_RECENT_TICKERS = 8;
-const MAX_SUGGESTIONS_SHOWN = 8;
+// 2026-10-15: raised from 8 -- the demo fixture set grew to 11 scenario
+// tickers since this cap was chosen, which silently pushed the
+// alphabetically-last 3 (TEPID/VOLX/ZYNC) out of the unfiltered
+// suggestion view (test_manual_bugfixes.mjs caught it). 16 comfortably
+// covers today's 11 plus headroom without needing another bump soon.
+const MAX_SUGGESTIONS_SHOWN = 16;
 
 function getRecentTickers() {
   try {
@@ -1090,6 +1095,164 @@ function wireChartRangeRow(containerId, onChange) {
   });
 }
 
+// --- Compact paginated evidence interface (2026-10-15, Chad-approved) ------
+//
+// Replaces the old single flat <table> that rendered every individual
+// event at once (hundreds of rows -> a 5-page PDF when expanded).
+// Nothing is removed or hidden permanently: every event from allEvents
+// stays reachable, just grouped/paginated/filterable instead of dumped.
+
+const EVIDENCE_PAGE_SIZE = 20;
+
+function fmtMoney(v) {
+  if (v == null) return null;
+  const abs = Math.abs(v);
+  if (abs >= 1e6) return `$${(v / 1e6).toFixed(1)}M`;
+  if (abs >= 1e3) return `$${(v / 1e3).toFixed(0)}K`;
+  return `$${Math.round(v)}`;
+}
+
+// Groups by REAL event date + category -- never fabricates a day with
+// no real events, never pads a sparse day to look busier than it is.
+function buildEvidenceDaySummary(allEvents) {
+  const byDate = new Map();
+  for (const e of allEvents) {
+    const d = dateOnly(e.time);
+    if (!byDate.has(d)) byDate.set(d, { date: d, flowCount: 0, flowValue: 0, dpCount: 0, dpValue: 0 });
+    const row = byDate.get(d);
+    if (e.kind === "flow_alert") {
+      row.flowCount += 1;
+      if (e.value != null) row.flowValue += e.value;
+    } else {
+      row.dpCount += 1;
+      if (e.value != null) row.dpValue += e.value;
+    }
+  }
+  return Array.from(byDate.values()).sort((a, b) => (a.date < b.date ? 1 : -1)); // newest day first
+}
+
+function renderEvidenceDaySummaryTable(byDay) {
+  if (!byDay.length) return `<div class="empty">No evidence recorded for this chart's period.</div>`;
+  const rows = byDay.map((d) => `
+    <tr>
+      <td>${esc(d.date)}</td>
+      <td>${d.flowCount ? `${d.flowCount}${d.flowValue ? ` (${esc(fmtMoney(d.flowValue))})` : ""}` : "\u2014"}</td>
+      <td>${d.dpCount ? `${d.dpCount}${d.dpValue ? ` (${esc(fmtMoney(d.dpValue))})` : ""}` : "\u2014"}</td>
+    </tr>`).join("");
+  return `
+    <table class="evidence-summary-table">
+      <thead><tr><th>Date</th><th>Flow alerts (premium)</th><th>Dark-pool prints (premium)</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>`;
+}
+
+// renderEvidencePanel: the always-visible concise summary PLUS the
+// collapsed-by-default detail panel shell (filter/sort controls + an
+// empty table body -- wireEvidencePanel fills it with only ONE page's
+// worth of rows at a time, never all events at once).
+function renderEvidencePanel(allEvents, excludedCount) {
+  const byDay = buildEvidenceDaySummary(allEvents);
+  const excludedNote = excludedCount > 0
+    ? `<div class="muted">${excludedCount} evidence marker(s) dated after this chart's most recent bar are not shown on the chart (no real candle exists yet for that date) -- still counted and listed below, never clamped or estimated.</div>`
+    : "";
+  if (!allEvents.length) {
+    return `${excludedNote}<div class="empty">No evidence recorded for this chart's period.</div>`;
+  }
+  return `
+    <div class="evidence-summary">
+      <div class="muted">Evidence by day (${allEvents.length} real event${allEvents.length === 1 ? "" : "s"} total)</div>
+      ${renderEvidenceDaySummaryTable(byDay)}
+    </div>
+    ${excludedNote}
+    <details class="evidence-detail-panel">
+      <summary class="muted">Individual observations (${allEvents.length}) \u2014 filter, sort, paginated</summary>
+      <div class="evidence-controls">
+        <select id="evFilterType">
+          <option value="">All types</option>
+          <option value="flow_alert">Flow alerts</option>
+          <option value="darkpool_trade">Dark-pool trades</option>
+        </select>
+        <input type="date" id="evFilterDate" title="Filter to one date" />
+        <input type="number" id="evFilterMinValue" placeholder="Min value ($)" title="Minimum premium/value" />
+        <select id="evSort">
+          <option value="time_desc">Newest first</option>
+          <option value="time_asc">Oldest first</option>
+          <option value="value_desc">Largest value first</option>
+        </select>
+      </div>
+      <table class="chart-markers-table">
+        <thead><tr><th>Time</th><th>Kind</th><th>Label</th><th>Price</th><th>Value</th></tr></thead>
+        <tbody id="evTableBody"></tbody>
+      </table>
+      <div class="evidence-pagination">
+        <button id="evPrevPage" class="btn-sm">\u2190 Prev</button>
+        <span id="evPageInfo" class="muted"></span>
+        <button id="evNextPage" class="btn-sm">Next \u2192</button>
+      </div>
+    </details>`;
+}
+
+// wireEvidencePanel: owns filter/sort/pagination state entirely
+// client-side over the ALREADY-FETCHED allEvents array (no new
+// requests -- every event was already delivered by the ohlc response).
+// Re-renders only the current page's rows (<=EVIDENCE_PAGE_SIZE) into
+// #evTableBody on every control change, so the DOM never holds more
+// than one page of event rows regardless of how many real events exist.
+function wireEvidencePanel(allEvents) {
+  let page = 0;
+  function currentFiltered() {
+    const typeEl = document.getElementById("evFilterType");
+    if (!typeEl) return [];
+    const dateEl = document.getElementById("evFilterDate");
+    const minValEl = document.getElementById("evFilterMinValue");
+    const sortEl = document.getElementById("evSort");
+    let filtered = allEvents.filter((e) => {
+      if (typeEl.value && e.kind !== typeEl.value) return false;
+      if (dateEl.value && dateOnly(e.time) !== dateEl.value) return false;
+      if (minValEl.value && (e.value == null || e.value < Number(minValEl.value))) return false;
+      return true;
+    });
+    const mode = sortEl.value;
+    filtered.sort((a, b) => {
+      if (mode === "time_asc") return a.time < b.time ? -1 : 1;
+      if (mode === "value_desc") return (b.value || 0) - (a.value || 0);
+      return a.time < b.time ? 1 : -1; // time_desc, default
+    });
+    return filtered;
+  }
+  function render() {
+    const filtered = currentFiltered();
+    const totalPages = Math.max(1, Math.ceil(filtered.length / EVIDENCE_PAGE_SIZE));
+    page = Math.min(page, totalPages - 1);
+    const pageItems = filtered.slice(page * EVIDENCE_PAGE_SIZE, (page + 1) * EVIDENCE_PAGE_SIZE);
+    const tbody = document.getElementById("evTableBody");
+    if (!tbody) return;
+    tbody.innerHTML = pageItems.map((e) => `
+      <tr>
+        <td>${esc(e.time)}</td>
+        <td>${esc(e.kind === "darkpool_trade" ? "Dark-pool trade" : "Flow alert")}</td>
+        <td>${esc(e.label || "")}</td>
+        <td>${e.price != null ? Number(e.price).toFixed(2) : "\u2014"}</td>
+        <td>${e.value != null ? esc(fmtMoney(e.value)) : "\u2014"}</td>
+      </tr>`).join("");
+    const pageInfoEl = document.getElementById("evPageInfo");
+    if (pageInfoEl) pageInfoEl.textContent = `Page ${page + 1} of ${totalPages} (${filtered.length} matching)`;
+    const prevBtn = document.getElementById("evPrevPage");
+    const nextBtn = document.getElementById("evNextPage");
+    if (prevBtn) prevBtn.disabled = page === 0;
+    if (nextBtn) nextBtn.disabled = page >= totalPages - 1;
+  }
+  ["evFilterType", "evFilterDate", "evFilterMinValue", "evSort"].forEach((id) => {
+    const el = document.getElementById(id);
+    if (el) el.addEventListener("change", () => { page = 0; render(); });
+  });
+  const prevBtn = document.getElementById("evPrevPage");
+  const nextBtn = document.getElementById("evNextPage");
+  if (prevBtn) prevBtn.addEventListener("click", () => { page = Math.max(0, page - 1); render(); });
+  if (nextBtn) nextBtn.addEventListener("click", () => { page += 1; render(); });
+  render();
+}
+
 function renderChartUnavailable(reason) {
   const detail = reason && reason.message ? reason.message
     : reason && reason.status ? `UW status: ${reason.status}`
@@ -1253,28 +1416,9 @@ function mountCandlestickChart(containerId, ohlc) {
     const info = document.createElement("div");
     info.className = "chart-markers-info";
     info.style.marginTop = "6px";
-    let html = "";
-    if (excludedCount > 0) {
-      html += `<div class="muted">${excludedCount} evidence marker(s) dated after this chart's most recent bar are not shown (no real candle exists yet for that date) -- not clamped or estimated.</div>`;
-    }
-    if (allEvents.length > 0) {
-      const sorted = [...allEvents].sort((a, b) => (a.time < b.time ? 1 : -1)); // newest first
-      const rows = sorted.map((e) => `
-        <tr>
-          <td>${esc(e.time)}</td>
-          <td>${esc(e.kind === "darkpool_trade" ? "Dark-pool trade" : "Flow alert")}</td>
-          <td>${esc(e.label || "")}</td>
-          <td>${e.price != null ? Number(e.price).toFixed(2) : "--"}</td>
-        </tr>`).join("");
-      html += `
-        <details class="chart-markers-detail">
-          <summary class="muted">Evidence on this chart (${allEvents.length} event${allEvents.length === 1 ? "" : "s"}, grouped above by day/kind -- every individual event below)</summary>
-          <table class="chart-markers-table"><thead><tr><th>Time</th><th>Kind</th><th>Label</th><th>Price</th></tr></thead>
-          <tbody>${rows}</tbody></table>
-        </details>`;
-    }
-    info.innerHTML = html;
+    info.innerHTML = renderEvidencePanel(allEvents, excludedCount);
     root.after(info);
+    wireEvidencePanel(allEvents);
   }
 
   root._tipChart = chart;
