@@ -589,6 +589,16 @@ def ticker_analysis(ticker: str):
 # (see range_fully_satisfied below), never assumed from this table alone.
 RANGE_TO_TRADING_DAYS = {"1M": 22, "3M": 65, "6M": 130, "1Y": 252}
 
+# 2026-10-15 (Chad-approved, item #3 -- 5D explicitly NOT included this
+# pass): genuine intraday range. candle_size="5m" (distinct from the
+# daily ranges' "1d") + UW's own timeframe=1D query param -- live-
+# verified to return ~191 real 5-minute bars spanning pre-market through
+# post-market for one real trading day (NOT a handful of daily bars
+# relabeled). No raw-limit multiplier needed here: unlike daily bars,
+# each intraday bucket already has its own distinct start_time, so there
+# is no multi-session-per-timestamp collision to over-fetch around.
+INTRADAY_RANGES = {"1D": {"candle_size": "5m", "limit": 200}}
+
 
 @app.get("/api/ticker/{ticker}/ohlc")
 def ticker_ohlc(ticker: str, timeframe: str = "1d", limit: int = 180, range: Optional[str] = None):
@@ -609,10 +619,15 @@ def ticker_ohlc(ticker: str, timeframe: str = "1d", limit: int = 180, range: Opt
     elsewhere in this route already relies on the existing defaults)."""
     if range is not None:
         range = range.strip().upper()
-        if range not in RANGE_TO_TRADING_DAYS:
-            raise HTTPException(status_code=400, detail=f"range must be one of {sorted(RANGE_TO_TRADING_DAYS)}")
-        timeframe = "1d"
-        limit = RANGE_TO_TRADING_DAYS[range]
+        all_ranges = set(RANGE_TO_TRADING_DAYS) | set(INTRADAY_RANGES)
+        if range not in all_ranges:
+            raise HTTPException(status_code=400, detail=f"range must be one of {sorted(all_ranges)}")
+        if range in INTRADAY_RANGES:
+            timeframe = INTRADAY_RANGES[range]["candle_size"]
+            limit = INTRADAY_RANGES[range]["limit"]
+        else:
+            timeframe = "1d"
+            limit = RANGE_TO_TRADING_DAYS[range]
     adapter = get_adapter()
     ticker = ticker.upper()
     # Same real fix as ticker_analysis() above (2026-10-14): only the
@@ -650,12 +665,19 @@ def ticker_ohlc(ticker: str, timeframe: str = "1d", limit: int = 180, range: Opt
     latest_candle = candles[-1]["t"] if candles else None
     available_span_days = None
     range_fully_satisfied = None
-    if range is not None:
+    if range is not None and range in INTRADAY_RANGES:
+        # Intraday coverage is "did we get a real continuous session's
+        # worth of 5m bars" (live-verified ~191 for a full day), not a
+        # trading-day count -- a much looser floor (a half-day/holiday
+        # genuinely has fewer bars; never treat that as a bug).
+        range_fully_satisfied = len(candles) >= 50
+    elif range is not None:
         expected_bars = RANGE_TO_TRADING_DAYS[range]
         # Allow a small tolerance for holidays/early closes -- 90% of the
         # expected trading-day COUNT, not a calendar-day comparison,
         # since that's what was actually requested (a bar count).
         range_fully_satisfied = len(candles) >= int(expected_bars * 0.9)
+    if range is not None:
         if candles:
             try:
                 from datetime import datetime
@@ -679,6 +701,13 @@ def ticker_ohlc(ticker: str, timeframe: str = "1d", limit: int = 180, range: Opt
         "latest_candle": latest_candle,
         "range_fully_satisfied": range_fully_satisfied,
         "available_span_days": available_span_days,
+        # 2026-10-15 session-handling fix: real coverage disclosure, not
+        # just the final candle count -- lets a caller verify (not just
+        # trust) that the raw-record-to-unique-trading-day math actually
+        # worked, per Chad's requirement to show this explicitly.
+        "raw_records_requested": ohlc.get("raw_records_requested"),
+        "raw_records_returned": ohlc.get("raw_records_returned"),
+        "regular_session_records_retained": ohlc.get("regular_session_records_retained"),
     }
 
 

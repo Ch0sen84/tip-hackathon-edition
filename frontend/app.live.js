@@ -149,18 +149,27 @@ async function loadOhlcChart(ticker, range, mySeq) {
     if (mySeq !== _navSeq) return;
     mountCandlestickChart("ohlcChartContainer", ohlc);
     if (!noteEl) return;
+    const unit = range === "1D" ? "5-minute bar(s)" : "trading day(s)";
+    // 2026-10-15 (Chad's item #4): real raw-record disclosure, not just
+    // the final candle count -- lets you verify (not just trust) the
+    // raw-over-fetch/session-selection math on screen.
+    const rawNote = (ohlc.raw_records_requested != null)
+      ? ` [raw: ${ohlc.raw_records_returned}/${ohlc.raw_records_requested} requested, ` +
+        `${ohlc.regular_session_records_retained} retained]`
+      : "";
     if (ohlc.unavailable || !ohlc.candle_count) {
       noteEl.textContent = "";
     } else if (ohlc.range_fully_satisfied === false) {
       noteEl.textContent =
-        `${range} requested \u00b7 only ${ohlc.candle_count} trading day(s) of real history available` +
-        `${ohlc.available_span_days != null ? ` (~${ohlc.available_span_days} calendar days)` : ""} -- ` +
-        `showing everything UW has for ${esc(ticker)}, not padded to the full requested range.`;
+        `${range} requested \u00b7 only ${ohlc.candle_count} ${unit} of real history available` +
+        `${range !== "1D" && ohlc.available_span_days != null ? ` (~${ohlc.available_span_days} calendar days)` : ""} -- ` +
+        `showing everything UW has for ${esc(ticker)}, not padded to the full requested range.${rawNote}`;
     } else {
       const negNote = ohlc.negative_volume_bars_clamped
         ? ` \u00b7 ${ohlc.negative_volume_bars_clamped} bar(s) had an upstream negative-volume artifact (clamped to 0 for display)`
         : "";
-      noteEl.textContent = `${range} \u00b7 ${ohlc.candle_count} daily candles${negNote}`;
+      const kind = range === "1D" ? "5-minute candles (pre/regular/post-market)" : "daily candles";
+      noteEl.textContent = `${range} \u00b7 ${ohlc.candle_count} ${kind}${negNote}${rawNote}`;
     }
   } catch (chartErr) {
     if (mySeq !== _navSeq) return;

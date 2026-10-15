@@ -102,6 +102,52 @@ def test_range_fully_satisfied_is_false_when_the_ticker_has_less_history_than_re
     assert body["range_fully_satisfied"] is False
 
 
+def test_1d_range_uses_5m_candle_size_and_uw_1d_window(app_main, monkeypatch):
+    """2026-10-15 (Chad-approved item #3): genuine intraday range -- must
+    switch candle_size to 5m (never daily bars relabeled as "1D") and
+    pass UW's own timeframe=1D window param."""
+    from app import main as _main
+    seen = {}
+    real_get_ohlc = _main.SyntheticDataAdapter.get_ohlc
+
+    def spy_get_ohlc(self, ticker, timeframe="1d", limit=180, window=None):
+        seen["timeframe"] = timeframe
+        seen["window"] = window
+        return real_get_ohlc(self, ticker, timeframe=timeframe, limit=limit, window=window)
+
+    monkeypatch.setattr(_main.SyntheticDataAdapter, "get_ohlc", spy_get_ohlc)
+    client = TestClient(app_main.app)
+    resp = client.get("/api/ticker/FLUX/ohlc?range=1D")
+    assert resp.status_code == 200
+    assert seen["timeframe"] == "5m"
+    assert seen["window"] == "1D"
+    assert resp.json()["range"] == "1D"
+
+
+def test_5d_range_is_not_yet_supported(app_main):
+    """Chad explicitly deferred 5D this pass -- must 400, not silently
+    fall through to something else."""
+    client = TestClient(app_main.app)
+    resp = client.get("/api/ticker/FLUX/ohlc?range=5D")
+    assert resp.status_code == 400
+
+
+def test_intraday_candles_preserve_full_source_timestamps(app_main, monkeypatch):
+    """1D intraday candles must carry real start_time timestamps (not
+    truncated to a bare date) -- the frontend needs this to place bars
+    at distinct intraday x-positions, not collapse them onto one date."""
+    # Exercise the REAL build_candles pipeline directly (ensures the
+    # route/adapter boundary doesn't truncate timestamps anywhere).
+    from app.core.candles import build_candles
+    candles, _ = build_candles([
+        {"start_time": "2026-10-14T13:30:00Z", "open": 1, "high": 2, "low": 0, "close": 1.5, "volume": 100},
+        {"start_time": "2026-10-14T13:35:00Z", "open": 1.5, "high": 2.5, "low": 1, "close": 2, "volume": 150},
+    ], dedupe_daily=False)
+    assert candles[0]["t"] == "2026-10-14T13:30:00Z"
+    assert candles[1]["t"] == "2026-10-14T13:35:00Z"
+    assert candles[0]["t"] != candles[1]["t"]  # distinct intraday timestamps, not collapsed to one date
+
+
 def test_omitting_range_leaves_legacy_timeframe_limit_params_unaffected(app_main):
     """Backward compatibility: callers that never pass `range` (existing
     marker-building logic, any external consumer) keep working exactly

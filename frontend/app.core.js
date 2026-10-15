@@ -1067,7 +1067,10 @@ function nearestBarTime(markerDate, sortedCandleDates) {
 // (its own timeframeRow/wireTimeframeRow functions), reimplemented
 // here since production's version isn't a standalone importable
 // module. CHART_RANGES order matches what Chad specified.
-const CHART_RANGES = ["1M", "3M", "6M", "1Y"];
+// 2026-10-15 (Chad-approved, item #3): 1D added, using genuine UW
+// intraday (5m) candles -- NOT a handful of daily bars relabeled. 5D
+// explicitly deferred to a separate approval.
+const CHART_RANGES = ["1D", "1M", "3M", "6M", "1Y"];
 
 function renderChartRangeRow(selectedRange) {
   return CHART_RANGES.map((r) =>
@@ -1128,8 +1131,19 @@ function mountCandlestickChart(containerId, ohlc) {
     priceScaleId: "right",
   });
 
+  // 2026-10-15 (item #3, genuine 1D intraday): daily bars' `t` is a
+  // plain "YYYY-MM-DD" date (UW's own docs: 1d/1w candles have no
+  // start/end time); intraday bars' `t` is a full ISO datetime
+  // (start_time). lightweight-charts needs a UTCTimestamp (seconds,
+  // number) for intraday so same-day bars don't collapse onto one
+  // x-position -- a plain date string works fine (and is simpler) for
+  // daily bars. Detected once from the real data, never mixed.
+  const intraday = ohlc.candles.length > 0 && String(ohlc.candles[0].t).includes("T");
+  function toChartTime(ts) {
+    return intraday ? Math.floor(new Date(ts).getTime() / 1000) : dateOnly(ts);
+  }
   const bars = ohlc.candles.map((c) => ({
-    time: dateOnly(c.t), open: c.o, high: c.h, low: c.l, close: c.c,
+    time: toChartTime(c.t), open: c.o, high: c.h, low: c.l, close: c.c,
   }));
 
   // Phase B (2026-10-14): volume, ONLY when at least one real non-zero
@@ -1139,6 +1153,23 @@ function mountCandlestickChart(containerId, ohlc) {
   // bottom 20% of the chart via its own price scale so it never
   // crowds out the candles, which stay the primary content.
   const hasTrustworthyVolume = ohlc.candles.some((c) => typeof c.v === "number" && c.v > 0);
+  // 2026-10-15 (item #2): accurate volume label. Daily bars' `v` is now
+  // computed as regular-session-only shares (see candles.py's
+  // select_regular_session_bars -- UW's own 'r' row volume is
+  // cumulative pre+regular, so the premarket contribution is
+  // subtracted out to match the regular-session-only OHLC prices
+  // shown). Intraday (1D) bars' `v` is UW's real per-5-minute-bucket
+  // share volume, already session-exact (no subtraction needed). Never
+  // asserts a precision UW's own docs don't define -- see this
+  // function's module notes for the full empirical derivation.
+  const volLabelEl = document.getElementById("chartVolumeLabel");
+  if (volLabelEl) {
+    volLabelEl.textContent = hasTrustworthyVolume
+      ? (intraday
+          ? "Volume (shares, per 5-minute bar \u2014 real UW share volume, not dark-pool or options activity)"
+          : "Volume (shares, regular session \u2014 real UW share volume, not dark-pool or options activity)")
+      : "";
+  }
   if (hasTrustworthyVolume) {
     const volumeSeries = chart.addHistogramSeries({
       priceFormat: { type: "volume" },
@@ -1147,7 +1178,7 @@ function mountCandlestickChart(containerId, ohlc) {
     });
     volumeSeries.priceScale().applyOptions({ scaleMargins: { top: 0.82, bottom: 0 } });
     volumeSeries.setData(ohlc.candles.map((c) => ({
-      time: dateOnly(c.t), value: c.v || 0, color: c.c >= c.o ? "rgba(34,211,168,0.5)" : "rgba(239,68,68,0.5)",
+      time: toChartTime(c.t), value: c.v || 0, color: c.c >= c.o ? "rgba(34,211,168,0.5)" : "rgba(239,68,68,0.5)",
     })));
   }
   series.setData(bars);
@@ -1175,7 +1206,7 @@ function mountCandlestickChart(containerId, ohlc) {
   let excludedCount = 0;
   const groups = new Map(); // key: `${barTime}|${kind}` -> { barTime, kind, events: [...] }
   for (const m of ohlc.markers || []) {
-    const barTime = nearestBarTime(dateOnly(m.time), candleDates);
+    const barTime = nearestBarTime(toChartTime(m.time), candleDates);
     if (!barTime) {
       excludedCount += 1;
       continue;
@@ -1401,6 +1432,7 @@ function renderTickerDetail(d) {
            (/api/ticker/{t}/ohlc?range=X), not a zoom of fixed data. -->
       <div id="chartRangeRow"></div>
       <div id="ohlcChartContainer" class="chart-container"><div class="empty">Loading chart...</div></div>
+      <div id="chartVolumeLabel" class="muted" style="margin-top:4px;font-size:11px"></div>
       <div id="chartRangeNote" class="muted" style="margin-top:6px;font-size:11px"></div>
     </div>
     <div class="card evidence-primary-card">

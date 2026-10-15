@@ -137,6 +137,55 @@ def test_stock_ohlc_omits_timeframe_query_param_when_window_is_none():
     assert sent_params.get("limit") == 180
 
 
+def test_adapter_get_ohlc_overfetches_raw_rows_for_daily_bars():
+    """2026-10-15 session-handling fix: requesting 84 desired daily bars
+    must ask UW for MORE than 84 raw rows (3 sessions/date), not 84 --
+    verified at the real session.get() call args."""
+    session = _mock_session(200, {"data": []})
+    client = UWRestClient("fake-key", session=session)
+    adapter = LiveUWAdapter(api_key="fake-key", watchlist=["NVDA"], client=client)
+    adapter.get_ohlc("NVDA", timeframe="1d", limit=84, window="1Y")
+    _, kwargs = session.get.call_args
+    requested_limit = kwargs.get("params", {}).get("limit")
+    assert requested_limit > 84
+    assert requested_limit >= 84 * 3
+
+
+def test_adapter_get_ohlc_does_not_overfetch_for_intraday_bars():
+    """Intraday candle sizes (5m etc.) need no over-fetch -- each bucket
+    already has a distinct timestamp, no per-date session collision."""
+    session = _mock_session(200, {"data": []})
+    client = UWRestClient("fake-key", session=session)
+    adapter = LiveUWAdapter(api_key="fake-key", watchlist=["NVDA"], client=client)
+    adapter.get_ohlc("NVDA", timeframe="5m", limit=200, window="1D")
+    _, kwargs = session.get.call_args
+    assert kwargs.get("params", {}).get("limit") == 200
+
+
+def test_adapter_get_ohlc_selects_regular_session_and_reports_coverage_metadata():
+    """End-to-end through the real adapter: 3 raw session rows for one
+    date in, 1 regular-session candle out, with honest raw/retained
+    counts in the response (Chad's item #4 coverage-disclosure ask)."""
+    raw_rows = [
+        {"date": "2026-10-14", "market_time": "pr", "open": 229.7, "high": 230, "low": 229,
+         "close": 225.65, "volume": 2_675_512},
+        {"date": "2026-10-14", "market_time": "po", "open": 221.51, "high": 222, "low": 221,
+         "close": 217.89, "volume": 24_546_863},
+        {"date": "2026-10-14", "market_time": "r", "open": 225.53, "high": 226, "low": 221,
+         "close": 221.3, "volume": 118_730_084},
+    ]
+    session = _mock_session(200, {"data": raw_rows})
+    client = UWRestClient("fake-key", session=session)
+    adapter = LiveUWAdapter(api_key="fake-key", watchlist=["NVDA"], client=client)
+    result = adapter.get_ohlc("NVDA", timeframe="1d", limit=1, window="1M")
+    assert len(result["candles"]) == 1
+    assert result["candles"][0]["o"] == 225.53  # regular-session OHLC, not pre/post
+    assert result["candles"][0]["v"] == 118_730_084 - 2_675_512  # regular-only volume
+    assert result["raw_records_returned"] == 3
+    assert result["regular_session_records_retained"] == 1
+    assert result["raw_records_requested"] > 1  # over-fetched, never exactly the desired count
+
+
 def test_adapter_get_ohlc_forwards_window_through_to_the_client():
     session = _mock_session(200, {"data": []})
     client = UWRestClient("fake-key", session=session)

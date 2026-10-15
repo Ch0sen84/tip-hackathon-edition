@@ -29,7 +29,9 @@ from typing import Optional
 import requests
 
 from .base import UWDataAdapter
-from ..core.candles import build_candles, clamp_limit
+from ..core.candles import (
+    build_candles, clamp_limit, raw_limit_for_trading_days, select_regular_session_bars,
+)
 
 DEFAULT_BASE_URL = "https://api.unusualwhales.com"
 UNAVAILABLE = "unavailable_on_tier"
@@ -216,19 +218,45 @@ class LiveUWAdapter(UWDataAdapter):
 
     def get_ohlc(self, ticker: str, timeframe: str = "1d", limit: int = 180,
                  window: Optional[str] = None) -> dict:
-        safe_limit = clamp_limit(limit)
-        body = self.client.stock_ohlc(ticker, timeframe=timeframe, limit=safe_limit, window=window)
+        """`limit` is always the DESIRED number of final bars the caller
+        wants -- for daily (`1d`) charts this method requests MORE raw
+        rows internally (see raw_limit_for_trading_days -- UW returns up
+        to 3 session records per date) and trims back down to `limit`
+        after selecting the regular session. Intraday candle sizes need
+        no over-fetch: each bucket already has a distinct timestamp, so
+        `limit` maps 1:1 to raw rows requested. Response carries
+        raw_records_requested/raw_records_returned/
+        regular_session_records_retained so callers can verify actual
+        coverage rather than assume it (2026-10-15 fix -- see
+        candles.py's module docstring gotcha #3 for the full bug
+        writeup)."""
+        desired_limit = clamp_limit(limit)
+        is_daily = (timeframe == "1d")
+        raw_request_limit = raw_limit_for_trading_days(desired_limit) if is_daily else desired_limit
+        body = self.client.stock_ohlc(ticker, timeframe=timeframe, limit=raw_request_limit, window=window)
         if not isinstance(body, dict) or body.get("status") in (UNAVAILABLE, UNAUTHORIZED, ERROR):
             return {
                 "candles": [], "source": "unusual_whales_stock_ohlc",
                 "negative_volume_bars_clamped": 0, "unavailable": True,
                 "reason": body if isinstance(body, dict) else None,
+                "raw_records_requested": raw_request_limit, "raw_records_returned": 0,
+                "regular_session_records_retained": 0,
             }
         raw = body.get("data") or []
-        candles, neg_vol_count = build_candles(raw, dedupe_daily=(timeframe == "1d"))
+        raw_records_returned = len(raw)
+        session_selected = select_regular_session_bars(raw) if is_daily else raw
+        regular_session_records_retained = len(session_selected)
+        candles, neg_vol_count = build_candles(session_selected, dedupe_daily=is_daily)
+        # We deliberately over-requested raw rows above to guarantee enough
+        # UNIQUE trading dates after session selection -- trim any excess
+        # back down to what was actually asked for. Never pads; only trims.
+        if len(candles) > desired_limit:
+            candles = candles[-desired_limit:]
         return {
             "candles": candles, "source": "unusual_whales_stock_ohlc",
             "negative_volume_bars_clamped": neg_vol_count, "unavailable": False, "reason": None,
+            "raw_records_requested": raw_request_limit, "raw_records_returned": raw_records_returned,
+            "regular_session_records_retained": regular_session_records_retained,
         }
 
     def health(self) -> dict:
