@@ -65,15 +65,24 @@
 
       <div id="activityStrip"></div>
 
-      <h2 class="section-title eyebrow">Featured Signal</h2>
+      <!-- 2026-10-15 fix: renderFeaturedArea() (app.core.js) now toggles
+           between three real states using this heading + grid + notice --
+           (1) a genuine featured ticker: heading+grid shown, notice
+           hidden; (2)/(3) zero Highest Attention tickers: heading+grid
+           hidden entirely and ONE compact honest notice shown instead,
+           so the page never shows a hero/breakdown pair with nothing in
+           it, and never tells the user to "select a ticker above" when
+           nothing selectable lives there. -->
+      <h2 class="section-title eyebrow" id="featuredSignalHeading">Featured Signal</h2>
       <!-- Production's td-attn-grid pattern (2fr primary / 3fr support,
            collapsing to 1 column under 1180px -- see styles.css) applied
            to the EXISTING Featured Signal + Signal Breakdown markup/logic
            below; no data-fetch/compute behavior changed here. -->
-      <div class="td-attn-grid">
+      <div class="td-attn-grid" id="featuredSignalGrid">
         <div id="featuredSignalSlot"></div>
         <aside class="radar-sidebar" id="breakdownSlot"></aside>
       </div>
+      <div id="featuredSignalCompactNotice" style="display:none"></div>
 
       <div class="radar-with-breakdown">
         <div class="radar-main">

@@ -74,13 +74,14 @@ async function loadRadar() {
       `${data.other.length} other · last scanned ${formatAgo(data.last_scan_at)}`;
     document.getElementById("activityStrip").innerHTML = renderActivitySummary(data);
 
-    const featured = data.highest[0] || null;
-    document.getElementById("featuredSignalSlot").innerHTML = renderFeaturedSignal(featured);
-    // 2026-10-15 fix: pass whether ANY ticker qualifies at all (Highest
-    // Attention or Other Noteworthy) so the empty-breakdown message never
-    // says "Select a ticker above" when there's genuinely nothing to select.
-    document.getElementById("breakdownSlot").innerHTML =
-      renderSignalBreakdown(featured, (data.highest.length + data.other.length) > 0);
+    // 2026-10-15 fix: renderFeaturedArea() (app.core.js) now owns the
+    // Featured Signal heading + hero/breakdown grid + compact-notice
+    // decision for all three real states (genuine featured ticker /
+    // Highest-Attention-empty-but-Other-Noteworthy-has-tickers / both
+    // empty) through the one shared, test-covered function -- replaces
+    // the previous inline logic that only separately fixed the
+    // both-empty case.
+    renderFeaturedArea(data);
 
     // Stage 2 (P3): filters + cards + counts + history chips, all
     // rendered from this same already-fetched payload -- see

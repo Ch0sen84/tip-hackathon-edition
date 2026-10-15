@@ -30,10 +30,7 @@ async function loadRadar() {
       `Scanned ${data.scanned} ticker(s) · ${data.highest.length} highest attention · ${data.other.length} other (simulated data)`;
     document.getElementById("activityStrip").innerHTML = renderActivitySummary(data);
 
-    const featured = data.highest[0] || null;
-    document.getElementById("featuredSignalSlot").innerHTML = renderFeaturedSignal(featured);
-    document.getElementById("breakdownSlot").innerHTML =
-      renderSignalBreakdown(featured, (data.highest.length + data.other.length) > 0);
+    renderFeaturedArea(data);
 
     // Stage 2 (P3): same filters/cards/counts/history-chip rendering as
     // the local edition -- see app.core.js's

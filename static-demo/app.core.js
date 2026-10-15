@@ -747,6 +747,59 @@ function renderRadarFilterOptions(allEntries) {
 // filter selection. Also keeps the legacy #otherTable (hidden via CSS,
 // see styles.css) populated unfiltered, since app.live.js/app.static.js's
 // older DOM-stub-based test harness still queries it directly.
+// 2026-10-15 fix (real Live Mode bug): handles THREE distinct Highest
+// Attention states through the actual rendering path, using the same
+// `data` object renderRadarLists() receives:
+//   1. Highest Attention has a genuine featured ticker: normal hero +
+//      functional Signal Breakdown (unchanged from before).
+//   2. Highest Attention is empty but Other Noteworthy has tickers: the
+//      heading + hero/breakdown grid collapse entirely into ONE compact,
+//      honest notice. Never says "select a ticker above" -- the
+//      selectable tickers are in the Other Noteworthy table below, not
+//      "above" anything that still exists on screen.
+//   3. Both are genuinely empty: the same compact notice with wording
+//      that doesn't point anywhere, since there's nothing to point to.
+// #highestAttentionSection's own heading+grid are toggled separately in
+// renderRadarLists() using the identical hasHighest condition -- both
+// functions are called together on every real radar load (see
+// app.live.js's loadRadar() / static-demo/app.static.js).
+function renderFeaturedArea(data) {
+  const allHighest = data.highest || [];
+  const allOther = data.other || [];
+  const hasHighest = allHighest.length > 0;
+  const hasOther = allOther.length > 0;
+  const featured = allHighest[0] || null;
+
+  const headingEl = document.getElementById("featuredSignalHeading");
+  const gridEl = document.getElementById("featuredSignalGrid");
+  const noticeEl = document.getElementById("featuredSignalCompactNotice");
+  const slotEl = document.getElementById("featuredSignalSlot");
+  const breakdownEl = document.getElementById("breakdownSlot");
+
+  if (hasHighest) {
+    if (headingEl) headingEl.style.display = "";
+    if (gridEl) gridEl.style.display = "";
+    if (noticeEl) { noticeEl.style.display = "none"; noticeEl.innerHTML = ""; }
+    if (slotEl) slotEl.innerHTML = renderFeaturedSignal(featured);
+    if (breakdownEl) breakdownEl.innerHTML = renderSignalBreakdown(featured, true);
+    return;
+  }
+
+  // No genuine featured ticker -- collapse the whole heading+hero+breakdown
+  // area into one compact message rather than leaving an empty hero card
+  // and a breakdown panel with nowhere real to point.
+  if (headingEl) headingEl.style.display = "none";
+  if (gridEl) gridEl.style.display = "none";
+  if (slotEl) slotEl.innerHTML = "";
+  if (breakdownEl) breakdownEl.innerHTML = "";
+  if (noticeEl) {
+    noticeEl.style.display = "";
+    noticeEl.innerHTML = hasOther
+      ? `<div class="breakdown-panel empty">No ticker currently qualifies for Highest Attention -- see Other Noteworthy below for the tickers tracked this scan.</div>`
+      : `<div class="breakdown-panel empty">No tickers currently qualify for Market Radar attention this scan.</div>`;
+  }
+}
+
 function renderRadarLists(data, filters, loadTickerDetailFn) {
   const familyFilter = (filters && filters.family) || "";
   const stateFilter = (filters && filters.state) || "";
