@@ -1,10 +1,10 @@
 {
   "synthetic": true,
-  "_comment": "FABRICATED DEMO DATA -- see fixtures/README_SYNTHETIC.md. Shaped like real GET /api/screener/stocks rows (ticker, repeated_hits, net_premium, net_call_premium, net_put_premium, call_volume, put_volume, iv_rank, iv_percentile_1m, stock_volume, next_earnings_date, last_earnings_date, change, date, quote_time). These screener numbers are invented purely to demonstrate Market Discovery's candidate list/ranking UI -- they are NOT derived from the scenario_*.json flow_alerts/darkpool_trades fixtures. Tickers intentionally reuse 6 of the 11 existing demo scenarios (ZYNC/QRVX/FLUX/VOLX/CATX/TEPID) so clicking 'Evaluate in TIP' on a candidate in demo mode exercises the REAL per-ticker scan_service/signal_engine pipeline end-to-end, exactly like My Watchlist does -- this is the same honest 'screener row is not an evaluation' distinction live mode has, just reusing demo tickers that already have real evaluable fixtures instead of inventing brand-new unevaluable ones.",
+  "_comment": "FABRICATED DEMO DATA -- see fixtures/README_SYNTHETIC.md. Shaped like real GET /api/screener/stocks rows (ticker, repeated_hits, net_premium, net_call_premium, net_put_premium, call_volume, put_volume, iv_rank, iv_percentile_1m, stock_volume, next_earnings_date, last_earnings_date, change, date, quote_time). These screener numbers are invented purely to demonstrate Market Discovery's candidate list/ranking UI -- they are NOT derived from the scenario_*.json flow_alerts/darkpool_trades fixtures. Tickers intentionally reuse all 8 of the fictional demo scenarios that fit this list's ranking spread (FLUX/ZYNC/QRVX/VOLX/CATX/TEPID/BRNX/PRSX -- all fictional tickers already defined in fixtures/README_SYNTHETIC.md) so clicking 'Evaluate in TIP' on ANY candidate in demo mode exercises the REAL per-ticker scan_service/signal_engine pipeline end-to-end, exactly like My Watchlist does -- this is the same honest 'screener row is not an evaluation' distinction live mode has, just reusing demo tickers that already have real evaluable fixtures instead of inventing brand-new unevaluable ones.",
   "snapshot_at": "2026-10-15T13:30:00Z",
   "candidates": [
     {
-      "ticker": "ONYXH", "repeated_hits": 22, "net_premium": 31700000, "net_call_premium": 29900000,
+      "ticker": "TEPID", "repeated_hits": 22, "net_premium": 31700000, "net_call_premium": 29900000,
       "net_put_premium": 1800000, "call_volume": 61500, "put_volume": 4100, "iv_rank": 88.9,
       "iv_percentile_1m": 90.1, "stock_volume": 15300000, "next_earnings_date": "2026-11-12",
       "last_earnings_date": "2026-08-13", "change": 6.7, "date": "2026-10-15", "quote_time": "2026-10-15T13:30:00Z",
@@ -18,7 +18,7 @@
       "synthetic": true
     },
     {
-      "ticker": "GRVTX", "repeated_hits": 17, "net_premium": 22850000, "net_call_premium": 4200000,
+      "ticker": "BRNX", "repeated_hits": 17, "net_premium": 22850000, "net_call_premium": 4200000,
       "net_put_premium": 18650000, "call_volume": 9900, "put_volume": 48700, "iv_rank": 73.6,
       "iv_percentile_1m": 76.0, "stock_volume": 7600000, "next_earnings_date": "2026-11-18",
       "last_earnings_date": "2026-08-19", "change": -3.9, "date": "2026-10-15", "quote_time": "2026-10-15T13:30:00Z",
@@ -53,7 +53,7 @@
       "synthetic": true
     },
     {
-      "ticker": "PLFD", "repeated_hits": 3, "net_premium": 2100000, "net_call_premium": 1500000,
+      "ticker": "PRSX", "repeated_hits": 3, "net_premium": 2100000, "net_call_premium": 1500000,
       "net_put_premium": 600000, "call_volume": 3100, "put_volume": 1200, "iv_rank": 41.2,
       "iv_percentile_1m": 38.7, "stock_volume": 1100000, "next_earnings_date": "2026-12-01",
       "last_earnings_date": "2026-09-02", "change": 0.9, "date": "2026-10-15", "quote_time": "2026-10-15T13:30:00Z",
