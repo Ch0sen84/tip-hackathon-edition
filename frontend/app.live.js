@@ -123,6 +123,52 @@ async function loadRadar() {
 // response is silently dropped instead of clobbering newer state.
 let _navSeq = 0;
 
+// Phase B (2026-10-14) chart timeframe persistence -- production-
+// inspired (its own sessionStorage "tip_eq_range" pattern): survives
+// ticker switches AND a page refresh (sessionStorage, not a JS
+// variable), but intentionally NOT across browser restarts/new tabs
+// (sessionStorage's actual scope) -- matches production's own choice.
+const CHART_RANGE_KEY = "tip_chart_range";
+function getChartRange() {
+  try { return sessionStorage.getItem(CHART_RANGE_KEY) || "3M"; } catch (e) { return "3M"; }
+}
+function setChartRange(range) {
+  try { sessionStorage.setItem(CHART_RANGE_KEY, range); } catch (e) { /* storage unavailable -- just won't persist, not fatal */ }
+}
+
+// loadOhlcChart: the REAL per-range fetch (not a zoom) -- GET
+// /api/ticker/{t}/ohlc?range=X returns a different `limit`-sized set of
+// candles per range (see backend RANGE_TO_TRADING_DAYS), and honestly
+// discloses when UW doesn't have that much real history for this
+// ticker (range_fully_satisfied/available_span_days) instead of ever
+// implying full coverage it doesn't have.
+async function loadOhlcChart(ticker, range, mySeq) {
+  const noteEl = document.getElementById("chartRangeNote");
+  try {
+    const ohlc = await apiGet(`/api/ticker/${encodeURIComponent(ticker)}/ohlc?range=${encodeURIComponent(range)}`);
+    if (mySeq !== _navSeq) return;
+    mountCandlestickChart("ohlcChartContainer", ohlc);
+    if (!noteEl) return;
+    if (ohlc.unavailable || !ohlc.candle_count) {
+      noteEl.textContent = "";
+    } else if (ohlc.range_fully_satisfied === false) {
+      noteEl.textContent =
+        `${range} requested \u00b7 only ${ohlc.candle_count} trading day(s) of real history available` +
+        `${ohlc.available_span_days != null ? ` (~${ohlc.available_span_days} calendar days)` : ""} -- ` +
+        `showing everything UW has for ${esc(ticker)}, not padded to the full requested range.`;
+    } else {
+      const negNote = ohlc.negative_volume_bars_clamped
+        ? ` \u00b7 ${ohlc.negative_volume_bars_clamped} bar(s) had an upstream negative-volume artifact (clamped to 0 for display)`
+        : "";
+      noteEl.textContent = `${range} \u00b7 ${ohlc.candle_count} daily candles${negNote}`;
+    }
+  } catch (chartErr) {
+    if (mySeq !== _navSeq) return;
+    mountCandlestickChart("ohlcChartContainer", { unavailable: true, reason: { message: chartErr.message } });
+    if (noteEl) noteEl.textContent = "";
+  }
+}
+
 async function loadTickerDetail(ticker) {
   const mySeq = ++_navSeq;
   const el = document.getElementById("tickerDetail");
@@ -131,14 +177,16 @@ async function loadTickerDetail(ticker) {
     const d = await apiGet(`/api/ticker/${encodeURIComponent(ticker)}`);
     if (mySeq !== _navSeq) return; // superseded by a newer ticker/mode switch
     el.innerHTML = renderTickerDetail(d);
-    try {
-      const ohlc = await apiGet(`/api/ticker/${encodeURIComponent(ticker)}/ohlc`);
-      if (mySeq !== _navSeq) return;
-      mountCandlestickChart("ohlcChartContainer", ohlc);
-    } catch (chartErr) {
-      if (mySeq !== _navSeq) return;
-      mountCandlestickChart("ohlcChartContainer", { unavailable: true, reason: { message: chartErr.message } });
+    const range = getChartRange();
+    const rangeRow = document.getElementById("chartRangeRow");
+    if (rangeRow) {
+      rangeRow.innerHTML = renderChartRangeRow(range);
+      wireChartRangeRow("chartRangeRow", (newRange) => {
+        setChartRange(newRange);
+        loadOhlcChart(ticker, newRange, mySeq);
+      });
     }
+    await loadOhlcChart(ticker, range, mySeq);
     await loadInvestigateSection(ticker, mySeq);
   } catch (err) {
     if (mySeq !== _navSeq) return;

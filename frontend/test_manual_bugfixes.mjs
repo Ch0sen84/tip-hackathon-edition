@@ -88,12 +88,19 @@ global.ResizeObserver = class { observe() {} };
 let lastChartCall = null;
 global.LightweightCharts = {
   createChart: () => {
-    const call = { bars: null, markers: null, width: null };
+    const call = { bars: null, markers: null, width: null, volume: null };
     lastChartCall = call;
     return {
       addCandlestickSeries: () => ({
         setData: (d) => { call.bars = d; },
         setMarkers: (m) => { call.markers = m; },
+      }),
+      // Phase B (2026-10-14): volume histogram series fake, mirroring the
+      // real lightweight-charts API shape mountCandlestickChart() now uses
+      // (priceScale().applyOptions(...), setData(...)).
+      addHistogramSeries: () => ({
+        priceScale: () => ({ applyOptions: () => {} }),
+        setData: (d) => { call.volume = d; },
       }),
       timeScale: () => ({ fitContent: () => {} }),
       applyOptions: (opts) => { if (opts && opts.width) call.width = opts.width; },

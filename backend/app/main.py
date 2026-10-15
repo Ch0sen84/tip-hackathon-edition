@@ -580,8 +580,18 @@ def ticker_analysis(ticker: str):
     }
 
 
+# Phase B (2026-10-14): maps a user-selectable chart range to an actual
+# number of DAILY bars to request. UW's stock_ohlc endpoint takes a bar
+# COUNT, not a calendar date range, so "1Y" means "request ~252 trading
+# days of daily bars" -- these are standard US trading-day approximations
+# (not exact, since holidays vary year to year), used only to decide how
+# many bars to ask for; actual coverage is verified from what's returned
+# (see range_fully_satisfied below), never assumed from this table alone.
+RANGE_TO_TRADING_DAYS = {"1M": 22, "3M": 65, "6M": 130, "1Y": 252}
+
+
 @app.get("/api/ticker/{ticker}/ohlc")
-def ticker_ohlc(ticker: str, timeframe: str = "1d", limit: int = 180):
+def ticker_ohlc(ticker: str, timeframe: str = "1d", limit: int = 180, range: Optional[str] = None):
     """Candlestick bars + evidence markers for the Ticker Analysis chart.
     Markers come from the SAME flow_alerts/darkpool_trades the detection
     engine already uses -- never a new data source, never an invented
@@ -589,7 +599,20 @@ def ticker_ohlc(ticker: str, timeframe: str = "1d", limit: int = 180):
     is a structured, non-crashing result (e.g. an unentitled live key, or
     a demo scenario with no captured OHLC fixture) -- the frontend must
     show an explicit "chart data unavailable" state, not silently render
-    nothing."""
+    nothing.
+
+    Phase B (2026-10-14): optional `range` (1M/3M/6M/1Y) is a convenience
+    that maps to `limit` via RANGE_TO_TRADING_DAYS and forces daily bars
+    -- this is a REAL re-fetch requesting a different bar count, not a
+    client-side zoom of a fixed dataset. `timeframe`/`limit` remain
+    directly usable for any other caller (e.g. the marker-building logic
+    elsewhere in this route already relies on the existing defaults)."""
+    if range is not None:
+        range = range.strip().upper()
+        if range not in RANGE_TO_TRADING_DAYS:
+            raise HTTPException(status_code=400, detail=f"range must be one of {sorted(RANGE_TO_TRADING_DAYS)}")
+        timeframe = "1d"
+        limit = RANGE_TO_TRADING_DAYS[range]
     adapter = get_adapter()
     ticker = ticker.upper()
     # Same real fix as ticker_analysis() above (2026-10-14): only the
@@ -609,15 +632,47 @@ def ticker_ohlc(ticker: str, timeframe: str = "1d", limit: int = 180):
     flow_alerts = adapter.get_flow_alerts(ticker)
     darkpool_trades = adapter.get_darkpool_trades(ticker)
     markers = build_markers(flow_alerts, darkpool_trades)
+    candles = ohlc.get("candles", [])
+    # Phase B (2026-10-14) honest coverage disclosure -- production-
+    # inspired (its own range_fully_satisfied/available_span_days
+    # pattern): never claim a range is fully covered when UW simply
+    # doesn't have that much history for this ticker (recent IPO, etc.).
+    # `available_span_days` is measured from the REAL returned candles,
+    # not assumed from the request -- a short-history ticker is reported
+    # honestly rather than silently padded or mislabeled.
+    earliest_candle = candles[0]["t"] if candles else None
+    latest_candle = candles[-1]["t"] if candles else None
+    available_span_days = None
+    range_fully_satisfied = None
+    if range is not None:
+        expected_bars = RANGE_TO_TRADING_DAYS[range]
+        # Allow a small tolerance for holidays/early closes -- 90% of the
+        # expected trading-day COUNT, not a calendar-day comparison,
+        # since that's what was actually requested (a bar count).
+        range_fully_satisfied = len(candles) >= int(expected_bars * 0.9)
+        if candles:
+            try:
+                from datetime import datetime
+                d0 = datetime.fromisoformat(str(earliest_candle)[:10])
+                d1 = datetime.fromisoformat(str(latest_candle)[:10])
+                available_span_days = (d1 - d0).days
+            except (ValueError, TypeError):
+                available_span_days = None
     return {
         "ticker": ticker,
         "timeframe": timeframe,
-        "candles": ohlc.get("candles", []),
+        "range": range,
+        "candles": candles,
         "source": ohlc.get("source"),
         "negative_volume_bars_clamped": ohlc.get("negative_volume_bars_clamped", 0),
         "unavailable": ohlc.get("unavailable", False),
         "reason": ohlc.get("reason"),
         "markers": markers,
+        "candle_count": len(candles),
+        "earliest_candle": earliest_candle,
+        "latest_candle": latest_candle,
+        "range_fully_satisfied": range_fully_satisfied,
+        "available_span_days": available_span_days,
     }
 
 

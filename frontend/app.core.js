@@ -957,6 +957,22 @@ function renderGateGroups(gates) {
   }).join("") || `<div class="empty">No gates evaluated.</div>`;
 }
 
+// Phase B (2026-10-14): compact ALWAYS-VISIBLE summary line (counts per
+// category) so collapsing the detailed gate breakdown into a <details>
+// below (to make the chart more prominent, per Chad's instruction)
+// never hides that there IS evidence worth opening -- just the
+// per-gate explanatory text, which stays one click away, not removed.
+function renderGateGroupsSummary(gates) {
+  const counts = { SUPPORTING: 0, CONFLICTING: 0, UNMET_CRITERIA: 0, DATA_LIMITATION: 0 };
+  Object.entries(gates || {}).forEach(([name, gate]) => {
+    counts[classifyGate(name, gate).key] += 1;
+  });
+  const parts = Object.entries(counts)
+    .filter(([, n]) => n > 0)
+    .map(([key, n]) => `<span class="gate-group-count-pill ${GATE_CATEGORY[key].cls}">${esc(GATE_CATEGORY[key].label)} (${n})</span>`);
+  return parts.join(" ") || `<span class="muted">No gates evaluated.</span>`;
+}
+
 // --- Ticker Analysis detail --------------------------------------------------
 
 // Plain-language glosses for the internal state-machine value and
@@ -1033,6 +1049,30 @@ function nearestBarTime(markerDate, sortedCandleDates) {
   return best || sortedCandleDates[0];
 }
 
+// Phase B (2026-10-14) chart timeframe row -- production-inspired
+// (its own timeframeRow/wireTimeframeRow functions), reimplemented
+// here since production's version isn't a standalone importable
+// module. CHART_RANGES order matches what Chad specified.
+const CHART_RANGES = ["1M", "3M", "6M", "1Y"];
+
+function renderChartRangeRow(selectedRange) {
+  return CHART_RANGES.map((r) =>
+    `<button class="tf-btn ${r === selectedRange ? "active" : ""}" data-range="${r}">${r}</button>`
+  ).join("");
+}
+
+function wireChartRangeRow(containerId, onChange) {
+  const row = document.getElementById(containerId);
+  if (!row) return;
+  row.addEventListener("click", (ev) => {
+    const btn = ev.target.closest(".tf-btn");
+    if (!btn) return;
+    row.querySelectorAll(".tf-btn").forEach((b) => b.classList.remove("active"));
+    btn.classList.add("active");
+    onChange(btn.dataset.range);
+  });
+}
+
 function renderChartUnavailable(reason) {
   const detail = reason && reason.message ? reason.message
     : reason && reason.status ? `UW status: ${reason.status}`
@@ -1071,11 +1111,31 @@ function mountCandlestickChart(containerId, ohlc) {
   const series = chart.addCandlestickSeries({
     upColor: "#22d3a8", downColor: "#ef4444", borderVisible: false,
     wickUpColor: "#22d3a8", wickDownColor: "#ef4444",
+    priceScaleId: "right",
   });
 
   const bars = ohlc.candles.map((c) => ({
     time: dateOnly(c.t), open: c.o, high: c.h, low: c.l, close: c.c,
   }));
+
+  // Phase B (2026-10-14): volume, ONLY when at least one real non-zero
+  // value is actually present -- an all-zero/missing volume series
+  // would render as a flat line at the bottom implying real (zero)
+  // data, which is worse than just not showing it. Squeezed into the
+  // bottom 20% of the chart via its own price scale so it never
+  // crowds out the candles, which stay the primary content.
+  const hasTrustworthyVolume = ohlc.candles.some((c) => typeof c.v === "number" && c.v > 0);
+  if (hasTrustworthyVolume) {
+    const volumeSeries = chart.addHistogramSeries({
+      priceFormat: { type: "volume" },
+      priceScaleId: "volume",
+      color: "rgba(96,165,250,0.5)",
+    });
+    volumeSeries.priceScale().applyOptions({ scaleMargins: { top: 0.82, bottom: 0 } });
+    volumeSeries.setData(ohlc.candles.map((c) => ({
+      time: dateOnly(c.t), value: c.v || 0, color: c.c >= c.o ? "rgba(34,211,168,0.5)" : "rgba(239,68,68,0.5)",
+    })));
+  }
   series.setData(bars);
   const candleDates = bars.map((b) => b.time);
 
@@ -1318,15 +1378,29 @@ function renderTickerDetail(d) {
       <div class="read">${esc(transitionLabel(d.previous_state, d.state))}</div>
       <div class="read">Confidence reason: ${esc(d.confidence_reason)}</div>
     </div>
-    <div class="card chart-card">
+    <div class="card chart-card chart-card-prominent">
       <div class="card-head"><strong>Price Chart &mdash; ${esc(d.ticker)}</strong>
         <span class="muted">evidence markers from the same flow_alerts/darkpool_trades the gates use</span></div>
+      <!-- Phase B (2026-10-14): timeframe row wired by app.live.js's
+           initChartRangeRow() (production-inspired timeframeRow/
+           wireTimeframeRow pattern) -- each click is a REAL re-fetch
+           (/api/ticker/{t}/ohlc?range=X), not a zoom of fixed data. -->
+      <div id="chartRangeRow"></div>
       <div id="ohlcChartContainer" class="chart-container"><div class="empty">Loading chart...</div></div>
+      <div id="chartRangeNote" class="muted" style="margin-top:6px;font-size:11px"></div>
     </div>
     <div class="card evidence-primary-card">
       <div class="card-head"><strong>Evidence &mdash; what the chart above is based on</strong></div>
-      <p class="muted gate-group-intro">A gate that did not pass is not automatically "conflicting evidence." Grouped below by what it actually represents, each with a plain-English note on what it observed. Confidence below describes how clearly gates fired this scan &mdash; it is never a prediction of trade outcome.</p>
-      ${gatesHtml}
+      <div class="gate-groups-summary">${renderGateGroupsSummary(d.gates)}</div>
+      <!-- Phase B (2026-10-14): detailed per-gate breakdown moved behind
+           a <details> (production's "more"/"how" pattern) so the chart
+           above reads as the primary content -- nothing removed, the
+           summary line above still always shows every category count. -->
+      <details class="gate-details">
+        <summary class="muted">Detailed gate-by-gate diagnostics</summary>
+        <p class="muted gate-group-intro">A gate that did not pass is not automatically "conflicting evidence." Grouped below by what it actually represents, each with a plain-English note on what it observed. Confidence below describes how clearly gates fired this scan &mdash; it is never a prediction of trade outcome.</p>
+        ${gatesHtml}
+      </details>
     </div>
     <div id="investigateSection"></div>
     ${timelineHtml}

@@ -1,6 +1,7 @@
 {
   "ticker": "DRFT",
   "timeframe": "1d",
+  "range": null,
   "candles": [
     {
       "t": "2026-09-23",
@@ -119,5 +120,10 @@
   "negative_volume_bars_clamped": 0,
   "unavailable": false,
   "reason": null,
-  "markers": []
+  "markers": [],
+  "candle_count": 14,
+  "earliest_candle": "2026-09-23",
+  "latest_candle": "2026-10-12",
+  "range_fully_satisfied": null,
+  "available_span_days": null
 }
