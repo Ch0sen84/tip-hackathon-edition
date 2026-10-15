@@ -397,6 +397,42 @@ pre.raw { background: var(--panel3); padding: 12px; border-radius: 8px; overflow
 .radar-with-breakdown { display: grid; grid-template-columns: 1fr; gap: 18px; align-items: start; margin-top: 22px; }
 .radar-sidebar { position: sticky; top: 14px; }
 
+/* Market Radar mode toggle + Market Discovery panel (C2b/C2c, 2026-10-15) */
+.radar-mode-toggle { display: flex; gap: 8px; margin-bottom: 16px; }
+.radar-mode-btn {
+  background: var(--panel2); color: var(--text2); border: 1px solid var(--border2);
+  border-radius: var(--radius-sm); padding: 7px 14px; cursor: pointer; font-size: 12.5px; font-weight: 600;
+}
+.radar-mode-btn.active { background: var(--panel3); color: var(--text); border-color: var(--accent); }
+
+.discovery-filter-form {
+  display: flex; flex-wrap: wrap; align-items: end; gap: 12px; margin: 6px 0 4px;
+  padding: 12px 14px; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--panel);
+}
+.discovery-filter-form label { display: flex; flex-direction: column; gap: 4px; font-size: 11.5px; color: var(--muted); }
+.discovery-filter-form input {
+  background: var(--panel2); color: var(--text); border: 1px solid var(--border2); border-radius: 4px;
+  padding: 5px 7px; font-size: 12.5px; width: 100px;
+}
+.discovery-quota-note { font-size: 11.5px; color: var(--amber); margin-right: auto; align-self: center; }
+
+.discovery-candidate-list { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
+.discovery-candidate-row {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 14px;
+  border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--panel); padding: 10px 14px;
+}
+.discovery-candidate-row .tk { font-weight: 800; font-size: 14px; min-width: 60px; }
+.discovery-metric { font-size: 12px; color: var(--text2); }
+.discovery-metric .m-label { color: var(--muted); margin-right: 4px; }
+.discovery-state-tag {
+  font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .3px;
+  border: 1px solid var(--border2); border-radius: 4px; padding: 2px 7px; color: var(--muted);
+}
+.discovery-state-tag.state-candidate { color: var(--amber); border-color: var(--amber); }
+.discovery-state-tag.state-evaluating { color: var(--accent); border-color: var(--accent); }
+.discovery-state-tag.state-evaluated { color: var(--bull); border-color: var(--bull); }
+.btn-evaluate { margin-left: auto; font-size: 12px; }
+
 /* td-attn-grid: production's featured-signal + supporting-grid pattern,
    ported by value (2fr primary / 3fr support, same breakpoint). Applied
    here to the Featured Signal + Signal Breakdown pairing -- restyling of

@@ -25,6 +25,17 @@
 
   <main class="main" id="app">
     <section id="view-radar" class="view active">
+      <!-- Market Radar mode toggle (C2b/C2c, 2026-10-15): "My Watchlist"
+           is the existing, default, unchanged behavior below; "Market
+           Discovery" is a new sibling panel (#discoveryRadarSection)
+           that is entirely hidden until the user explicitly switches to
+           it -- see wireRadarModeToggle()/app.live.js's loadDiscovery(). -->
+      <div class="radar-mode-toggle" id="radarModeToggle">
+        <button class="radar-mode-btn active" data-radar-mode="watchlist">My Watchlist</button>
+        <button class="radar-mode-btn" data-radar-mode="discovery">Market Discovery</button>
+      </div>
+
+      <div id="watchlistRadarSection">
       <div class="status-strip">
         <span id="radarStatus">Loading Market Radar...</span>
         <button class="btn-link" id="refreshRadar">refresh</button>
@@ -82,6 +93,23 @@
           </div>
           <div class="empty" id="radarEmpty" style="display:none">No tickers qualify right now.</div>
         </div>
+      </div>
+      </div>
+
+      <!-- Market Discovery panel: hidden until the mode toggle above is
+           switched. Filter form + Scan button trigger exactly ONE
+           POST /api/radar/discover call (see loadDiscovery() in
+           app.live.js) -- never an automatic/background scan. -->
+      <div id="discoveryRadarSection" style="display:none">
+        <p class="muted" style="margin:10px 0 14px">
+          Market-wide stock screener (Unusual Whales <code>/api/screener/stocks</code>) --
+          a raw candidate list, <strong>zero gate evaluation</strong> has happened yet.
+          Click "Evaluate in TIP" on any candidate to run the same per-ticker
+          scan_service/signal_engine evaluation My Watchlist uses.
+        </p>
+        <div id="discoveryFilterForm"></div>
+        <div id="discoveryStatus" class="muted" style="margin:10px 0"></div>
+        <div id="discoveryCandidateList"></div>
       </div>
     </section>
 

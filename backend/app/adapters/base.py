@@ -51,6 +51,26 @@ class UWDataAdapter(ABC):
         series -- so callers degrade gracefully instead of guessing."""
         raise NotImplementedError
 
+    def discover_candidates(self, filters: Optional[dict] = None) -> dict:
+        """Market Discovery (C2b/C2c, 2026-10-15): ONE bounded, user-
+        triggered stock-screener call -- never auto-paginated, never
+        looped, never a per-ticker follow-up. `filters` accepts a subset
+        of UW's real `/api/screener/stocks` filter vocabulary
+        (min_premium, min_call_volume, min_put_volume, min_iv_rank,
+        min_change, max_change, limit) -- a caller-supplied `limit` is
+        ALWAYS clamped server-side to DISCOVERY_LIMIT_CAP by the
+        implementation, never trusted as-is. Returns
+        {"candidates": [raw screener row dicts, real UW field names],
+        "snapshot_at": ISO str, "screener_requests_used": 1,
+        "source": str}. A 'candidate' here is a RAW screener row --
+        zero gate evaluation has happened; it must never be labeled
+        'evaluated' or carry a signal_engine state. Evaluating one
+        candidate is a SEPARATE, explicit action that reuses the
+        existing get_flow_alerts/get_darkpool_trades/get_stock_state +
+        scan_service pipeline for that one ticker -- this method itself
+        does none of that."""
+        raise NotImplementedError
+
     def get_catalyst_identified(self, ticker: str) -> bool:
         """Whether a real catalyst has been explicitly identified for this
         ticker. NOT abstract -- defaults to False for every adapter,

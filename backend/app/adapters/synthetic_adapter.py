@@ -19,6 +19,7 @@ class SyntheticDataAdapter(UWDataAdapter):
     def __init__(self, fixtures_dir: str):
         self.fixtures_dir = Path(fixtures_dir)
         self._scenarios = {}
+        self._discovery_candidates = []
         self._load()
 
     def _load(self):
@@ -30,9 +31,17 @@ class SyntheticDataAdapter(UWDataAdapter):
             if not ticker:
                 continue
             self._scenarios[ticker.upper()] = data
+        discovery_path = self.fixtures_dir / "discovery_candidates.json"
+        if discovery_path.exists():
+            self._discovery_fixture = json.loads(discovery_path.read_text())
+            self._discovery_candidates = list(self._discovery_fixture.get("candidates", []))
+        else:
+            self._discovery_fixture = {}
+            self._discovery_candidates = []
 
     def reload(self):
         self._scenarios = {}
+        self._discovery_candidates = []
         self._load()
 
     def get_universe(self) -> list:
@@ -90,6 +99,52 @@ class SyntheticDataAdapter(UWDataAdapter):
         return {
             "candles": candles, "source": "synthetic_fixture",
             "negative_volume_bars_clamped": 0, "unavailable": False, "reason": None,
+        }
+
+    def discover_candidates(self, filters: Optional[dict] = None) -> dict:
+        """Market Discovery (C2b/C2c, 2026-10-15): serves the fabricated
+        fixtures/discovery_candidates.json rows, with the SAME filter
+        semantics LiveUWAdapter applies to the real screener response
+        (so the frontend's filter form behaves identically in both
+        modes) and the same server-side limit cap. Exactly one 'request'
+        -- there is no network call to bound here, but
+        screener_requests_used is still reported as 1 for UI parity."""
+        from .live_uw_adapter import DISCOVERY_LIMIT_CAP
+
+        filters = filters or {}
+        requested_limit = filters.get("limit", DISCOVERY_LIMIT_CAP)
+        try:
+            requested_limit = int(requested_limit)
+        except (TypeError, ValueError):
+            requested_limit = DISCOVERY_LIMIT_CAP
+        limit = max(1, min(requested_limit, DISCOVERY_LIMIT_CAP))
+
+        def _passes(c: dict) -> bool:
+            checks = [
+                (filters.get("min_premium"), c.get("net_premium"), ">="),
+                (filters.get("min_call_volume"), c.get("call_volume"), ">="),
+                (filters.get("min_put_volume"), c.get("put_volume"), ">="),
+                (filters.get("min_iv_rank"), c.get("iv_rank"), ">="),
+                (filters.get("min_change"), c.get("change"), ">="),
+                (filters.get("max_change"), c.get("change"), "<="),
+            ]
+            for threshold, value, op in checks:
+                if threshold is None:
+                    continue
+                if value is None:
+                    return False
+                if op == ">=" and not (float(value) >= float(threshold)):
+                    return False
+                if op == "<=" and not (float(value) <= float(threshold)):
+                    return False
+            return True
+
+        filtered = [c for c in self._discovery_candidates if _passes(c)]
+        candidates = filtered[:limit]
+        snapshot_at = self._discovery_fixture.get("snapshot_at") if self._discovery_fixture else None
+        return {
+            "candidates": candidates, "snapshot_at": snapshot_at, "screener_requests_used": 1,
+            "source": "synthetic_discovery_fixture", "unavailable": False, "reason": None,
         }
 
     def health(self) -> dict:

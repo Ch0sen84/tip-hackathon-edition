@@ -29,6 +29,24 @@ Each fixture matches the real UW API field names so the port is honest:
 - `stock_state` -- shaped like `GET /api/stock/{ticker}/stock-state`:
   `last_price`, `change_percent`.
 
+## Market Discovery fixture (separate from the scenario_*.json detection fixtures)
+
+`discovery_candidates.json` is a SEPARATE fabricated fixture feeding
+`SyntheticDataAdapter.discover_candidates()` for Market Discovery mode (the
+stock-screener candidate list) -- it has no relationship to the 11
+scenario_*.json detection fixtures above and never carries a signal_engine
+state. Shaped like real `GET /api/screener/stocks` rows: `ticker`,
+`repeated_hits`, `net_premium`, `net_call_premium`, `net_put_premium`,
+`call_volume`, `put_volume`, `iv_rank`, `iv_percentile_1m`, `stock_volume`,
+`next_earnings_date`, `last_earnings_date`, `change`, `date`, `quote_time`,
+all marked `"synthetic": true`. These rows are raw "candidates" only --
+zero gate evaluation; clicking "Evaluate in TIP" on one runs the REAL
+`get_flow_alerts`/`get_darkpool_trades`/`get_stock_state` + `scan_service`
+pipeline against whichever of the 11 scenario tickers matches (demo mode
+has no screener data for the discovery-only tickers themselves, since
+they only exist to demonstrate the candidate list/ranking UI, not a full
+gate evaluation).
+
 ## Scenarios
 
 | file | ticker | what it demonstrates |

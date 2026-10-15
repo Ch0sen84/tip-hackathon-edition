@@ -530,7 +530,18 @@ def present(items, next_session, session_live=False, highest_max=HIGHEST_MAX):
                     "headline": headline(i), "label": dominant_label(i), "categories": categories(i),
                     "index_context": i["ticker"] in INDEX_CONTEXT_TICKERS,
                     "question": open_question(i, next_session), "research": list(i.get("research") or []),
-                    "enriched": bool(i.get("enriched", True))})
+                    "enriched": bool(i.get("enriched", True)),
+                    # BUG FIX (2026-10-15): present() rebuilds a brand-new dict per
+                    # qualifying item and, until this fix, never copied the real
+                    # `price` field (chg_pct/last) through from the input item --
+                    # it was computed correctly upstream (scan_service /
+                    # _to_evidence_item from a real stock_state) and then silently
+                    # dropped here, so every Market Radar card always rendered
+                    # fmtPriceLine(undefined) -> "price data unavailable in this
+                    # scenario", even for the 11/11 fixtures that DO carry real
+                    # stock_state.last_price/change_percent. Not a fixture-data or
+                    # adapter bug -- a dropped field in this presentation layer.
+                    "price": i.get("price")})
     multi = [x for x in out if len(x["categories"]) >= 2]
     highest = multi[:highest_max]
     hs = {x["ticker"] for x in highest}

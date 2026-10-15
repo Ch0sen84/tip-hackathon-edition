@@ -425,6 +425,32 @@ function navigateToTicker(ticker, loadTickerDetailFn, opts = {}) {
   return result;
 }
 
+// Market Radar mode toggle (C2b/C2c, 2026-10-15): switches which of the
+// two sibling panels is visible. "watchlist" is the default/unchanged
+// panel; "discovery" is lazily loaded (onDiscoverySelected callback)
+// only the first time it's selected, never pre-fetched on page load.
+let _radarMode = "watchlist";
+function wireRadarModeToggle(onDiscoverySelected) {
+  const toggle = document.getElementById("radarModeToggle");
+  if (!toggle) return;
+  let discoveryLoaded = false;
+  toggle.querySelectorAll("[data-radar-mode]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const mode = btn.dataset.radarMode;
+      _radarMode = mode;
+      toggle.querySelectorAll("[data-radar-mode]").forEach((b) => b.classList.toggle("active", b === btn));
+      const wl = document.getElementById("watchlistRadarSection");
+      const disc = document.getElementById("discoveryRadarSection");
+      if (wl) wl.style.display = mode === "watchlist" ? "" : "none";
+      if (disc) disc.style.display = mode === "discovery" ? "" : "none";
+      if (mode === "discovery" && !discoveryLoaded) {
+        discoveryLoaded = true;
+        if (typeof onDiscoverySelected === "function") onDiscoverySelected();
+      }
+    });
+  });
+}
+
 function switchView(view) {
   document.querySelectorAll(".nav-item").forEach((b) => b.classList.toggle("active", b.dataset.view === view));
   document.querySelectorAll(".view").forEach((v) => v.classList.toggle("active", v.id === `view-${view}`));
@@ -736,6 +762,98 @@ function setupRadarFiltersAndRender(data, loadTickerDetailFn) {
   if (famSel) famSel.onchange = rerender;
   if (stateSel) stateSel.onchange = rerender;
   rerender();
+}
+
+// --- Market Discovery (C2b/C2c, 2026-10-15) --------------------------------
+//
+// Pure rendering helpers, same pattern as the rest of this file (no
+// fetch() here -- app.live.js owns the one POST /api/radar/discover call
+// and the per-candidate Evaluate flow). A 'candidate' here is always a
+// RAW screener row (discovery_state: "candidate") -- it must never be
+// confused with an evaluated/signal_engine state; see
+// renderDiscoveryCandidateRow()'s explicit state tag below.
+
+const DISCOVERY_FILTER_FIELDS = [
+  { key: "min_premium", label: "Min net premium ($)", placeholder: "e.g. 5000000" },
+  { key: "min_call_volume", label: "Min call volume", placeholder: "e.g. 5000" },
+  { key: "min_put_volume", label: "Min put volume", placeholder: "e.g. 1000" },
+  { key: "min_iv_rank", label: "Min IV rank", placeholder: "0-100" },
+  { key: "min_change", label: "Min change (%)", placeholder: "e.g. 1.0" },
+  { key: "max_change", label: "Max change (%)", placeholder: "e.g. 10.0" },
+];
+
+// Quota-cost disclosure MUST be visible before the scan ever runs (spec
+// requirement) -- rendered as part of the form itself, not appended only
+// after a result comes back.
+function renderDiscoveryFilterForm(limit = 20) {
+  const fields = DISCOVERY_FILTER_FIELDS.map((f) => `
+    <label>${esc(f.label)}
+      <input type="number" step="any" id="discoveryFilter_${esc(f.key)}" placeholder="${esc(f.placeholder)}" />
+    </label>`).join("");
+  return `
+    <form class="discovery-filter-form" id="discoveryFilterFormEl">
+      ${fields}
+      <label>Max candidates
+        <input type="number" id="discoveryFilter_limit" min="1" max="50" value="${esc(limit)}" />
+      </label>
+      <span class="discovery-quota-note" id="discoveryQuotaNote">This will use 1 screener request.</span>
+      <button class="btn" type="submit" id="discoveryScanBtn">Scan</button>
+    </form>`;
+}
+
+function readDiscoveryFilterForm() {
+  const body = {};
+  DISCOVERY_FILTER_FIELDS.forEach((f) => {
+    const el = document.getElementById(`discoveryFilter_${f.key}`);
+    const v = el ? el.value.trim() : "";
+    if (v !== "") body[f.key] = Number(v);
+  });
+  const limitEl = document.getElementById("discoveryFilter_limit");
+  const limitVal = limitEl ? Number(limitEl.value) : 20;
+  body.limit = Number.isFinite(limitVal) && limitVal > 0 ? Math.min(limitVal, 50) : 20;
+  return body;
+}
+
+// NOTE: a second, pre-existing `fmtMoney` is defined later in this file
+// (the evidence-panel $ formatter) and, since function declarations are
+// hoisted/overwritten by later same-name declarations in one script
+// scope, THAT later definition is what actually runs here -- it already
+// returns a string WITH a leading "$" (e.g. "$31.7M"), so the markup
+// below must not add a second one.
+
+// One candidate row: ticker + real screener metrics + snapshot-implied
+// "not yet evaluated" state + an Evaluate button. discoveryState is one
+// of "candidate" | "evaluating" | "evaluated" (set/transitioned entirely
+// by app.live.js's evaluateDiscoveryCandidate(), never auto-advanced here).
+function renderDiscoveryCandidateRow(c, discoveryState) {
+  const state = discoveryState || c.discovery_state || "candidate";
+  const stateLabel = state === "evaluated" ? "Evaluated" : state === "evaluating" ? "Evaluating..." : "Not yet evaluated";
+  const btnLabel = state === "evaluated" ? `Re-evaluate ${esc(c.ticker)}` : `Evaluate ${esc(c.ticker)} in TIP`;
+  return `
+    <div class="discovery-candidate-row" data-ticker="${esc(c.ticker)}" data-discovery-state="${esc(state)}">
+      <span class="tk">${esc(c.ticker)}</span>
+      <span class="discovery-metric"><span class="m-label">net premium</span>${fmtMoney(c.net_premium) ?? "n/a"}</span>
+      <span class="discovery-metric"><span class="m-label">repeated hits</span>${esc(c.repeated_hits ?? "n/a")}</span>
+      <span class="discovery-metric"><span class="m-label">call/put vol</span>${esc(c.call_volume ?? "n/a")}/${esc(c.put_volume ?? "n/a")}</span>
+      <span class="discovery-metric"><span class="m-label">IV rank</span>${esc(c.iv_rank ?? "n/a")}</span>
+      <span class="discovery-metric"><span class="m-label">change</span>${fmtPct(c.change)}</span>
+      <span class="discovery-state-tag state-${esc(state)}">${esc(stateLabel)}</span>
+      <button class="btn-link btn-evaluate" data-evaluate-ticker="${esc(c.ticker)}">${btnLabel} &rarr;</button>
+    </div>`;
+}
+
+function renderDiscoveryCandidateList(candidates, meta) {
+  if (!candidates || candidates.length === 0) {
+    return `<div class="empty">No candidates matched these filters.</div>`;
+  }
+  const snapshotTxt = meta && meta.snapshot_at ? `Snapshot: ${esc(meta.snapshot_at)}` : "";
+  const countTxt = meta ? `${esc(meta.count)} candidate(s) &middot; ranked by net premium magnitude` : "";
+  const quotaTxt = meta ? `&middot; used ${esc(meta.screener_requests_used)} screener request(s)` : "";
+  return `
+    <div class="muted" style="margin-bottom:8px">${countTxt} ${quotaTxt} ${snapshotTxt ? `&middot; ${snapshotTxt}` : ""}</div>
+    <div class="discovery-candidate-list">
+      ${candidates.map((c) => renderDiscoveryCandidateRow(c)).join("")}
+    </div>`;
 }
 
 // Featured Signal: large treatment for the single highest-confidence /

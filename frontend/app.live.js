@@ -268,6 +268,92 @@ async function loadInvestigateSection(ticker, navSeq) {
   }
 }
 
+// --- Market Discovery (C2b/C2c, 2026-10-15) --------------------------------
+//
+// Owns the ONE POST /api/radar/discover call per Scan click, and the
+// per-candidate "Evaluate in TIP" action, which re-uses the EXISTING
+// per-ticker pipeline (GET /api/ticker/{ticker}, the exact same call
+// loadTickerDetail already makes for My Watchlist) -- never a parallel
+// evaluation pipeline. Tracks each candidate's local UI state
+// (candidate -> evaluating -> evaluated) purely for display; the
+// backend never persists a "discovery evaluation" concept separately
+// from a normal ticker scan.
+let _lastDiscoveryData = null;
+const _discoveryStates = {}; // ticker -> "candidate" | "evaluating" | "evaluated"
+
+function renderDiscoveryFilterFormOnce() {
+  const el = document.getElementById("discoveryFilterForm");
+  if (!el || el.dataset.wired === "1") return;
+  el.innerHTML = renderDiscoveryFilterForm(20);
+  el.dataset.wired = "1";
+  document.getElementById("discoveryFilterFormEl").addEventListener("submit", (ev) => {
+    ev.preventDefault();
+    runDiscoveryScan();
+  });
+}
+
+async function runDiscoveryScan() {
+  const statusEl = document.getElementById("discoveryStatus");
+  const listEl = document.getElementById("discoveryCandidateList");
+  const filters = readDiscoveryFilterForm();
+  statusEl.textContent = "Scanning (1 bounded screener request)...";
+  try {
+    // Exactly ONE backend call per Scan click -- no polling, no
+    // automatic retry loop, no per-candidate follow-up triggered here.
+    const data = await apiPost("/api/radar/discover", filters);
+    _lastDiscoveryData = data;
+    data.candidates.forEach((c) => { _discoveryStates[c.ticker] = "candidate"; });
+    statusEl.textContent = data.unavailable
+      ? `Screener unavailable: ${(data.reason && data.reason.message) || "see Settings/UW key"}`
+      : `Scan complete \u2014 used ${data.screener_requests_used} screener request(s) \u00b7 snapshot ${data.snapshot_at || "n/a"}`;
+    listEl.innerHTML = renderDiscoveryCandidateList(data.candidates, data);
+    wireDiscoveryEvaluateButtons();
+  } catch (err) {
+    statusEl.textContent = `Scan failed: ${err.message}`;
+    listEl.innerHTML = "";
+  }
+}
+
+function wireDiscoveryEvaluateButtons() {
+  document.querySelectorAll("[data-evaluate-ticker]").forEach((btn) => {
+    btn.addEventListener("click", () => evaluateDiscoveryCandidate(btn.dataset.evaluateTicker));
+  });
+}
+
+function rerenderDiscoveryList() {
+  const listEl = document.getElementById("discoveryCandidateList");
+  if (!listEl || !_lastDiscoveryData) return;
+  const candidates = _lastDiscoveryData.candidates.map((c) => ({ ...c, discovery_state: _discoveryStates[c.ticker] || "candidate" }));
+  listEl.innerHTML = renderDiscoveryCandidateList(candidates, _lastDiscoveryData);
+  wireDiscoveryEvaluateButtons();
+}
+
+// "Evaluate in TIP": transitions ONE candidate's displayed state
+// candidate -> evaluating -> evaluated, calling the SAME GET
+// /api/ticker/{ticker} endpoint (via loadTickerDetail) that My
+// Watchlist's Investigate/Analyze flow already uses -- this is the real
+// scan_service/signal_engine pipeline, not a second implementation of
+// it. On success, navigates to Ticker Analysis so the user sees the
+// real computed gates/state immediately.
+async function evaluateDiscoveryCandidate(ticker) {
+  _discoveryStates[ticker] = "evaluating";
+  rerenderDiscoveryList();
+  try {
+    await navigateToTicker(ticker, loadTickerDetail);
+    _discoveryStates[ticker] = "evaluated";
+  } catch (err) {
+    _discoveryStates[ticker] = "candidate";
+    alert(`Evaluation failed for ${ticker}: ${err.message}`);
+  }
+  rerenderDiscoveryList();
+}
+
+function initDiscoveryMode() {
+  renderDiscoveryFilterFormOnce();
+}
+
+wireRadarModeToggle(initDiscoveryMode);
+
 async function loadSettings() {
   try {
     const d = await apiGet("/api/settings");

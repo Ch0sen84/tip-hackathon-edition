@@ -1,0 +1,63 @@
+{
+  "synthetic": true,
+  "_comment": "FABRICATED DEMO DATA -- see fixtures/README_SYNTHETIC.md. Shaped like real GET /api/screener/stocks rows (ticker, repeated_hits, net_premium, net_call_premium, net_put_premium, call_volume, put_volume, iv_rank, iv_percentile_1m, stock_volume, next_earnings_date, last_earnings_date, change, date, quote_time). These screener numbers are invented purely to demonstrate Market Discovery's candidate list/ranking UI -- they are NOT derived from the scenario_*.json flow_alerts/darkpool_trades fixtures. Tickers intentionally reuse 6 of the 11 existing demo scenarios (ZYNC/QRVX/FLUX/VOLX/CATX/TEPID) so clicking 'Evaluate in TIP' on a candidate in demo mode exercises the REAL per-ticker scan_service/signal_engine pipeline end-to-end, exactly like My Watchlist does -- this is the same honest 'screener row is not an evaluation' distinction live mode has, just reusing demo tickers that already have real evaluable fixtures instead of inventing brand-new unevaluable ones.",
+  "snapshot_at": "2026-10-15T13:30:00Z",
+  "candidates": [
+    {
+      "ticker": "ONYXH", "repeated_hits": 22, "net_premium": 31700000, "net_call_premium": 29900000,
+      "net_put_premium": 1800000, "call_volume": 61500, "put_volume": 4100, "iv_rank": 88.9,
+      "iv_percentile_1m": 90.1, "stock_volume": 15300000, "next_earnings_date": "2026-11-12",
+      "last_earnings_date": "2026-08-13", "change": 6.7, "date": "2026-10-15", "quote_time": "2026-10-15T13:30:00Z",
+      "synthetic": true
+    },
+    {
+      "ticker": "FLUX", "repeated_hits": 18, "net_premium": 24500000, "net_call_premium": 19600000,
+      "net_put_premium": 4900000, "call_volume": 38700, "put_volume": 9100, "iv_rank": 81.2,
+      "iv_percentile_1m": 83.5, "stock_volume": 11200000, "next_earnings_date": "2026-11-05",
+      "last_earnings_date": "2026-08-06", "change": 3.4, "date": "2026-10-15", "quote_time": "2026-10-15T13:30:00Z",
+      "synthetic": true
+    },
+    {
+      "ticker": "GRVTX", "repeated_hits": 17, "net_premium": 22850000, "net_call_premium": 4200000,
+      "net_put_premium": 18650000, "call_volume": 9900, "put_volume": 48700, "iv_rank": 73.6,
+      "iv_percentile_1m": 76.0, "stock_volume": 7600000, "next_earnings_date": "2026-11-18",
+      "last_earnings_date": "2026-08-19", "change": -3.9, "date": "2026-10-15", "quote_time": "2026-10-15T13:30:00Z",
+      "synthetic": true
+    },
+    {
+      "ticker": "ZYNC", "repeated_hits": 14, "net_premium": 18250000, "net_call_premium": 16400000,
+      "net_put_premium": 1850000, "call_volume": 42100, "put_volume": 5300, "iv_rank": 78.4,
+      "iv_percentile_1m": 81.2, "stock_volume": 9800000, "next_earnings_date": "2026-11-04",
+      "last_earnings_date": "2026-08-05", "change": 4.1, "date": "2026-10-15", "quote_time": "2026-10-15T13:30:00Z",
+      "synthetic": true
+    },
+    {
+      "ticker": "QRVX", "repeated_hits": 11, "net_premium": 12400000, "net_call_premium": 2400000,
+      "net_put_premium": 10000000, "call_volume": 6200, "put_volume": 29800, "iv_rank": 69.1,
+      "iv_percentile_1m": 72.3, "stock_volume": 5100000, "next_earnings_date": "2026-11-10",
+      "last_earnings_date": "2026-08-11", "change": -1.9, "date": "2026-10-15", "quote_time": "2026-10-15T13:30:00Z",
+      "synthetic": true
+    },
+    {
+      "ticker": "VOLX", "repeated_hits": 9, "net_premium": 9400000, "net_call_premium": 7100000,
+      "net_put_premium": 2300000, "call_volume": 8100, "put_volume": 2600, "iv_rank": 65.0,
+      "iv_percentile_1m": 67.8, "stock_volume": 4200000, "next_earnings_date": "2026-10-29",
+      "last_earnings_date": "2026-07-30", "change": 2.2, "date": "2026-10-15", "quote_time": "2026-10-15T13:30:00Z",
+      "synthetic": true
+    },
+    {
+      "ticker": "CATX", "repeated_hits": 6, "net_premium": 5100000, "net_call_premium": 4300000,
+      "net_put_premium": 800000, "call_volume": 4700, "put_volume": 1100, "iv_rank": 54.8,
+      "iv_percentile_1m": 57.0, "stock_volume": 2600000, "next_earnings_date": "2026-11-20",
+      "last_earnings_date": "2026-08-21", "change": 1.3, "date": "2026-10-15", "quote_time": "2026-10-15T13:30:00Z",
+      "synthetic": true
+    },
+    {
+      "ticker": "PLFD", "repeated_hits": 3, "net_premium": 2100000, "net_call_premium": 1500000,
+      "net_put_premium": 600000, "call_volume": 3100, "put_volume": 1200, "iv_rank": 41.2,
+      "iv_percentile_1m": 38.7, "stock_volume": 1100000, "next_earnings_date": "2026-12-01",
+      "last_earnings_date": "2026-09-02", "change": 0.9, "date": "2026-10-15", "quote_time": "2026-10-15T13:30:00Z",
+      "synthetic": true
+    }
+  ]
+}

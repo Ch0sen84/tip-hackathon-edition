@@ -529,6 +529,71 @@ def radar():
     }
 
 
+class DiscoverFiltersBody(BaseModel):
+    # Market Discovery (C2b/C2c, 2026-10-15): all optional named filters
+    # over UW's real /api/screener/stocks fields -- no raw UW query DSL
+    # exposed to the end user. `limit` is clamped server-side regardless
+    # of what's sent here (see live_uw_adapter.DISCOVERY_LIMIT_CAP).
+    min_premium: Optional[float] = None
+    min_call_volume: Optional[int] = None
+    min_put_volume: Optional[int] = None
+    min_iv_rank: Optional[float] = None
+    min_change: Optional[float] = None
+    max_change: Optional[float] = None
+    limit: int = 20  # also hard-clamped server-side by the adapter regardless of this value
+
+
+def _rank_discovery_candidates(candidates: list) -> list:
+    """Rank by |net_premium| magnitude primarily, repeated_hits as a
+    tiebreaker -- a sensible, documented, non-mysterious ranking. Never
+    alters the raw candidate dicts; only reorders them."""
+    def _key(c: dict):
+        return (abs(float(c.get("net_premium") or 0)), int(c.get("repeated_hits") or 0))
+    return sorted(candidates, key=_key, reverse=True)
+
+
+@app.post("/api/radar/discover")
+def radar_discover(body: DiscoverFiltersBody):
+    """Market Discovery (C2b/C2c): EXACTLY ONE bounded call to the
+    adapter's discover_candidates per invocation -- no automatic
+    pagination, no automatic per-ticker follow-up scan. Returns raw
+    screener 'candidates' (state = zero gate evaluation has happened),
+    ranked, plus a snapshot timestamp and an explicit quota-cost
+    disclosure (screener_requests_used). A candidate only becomes
+    'evaluated' when the user explicitly calls GET /api/ticker/{ticker}
+    (the 'Evaluate in TIP' action) -- never automatically here."""
+    adapter = get_adapter()
+    filters = {
+        "min_premium": body.min_premium,
+        "min_call_volume": body.min_call_volume,
+        "min_put_volume": body.min_put_volume,
+        "min_iv_rank": body.min_iv_rank,
+        "min_change": body.min_change,
+        "max_change": body.max_change,
+        "limit": body.limit,
+    }
+    result = adapter.discover_candidates(filters)
+    candidates = _rank_discovery_candidates(result.get("candidates") or [])
+    for c in candidates:
+        # Explicit state model (item 1c of the Market Discovery spec):
+        # a raw screener row is ALWAYS "candidate" here -- never
+        # "evaluating"/"evaluated"/a signal_engine state. Those only
+        # ever come from a real GET /api/ticker/{ticker} call.
+        c["discovery_state"] = "candidate"
+    return {
+        "candidates": candidates,
+        "count": len(candidates),
+        "snapshot_at": result.get("snapshot_at"),
+        "screener_requests_used": result.get("screener_requests_used", 1),
+        "source": result.get("source"),
+        "unavailable": result.get("unavailable", False),
+        "reason": result.get("reason"),
+        "scan_scope": "market_wide_screener",
+        "limit_applied": body.limit,
+        "limit_cap": 50,
+    }
+
+
 @app.get("/api/ticker/{ticker}")
 def ticker_analysis(ticker: str):
     """Ticker Analysis: full evidence drill-down for one ticker -- gates,

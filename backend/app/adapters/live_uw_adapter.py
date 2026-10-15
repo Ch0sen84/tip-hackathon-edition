@@ -38,6 +38,12 @@ UNAVAILABLE = "unavailable_on_tier"
 UNAUTHORIZED = "unauthorized"
 ERROR = "error"
 
+# Market Discovery (C2b/C2c, 2026-10-15): hard server-side cap on how many
+# screener rows a single /api/radar/discover call may request, regardless
+# of what the caller asks for. Never raised implicitly, never bypassed by
+# pagination -- this endpoint makes exactly ONE request to UW per call.
+DISCOVERY_LIMIT_CAP = 50
+
 
 def _unavailable(path: str, status_code: int, body: str, kind: str) -> dict:
     return {
@@ -170,8 +176,16 @@ class UWRestClient:
     def market_tide(self) -> dict:
         return self.get("/api/market/market-tide")
 
-    def stock_screener(self, min_volume_oi_ratio: Optional[float] = None, limit: int = 50) -> dict:
-        return self.get("/api/screener/stocks", {"min_volume_oi_ratio": min_volume_oi_ratio, "limit": limit})
+    def stock_screener(self, min_volume_oi_ratio: Optional[float] = None, limit: int = 50,
+                       min_premium: Optional[int] = None, min_call_volume: Optional[int] = None,
+                       min_put_volume: Optional[int] = None, min_iv_rank: Optional[float] = None,
+                       min_change: Optional[float] = None, max_change: Optional[float] = None) -> dict:
+        return self.get("/api/screener/stocks", {
+            "min_volume_oi_ratio": min_volume_oi_ratio, "limit": limit,
+            "min_premium": min_premium, "min_call_volume": min_call_volume,
+            "min_put_volume": min_put_volume, "min_iv_rank": min_iv_rank,
+            "min_change": min_change, "max_change": max_change,
+        })
 
     def option_contract_screener(self, min_premium: Optional[int] = None, limit: int = 50) -> dict:
         return self.get("/api/screener/option-contracts", {"min_premium": min_premium, "limit": limit})
@@ -257,6 +271,44 @@ class LiveUWAdapter(UWDataAdapter):
             "negative_volume_bars_clamped": neg_vol_count, "unavailable": False, "reason": None,
             "raw_records_requested": raw_request_limit, "raw_records_returned": raw_records_returned,
             "regular_session_records_retained": regular_session_records_retained,
+        }
+
+    def discover_candidates(self, filters: Optional[dict] = None) -> dict:
+        """ONE bounded REST call to /api/screener/stocks. `filters` may
+        contain min_premium/min_call_volume/min_put_volume/min_iv_rank/
+        min_change/max_change/limit; limit is ALWAYS clamped to
+        DISCOVERY_LIMIT_CAP here before the request is made -- never
+        trusts a caller-supplied value, never auto-paginates past it."""
+        from datetime import datetime, timezone
+
+        filters = filters or {}
+        requested_limit = filters.get("limit", DISCOVERY_LIMIT_CAP)
+        try:
+            requested_limit = int(requested_limit)
+        except (TypeError, ValueError):
+            requested_limit = DISCOVERY_LIMIT_CAP
+        limit = max(1, min(requested_limit, DISCOVERY_LIMIT_CAP))
+
+        body = self.client.stock_screener(
+            limit=limit,
+            min_premium=filters.get("min_premium"),
+            min_call_volume=filters.get("min_call_volume"),
+            min_put_volume=filters.get("min_put_volume"),
+            min_iv_rank=filters.get("min_iv_rank"),
+            min_change=filters.get("min_change"),
+            max_change=filters.get("max_change"),
+        )
+        snapshot_at = datetime.now(timezone.utc).isoformat()
+        if not isinstance(body, dict) or body.get("status") in (UNAVAILABLE, UNAUTHORIZED, ERROR):
+            return {
+                "candidates": [], "snapshot_at": snapshot_at, "screener_requests_used": 1,
+                "source": "unusual_whales_screener_stocks", "unavailable": True,
+                "reason": body if isinstance(body, dict) else None,
+            }
+        candidates = list(body.get("data") or [])[:limit]
+        return {
+            "candidates": candidates, "snapshot_at": snapshot_at, "screener_requests_used": 1,
+            "source": "unusual_whales_screener_stocks", "unavailable": False, "reason": None,
         }
 
     def health(self) -> dict:
