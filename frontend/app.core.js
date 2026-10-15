@@ -967,9 +967,23 @@ function renderGateGroupsSummary(gates) {
   Object.entries(gates || {}).forEach(([name, gate]) => {
     counts[classifyGate(name, gate).key] += 1;
   });
+  // BUG FOUND 2026-10-15 (Chad's Phase B final verification, item #2):
+  // reusing GATE_CATEGORY[key].cls (e.g. "gc-conflicting") here collided
+  // with test_p5_p6_p7.mjs's string-based extraction of the REAL gate
+  // group below -- that test finds the first "gc-conflicting" substring
+  // in the whole rendered HTML and slices from there to the next
+  // "gate-group gc-" occurrence; since this summary line renders BEFORE
+  // the real <div class="gate-group gc-conflicting">, the test grabbed
+  // this pill's tiny span instead of the actual conflicting group and
+  // its gate-why explanation. Not a signal_engine/date issue at all --
+  // a real markup collision introduced by this phase's own UI change.
+  // Fixed with a distinct, non-colliding "gcp-" (gate-category-pill)
+  // prefix; gc-* stays reserved for the real gate-group divs.
+  const PILL_CLS = { SUPPORTING: "gcp-supporting", CONFLICTING: "gcp-conflicting",
+                      UNMET_CRITERIA: "gcp-unmet", DATA_LIMITATION: "gcp-datalimit" };
   const parts = Object.entries(counts)
     .filter(([, n]) => n > 0)
-    .map(([key, n]) => `<span class="gate-group-count-pill ${GATE_CATEGORY[key].cls}">${esc(GATE_CATEGORY[key].label)} (${n})</span>`);
+    .map(([key, n]) => `<span class="gate-group-count-pill ${PILL_CLS[key]}">${esc(GATE_CATEGORY[key].label)} (${n})</span>`);
   return parts.join(" ") || `<span class="muted">No gates evaluated.</span>`;
 }
 

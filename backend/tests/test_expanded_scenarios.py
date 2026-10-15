@@ -85,6 +85,30 @@ class TestPersistenceProgression:
         assert first == second == "BUILDING"
         assert len(store.history("PRSX")) == 2  # not seeded twice
 
+    def test_volx_also_gets_genuine_seeded_multi_entry_history(self):
+        """2026-10-15 (Chad's Phase B final verification, item #2):
+        test_p5_p6_p7.mjs's VOLX multi-entry-history check was previously
+        only passing by accident, against a backend that had accumulated
+        real repeated scans -- a fresh :memory: store never had any VOLX
+        history at all. This locks in the fix: VOLX is now in
+        SEED_TICKERS and gets the same real backdated-scan treatment as
+        PRSX, deterministically, on every fresh store."""
+        from app.seed_demo_history import seed_persistence_progression
+
+        store = QualifyingDaysStore(":memory:")
+        seed_persistence_progression(store, str(FIXTURES_DIR))
+        history = store.history("VOLX")
+        assert len(history) == 2, "VOLX should have 2 genuinely distinct seeded scan_date rows"
+        assert len({h["scan_date"] for h in history}) == 2
+
+    def test_volx_seeding_is_also_idempotent(self):
+        from app.seed_demo_history import seed_persistence_progression
+
+        store = QualifyingDaysStore(":memory:")
+        seed_persistence_progression(store, str(FIXTURES_DIR))
+        seed_persistence_progression(store, str(FIXTURES_DIR))
+        assert len(store.history("VOLX")) == 2  # not seeded twice
+
 
 class TestMultiSignalAltCombination:
     def test_volx_multi_signal_without_dark_pool(self):

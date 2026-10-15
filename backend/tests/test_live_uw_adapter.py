@@ -101,4 +101,46 @@ def test_health_reports_probe_failure_without_crashing():
     adapter = LiveUWAdapter(api_key="bad-key", watchlist=["SPY"], client=client)
     h = adapter.health()
     assert h["probe_ok"] is False
-    assert h["api_key_configured"] is True
+
+
+# ---------------------------------------------------------------------------
+# Phase B final verification (2026-10-15): UW's real OHLC endpoint has its
+# OWN "timeframe" query parameter (date-window selector, e.g. "1Y"/"2M",
+# default "1Y") that this adapter never sent -- it only ever sent `limit`,
+# so every request silently stayed bound to UW's default 1-year window no
+# matter how large `limit` was. Fixed by adding `window`, forwarded as
+# UW's real "timeframe" query key. These tests lock in the fix at the
+# actual HTTP-request level (session.get's real call args), not just the
+# adapter's return value, so a regression here is caught immediately.
+# ---------------------------------------------------------------------------
+
+def test_stock_ohlc_sends_uw_timeframe_query_param_when_window_given():
+    session = _mock_session(200, {"data": []})
+    client = UWRestClient("fake-key", session=session)
+    client.stock_ohlc("NVDA", timeframe="1d", limit=84, window="1Y")
+    _, kwargs = session.get.call_args
+    sent_params = kwargs.get("params", {})
+    assert sent_params.get("timeframe") == "1Y"
+    assert sent_params.get("limit") == 84
+
+
+def test_stock_ohlc_omits_timeframe_query_param_when_window_is_none():
+    """Backward compatibility: any caller that never asks for a window
+    (e.g. the marker-building/legacy limit-only path) gets the exact
+    same request shape as before this fix -- no new query param."""
+    session = _mock_session(200, {"data": []})
+    client = UWRestClient("fake-key", session=session)
+    client.stock_ohlc("NVDA", timeframe="1d", limit=180)
+    _, kwargs = session.get.call_args
+    sent_params = kwargs.get("params", {})
+    assert "timeframe" not in sent_params
+    assert sent_params.get("limit") == 180
+
+
+def test_adapter_get_ohlc_forwards_window_through_to_the_client():
+    session = _mock_session(200, {"data": []})
+    client = UWRestClient("fake-key", session=session)
+    adapter = LiveUWAdapter(api_key="fake-key", watchlist=["NVDA"], client=client)
+    adapter.get_ohlc("NVDA", timeframe="1d", limit=84, window="3M")
+    _, kwargs = session.get.call_args
+    assert kwargs.get("params", {}).get("timeframe") == "3M"

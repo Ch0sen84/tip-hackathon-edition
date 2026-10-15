@@ -36,8 +36,13 @@ class UWDataAdapter(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def get_ohlc(self, ticker: str, timeframe: str = "1d", limit: int = 180) -> dict:
-        """Candlestick bars for `ticker`. Returns
+    def get_ohlc(self, ticker: str, timeframe: str = "1d", limit: int = 180,
+                  window: Optional[str] = None) -> dict:
+        """Candlestick bars for `ticker`. `window` (Phase B, 2026-10-14) is
+        UW's own date-window selector ("1M"/"3M"/"6M"/"1Y" etc, their real
+        "timeframe" query parameter -- distinct from the `timeframe`
+        candle-size argument above) -- None means "adapter default", a
+        synthetic adapter can ignore it entirely. Returns
         {"candles": [{"t","o","h","l","c","v"[,"v_raw"]}], "source": str,
         "negative_volume_bars_clamped": int, "unavailable": bool,
         "reason": Optional[dict]}. `unavailable` is True (never an

@@ -53,9 +53,9 @@ def test_range_1y_requests_more_bars_than_range_1m_real_different_limits(app_mai
     seen_limits = []
     real_get_ohlc = _main.SyntheticDataAdapter.get_ohlc
 
-    def spy_get_ohlc(self, ticker, timeframe="1d", limit=180):
+    def spy_get_ohlc(self, ticker, timeframe="1d", limit=180, window=None):
         seen_limits.append(limit)
-        return real_get_ohlc(self, ticker, timeframe=timeframe, limit=limit)
+        return real_get_ohlc(self, ticker, timeframe=timeframe, limit=limit, window=window)
 
     monkeypatch.setattr(_main.SyntheticDataAdapter, "get_ohlc", spy_get_ohlc)
     client = TestClient(app_main.app)
@@ -90,7 +90,7 @@ def test_range_fully_satisfied_is_false_when_the_ticker_has_less_history_than_re
     False, not silently claim full coverage of a range it doesn't have."""
     from app import main as _main
 
-    def short_history_ohlc(self, ticker, timeframe="1d", limit=180):
+    def short_history_ohlc(self, ticker, timeframe="1d", limit=180, window=None):
         candles = [{"t": f"2026-10-{i:02d}", "o": 1, "h": 1, "l": 1, "c": 1, "v": 100} for i in range(1, 6)]
         return {"candles": candles, "source": "test", "negative_volume_bars_clamped": 0, "unavailable": False, "reason": None}
 

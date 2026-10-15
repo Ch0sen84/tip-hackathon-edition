@@ -67,11 +67,15 @@ class SyntheticDataAdapter(UWDataAdapter):
         scenario = self._scenarios.get(ticker.upper())
         return bool(scenario.get("catalyst_identified")) if scenario else False
 
-    def get_ohlc(self, ticker: str, timeframe: str = "1d", limit: int = 180) -> dict:
+    def get_ohlc(self, ticker: str, timeframe: str = "1d", limit: int = 180,
+                 window: Optional[str] = None) -> dict:
         """Returns the scenario's pre-authored `ohlc` series, if the fixture
         has one. No synthesis happens here -- a scenario fixture with no
         `ohlc` key (or an unknown ticker) honestly reports `unavailable`
-        rather than fabricating bars on the fly."""
+        rather than fabricating bars on the fly. `window` is accepted for
+        signature parity with LiveUWAdapter (Phase B, 2026-10-14) but
+        intentionally unused -- a fixed pre-authored fixture has nothing
+        to window into; `limit` already does the real trimming below."""
         scenario = self._scenarios.get(ticker.upper())
         series = scenario.get("ohlc") if scenario else None
         if not series:

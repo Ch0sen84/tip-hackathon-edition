@@ -628,7 +628,13 @@ def ticker_ohlc(ticker: str, timeframe: str = "1d", limit: int = 180, range: Opt
             ticker = _validate_ticker_for_route(ticker)
         except AiValidationError as e:
             raise HTTPException(status_code=400, detail=str(e))
-    ohlc = adapter.get_ohlc(ticker, timeframe=timeframe, limit=limit)
+    # `window` (Phase B final fix, 2026-10-14): UW's REAL date-window
+    # selector -- our `range` strings ("1M"/"3M"/"6M"/"1Y") are already in
+    # UW's own vocabulary for this parameter, so pass it straight through.
+    # `limit` stays as a sane safety cap (RANGE_TO_TRADING_DAYS), not the
+    # primary selector -- see live_uw_adapter.stock_ohlc()'s docstring for
+    # the full bug writeup.
+    ohlc = adapter.get_ohlc(ticker, timeframe=timeframe, limit=limit, window=range)
     flow_alerts = adapter.get_flow_alerts(ticker)
     darkpool_trades = adapter.get_darkpool_trades(ticker)
     markers = build_markers(flow_alerts, darkpool_trades)

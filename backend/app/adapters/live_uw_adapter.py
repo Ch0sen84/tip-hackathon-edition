@@ -107,11 +107,31 @@ class UWRestClient:
     def options_volume(self, ticker: str, limit: int = 1) -> dict:
         return self.get(f"/api/stock/{ticker}/options-volume", {"limit": limit})
 
-    def stock_ohlc(self, ticker: str, timeframe: str = "1d", limit: int = 30) -> dict:
+    def stock_ohlc(self, ticker: str, timeframe: str = "1d", limit: int = 30,
+                    window: Optional[str] = None) -> dict:
         # Path-segment form (/api/stock/{ticker}/ohlc/{size}) -- confirmed live
         # (Phase-A verification) for both daily ("1d") and intraday ("5m" etc.)
         # sizes. The size string is UW's own vocabulary; pass timeframe through.
-        return self.get(f"/api/stock/{ticker}/ohlc/{timeframe}", {"limit": limit})
+        #
+        # BUG FOUND 2026-10-14 (Phase B final verification, Chad's question
+        # #1): UW's real OHLC endpoint ALSO has its own query parameter
+        # ALSO named "timeframe" -- confusingly distinct from the path's
+        # candle_size above -- that selects the actual DATE WINDOW to
+        # search within (format "1Y"/"2M"/"YTD" etc., default "1Y" per
+        # UW's own OpenAPI docs: https://api.unusualwhales.com/docs/
+        # operations/PublicApi.TickerController.ohlc). `limit` only caps
+        # how many rows come back WITHIN whatever window is in effect --
+        # it never changes the window. This adapter never sent that query
+        # parameter, so every request silently defaulted to UW's 1-year
+        # window regardless of `limit`, which is exactly why "1Y" and "1M"
+        # requests returned near-identical history depth. Fixed by adding
+        # `window` here, sent as UW's own "timeframe" query key only when
+        # explicitly given (None preserves old behavior for any other
+        # caller that never passes it).
+        params: dict = {"limit": limit}
+        if window is not None:
+            params["timeframe"] = window
+        return self.get(f"/api/stock/{ticker}/ohlc/{timeframe}", params)
 
     def darkpool_recent(self, limit: int = 100, min_premium: Optional[int] = None) -> dict:
         return self.get("/api/darkpool/recent", {"limit": limit, "min_premium": min_premium})
@@ -194,9 +214,10 @@ class LiveUWAdapter(UWDataAdapter):
         data = body.get("data") or body
         return data if data else None
 
-    def get_ohlc(self, ticker: str, timeframe: str = "1d", limit: int = 180) -> dict:
+    def get_ohlc(self, ticker: str, timeframe: str = "1d", limit: int = 180,
+                 window: Optional[str] = None) -> dict:
         safe_limit = clamp_limit(limit)
-        body = self.client.stock_ohlc(ticker, timeframe=timeframe, limit=safe_limit)
+        body = self.client.stock_ohlc(ticker, timeframe=timeframe, limit=safe_limit, window=window)
         if not isinstance(body, dict) or body.get("status") in (UNAVAILABLE, UNAUTHORIZED, ERROR):
             return {
                 "candles": [], "source": "unusual_whales_stock_ohlc",
