@@ -167,7 +167,10 @@ class TestLiveRadarGateGenuinelyReflectsSeededCatalogHistory:
         from app.main import app
 
         client = TestClient(app)
-        resp = client.get(f"/api/ticker/{TICKER}")
+        # W2-b: GET is cache-first now -- use the explicit POST refresh
+        # route to genuinely exercise a real scan against the seeded
+        # catalog baseline, which is this test's whole point.
+        resp = client.post(f"/api/ticker/{TICKER}/refresh")
         assert resp.status_code == 200, resp.text
         body = resp.json()
 
@@ -197,13 +200,15 @@ class TestLiveRadarGateGenuinelyReflectsSeededCatalogHistory:
         from app.main import app
 
         client = TestClient(app)
-        # W2 (cache-first watchlist): an ordinary GET /api/radar no longer
-        # performs a live scan for a LiveUWAdapter -- this test's whole
-        # point is checking a FRESH scan's dark-pool-baseline wiring, so
-        # it must explicitly ask for one via refresh=true, exactly like
-        # the real "Refresh Data" UI action does (POST /api/radar/refresh,
-        # which calls this same route with refresh=True internally).
-        radar_resp = client.get("/api/radar?refresh=true")
+        # W2 (cache-first watchlist) + S1 security fix: an ordinary GET
+        # /api/radar no longer performs a live scan for a LiveUWAdapter,
+        # and no longer accepts a `refresh` query parameter at all (the
+        # S1 fix removed that side-effect path from GET entirely). This
+        # test's whole point is checking a FRESH scan's dark-pool-
+        # baseline wiring, so it must use the real POST /api/radar/
+        # refresh action instead, exactly like the "Refresh Data" UI
+        # button does.
+        radar_resp = client.post("/api/radar/refresh")
         assert radar_resp.status_code == 200, radar_resp.text
         radar_body = radar_resp.json()
 

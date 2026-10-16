@@ -108,10 +108,14 @@ def _fresh_catalog(app_main, monkeypatch):
     return catalog
 
 
+# W2-b (2026-10-16): Ticker Analysis now also discloses eval_freshness/
+# last_evaluated_at/served_from_cache, same cache-first contract as
+# /api/radar's.
 EXPECTED_TICKER_ANALYSIS_KEYS = {
     "ticker", "state", "previous_state", "transition_rule", "confidence", "signal_type",
     "confidence_reason", "qualifies", "qualifying_days_count", "gates", "headline",
     "current_read", "evidence", "stock_state", "history", "raw",
+    "eval_freshness", "last_evaluated_at", "served_from_cache",
 }
 
 EXPECTED_RADAR_KEYS = {"highest", "other", "scanned", "scan_scope", "last_scan_at", "served_from_cache"}
@@ -121,7 +125,10 @@ def test_ticker_analysis_response_shape_matches_documented_contract(app_main, mo
     _wire_live_adapter(app_main, monkeypatch)
     _fresh_memory_store(app_main, monkeypatch)
     client = TestClient(app_main.app)
-    resp = client.get("/api/ticker/NVDA")
+    # W2-b: GET is now cache-first -- use the explicit POST refresh route
+    # to exercise a real scan's response shape, same pattern as the
+    # radar tests' S1/W2 fix above.
+    resp = client.post("/api/ticker/NVDA/refresh")
     assert resp.status_code == 200
     assert set(resp.json().keys()) == EXPECTED_TICKER_ANALYSIS_KEYS
 
@@ -144,7 +151,10 @@ def test_ticker_analysis_response_identical_whether_ingestion_succeeds_or_is_bro
 
     _fresh_memory_store(app_main, monkeypatch)
     _fresh_catalog(app_main, monkeypatch)  # Phase C: see _fresh_catalog's docstring
-    resp_ok = client.get("/api/ticker/NVDA")
+    # W2-b: GET is cache-first now -- use the explicit POST refresh route
+    # so both calls genuinely exercise a real scan (which is this test's
+    # whole point: comparing ok-vs-broken catalog WRITE behavior).
+    resp_ok = client.post("/api/ticker/NVDA/refresh")
     assert resp_ok.status_code == 200
     body_ok = resp_ok.json()
 
@@ -170,7 +180,7 @@ def test_ticker_analysis_response_identical_whether_ingestion_succeeds_or_is_bro
         list_darkpool_observations_by_date=lambda ticker: {},
     ))
     _fresh_memory_store(app_main, monkeypatch)  # fresh, independent history again
-    resp_broken = client.get("/api/ticker/NVDA")
+    resp_broken = client.post("/api/ticker/NVDA/refresh")
     assert resp_broken.status_code == 200
     body_broken = resp_broken.json()
 
@@ -190,12 +200,15 @@ def test_radar_response_shape_unaffected_when_ingestion_catalog_write_is_paused(
 
     _fresh_memory_store(app_main, monkeypatch)
     _fresh_catalog(app_main, monkeypatch)  # Phase C: see _fresh_catalog's docstring
-    # W2 (cache-first watchlist): this test specifically exercises a real
-    # scan's catalog-write-pause handling -- an ordinary GET no longer
-    # scans live for a LiveUWAdapter, so both calls here must explicitly
-    # request a real refresh (refresh=true), exactly like the UI's
-    # "Refresh Data" action / POST /api/radar/refresh does.
-    resp_ok = client.get("/api/radar?refresh=true")
+    # W2 (cache-first watchlist) + S1 security fix: this test specifically
+    # exercises a real scan's catalog-write-pause handling -- an ordinary
+    # GET no longer scans live for a LiveUWAdapter, and GET /api/radar no
+    # longer accepts a refresh parameter AT ALL (removed entirely as part
+    # of the S1 fix: a GET must never have a side effect regardless of
+    # query string). Both calls here must use the real POST
+    # /api/radar/refresh action instead, exactly like the UI's "Refresh
+    # Data" button does.
+    resp_ok = client.post("/api/radar/refresh")
     assert resp_ok.status_code == 200
     assert set(resp_ok.json().keys()) == EXPECTED_RADAR_KEYS
     body_ok = resp_ok.json()
@@ -222,7 +235,7 @@ def test_radar_response_shape_unaffected_when_ingestion_catalog_write_is_paused(
         list_darkpool_observations_by_date=lambda ticker: {},
     ))
     _fresh_memory_store(app_main, monkeypatch)
-    resp_paused = client.get("/api/radar?refresh=true")
+    resp_paused = client.post("/api/radar/refresh")
     assert resp_paused.status_code == 200
     body_paused = resp_paused.json()
     # `last_scan_at` is a genuine wall-clock timestamp recorded fresh on

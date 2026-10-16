@@ -1275,9 +1275,36 @@ def _not_evaluated_evidence_item(ticker: str, state: Optional[str] = None) -> di
 
 
 @app.get("/api/radar")
-def radar(refresh: bool = False):
+def radar():
     """Market Radar: the user's personal watchlist -- qualifying tickers,
     highest-attention first.
+
+    S1 SECURITY FIX (2026-10-16): this route is now UNCONDITIONALLY
+    cache-only/read-only -- it takes NO `refresh` parameter at all (not
+    "accepts but ignores", literally not in the function signature, so
+    FastAPI never even looks at a `?refresh=` query string). The prior
+    version accepted `refresh: bool = False` and performed a real live
+    UW scan whenever `refresh=true` was present on a plain GET -- a
+    foreign/malicious page can trigger a real GET cross-origin via a
+    no-cors fetch or an <img>/<script> src with no CORS preflight and no
+    way for this app to ever see or reject it, REGARDLESS of any
+    Origin/Sec-Fetch-Site check, because the browser never sends a
+    CORS-relevant header on that class of request in the first place.
+    The only structurally safe fix is removing the side effect from GET
+    entirely -- see `_radar_impl` below, which now takes `refresh` as a
+    plain Python argument never exposed on this route, and
+    POST /api/radar/refresh (authenticated, concurrency-locked), the
+    SOLE remaining way to trigger a real scan.
+    """
+    return _radar_impl(refresh=False)
+
+
+def _radar_impl(refresh: bool):
+    """Shared implementation for the cache-only GET above and the
+    authenticated, explicit POST /api/radar/refresh below. `refresh` is
+    a plain internal argument, never sourced from request input on the
+    GET path (see radar() above) -- this is what makes GET's cache-only
+    behavior unconditional rather than merely parameter-gated.
 
     W2 fix (cache-first watchlist experience): for a real LiveUWAdapter,
     an ordinary GET (the default -- page load, refresh, nav-back, auth-
@@ -1287,18 +1314,23 @@ def radar(refresh: bool = False):
     scheduler/discovery pipeline and every prior on-demand scan already
     write to, never a second store) and reports each ticker's freshness
     (current/stale/unevaluated, scheduler_freshness.classify_freshness).
-    A real live rescan only happens when the caller explicitly asks for
-    one (`refresh=true` -- used by POST /api/radar/refresh below, see
-    its docstring for the user-facing "Refresh Data" action) or when the
-    adapter isn't live at all (SyntheticDataAdapter/demo mode: there is
-    no real HTTP cost to a demo scan, so Demo Mode's existing always-
-    fresh behavior is intentionally left unchanged here).
+    A real live rescan only happens when the caller is POST /api/radar/
+    refresh (refresh=True) or when the adapter isn't live at all
+    (SyntheticDataAdapter/demo mode: there is no real HTTP cost to a demo
+    scan, so Demo Mode's existing always-fresh behavior is intentionally
+    left unchanged here).
 
     Market Radar (2026-10-14, Phase A): records when this scan ran and
     how many tickers it covered (persisted -- survives container
     recreation), and explicitly discloses `scan_scope: "watchlist"` so
     the UI never implies broader-market discovery that isn't actually
-    happening."""
+    happening. W2-a fix (2026-10-16): that record (and the
+    `last_scan_at`/`last_scan_count` it reports) is now only ever WRITTEN
+    on a real live_fetch -- a cache-only read reports the last GENUINE
+    scan's timestamp (read-only, from SettingsStore.get_all()) rather
+    than overwriting it with "now", so repeated cache reads (F5,
+    ordinary nav) never fabricate a fresh-looking scan time for data that
+    was not actually just re-fetched."""
     adapter = get_adapter()
     store = get_store()
     catalog = get_catalog()
@@ -1376,7 +1408,13 @@ def radar(refresh: bool = False):
             entry["last_evaluated_at"] = None
         return entry
 
-    scan_record = _settings_store.record_scan(len(universe))
+    # W2-a fix: only a REAL live fetch may write a new last_scan_at/
+    # last_scan_count -- a cache-only read must report the existing
+    # persisted values untouched, never overwrite them with "now".
+    if live_fetch:
+        scan_record = _settings_store.record_scan(len(universe))
+    else:
+        scan_record = _settings_store.get_all()
     return {
         "highest": [_attach(e) for e in highest],
         "other": [_attach(e) for e in other],
@@ -1385,7 +1423,7 @@ def radar(refresh: bool = False):
         # user's configured watchlist, never broader-market discovery --
         # see this function's docstring for why that distinction matters.
         "scan_scope": "watchlist",
-        "last_scan_at": scan_record["last_scan_at"],
+        "last_scan_at": scan_record.get("last_scan_at"),
         # W2: lets the UI render "cached data, no live fetch happened" vs
         # "this response just performed a real refresh" without guessing
         # from eval_freshness alone (e.g. a brand-new live-mode watchlist
@@ -1417,7 +1455,7 @@ def radar_refresh():
     if not _radar_refresh_lock.acquire(blocking=False):
         raise HTTPException(status_code=409, detail="A watchlist refresh is already in progress. Try again shortly.")
     try:
-        return radar(refresh=True)
+        return _radar_impl(refresh=True)
     finally:
         _radar_refresh_lock.release()
 
@@ -1478,36 +1516,91 @@ def radar_discover(body: DiscoverFiltersBody):
     return result
 
 
-@app.get("/api/ticker/{ticker}")
-def ticker_analysis(ticker: str):
-    """Ticker Analysis: full evidence drill-down for one ticker -- gates,
-    confidence, state transition, and the tip_evidence explanation.
-
-    REAL BUG FIX (2026-10-14): this used to reject ANY ticker not already
-    in adapter.get_universe() -- for LiveUWAdapter that's exactly
-    TIP_LIVE_WATCHLIST (a short fixed list), so a live user could only
-    ever analyze whatever 4 tickers happened to be configured there, with
-    no way to type in a different real ticker. That watchlist exists to
-    scope Market Radar's proactive scanning, not to gate direct lookup --
-    UW's REST API will answer for any real ticker. Fix: the fixed-universe
-    check now applies ONLY to the synthetic/demo adapter (where it's
-    correct -- fixtures genuinely only exist for the 11 named scenarios);
-    Live Mode instead validates the SYMBOL FORMAT (same TICKER_RE already
-    used for AI Investigation) and lets the real UW call itself be the
-    source of truth on whether that ticker actually exists/has data."""
-    adapter = get_adapter()
-    store = get_store()
+def _validate_ticker_for_analysis(adapter: UWDataAdapter, ticker: str) -> str:
     ticker = ticker.upper()
     if isinstance(adapter, SyntheticDataAdapter):
         if ticker not in adapter.get_universe():
             raise HTTPException(status_code=404, detail=f"{ticker} is not one of the demo scenarios")
-    else:
-        try:
-            ticker = _validate_ticker_for_route(ticker)
-        except AiValidationError as e:
-            raise HTTPException(status_code=400, detail=str(e))
+        return ticker
+    try:
+        return _validate_ticker_for_route(ticker)
+    except AiValidationError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
-    scan = _run_scan(adapter, store, ticker)
+
+def _not_evaluated_ticker_analysis_response(ticker: str, store: QualifyingDaysStore) -> dict:
+    """W2-b honest cache-miss response: a watchlist-style placeholder for
+    Ticker Analysis, never fabricating gates/evidence/confidence for a
+    ticker that genuinely has no cataloged evaluation yet. Mirrors
+    _not_evaluated_evidence_item's honesty but shaped for this route's
+    response contract."""
+    return {
+        "ticker": ticker,
+        "state": store.current_state(ticker) or "NEW",
+        "previous_state": None,
+        "transition_rule": None,
+        "confidence": None,
+        "signal_type": None,
+        "confidence_reason": None,
+        "qualifies": False,
+        "qualifying_days_count": store.qualifying_days_count(ticker),
+        "gates": {},
+        "headline": "Not yet evaluated",
+        "current_read": "This ticker has not been scanned yet in this session. Use the explicit "
+                         "Refresh action to run a real evaluation.",
+        "evidence": [],
+        "stock_state": None,
+        "history": store.history(ticker),
+        "raw": None,
+        "eval_freshness": "unevaluated",
+        "last_evaluated_at": None,
+        "served_from_cache": True,
+    }
+
+
+def _ticker_analysis_impl(ticker: str, refresh: bool) -> dict:
+    """Shared implementation for the cache-only GET below and the
+    authenticated, explicit POST /api/ticker/{ticker}/refresh. `refresh`
+    is a plain internal argument, never sourced from GET query input --
+    same structural pattern as _radar_impl, applied here for W2-b (same
+    bug class as W2/S1: a plain GET must never cost a real UW call or
+    write a new evaluation).
+
+    REAL BUG FIX (2026-10-14, preserved): the fixed-universe check only
+    applies to the synthetic/demo adapter; Live Mode validates the
+    SYMBOL FORMAT and lets the real UW call be the source of truth on
+    whether the ticker exists.
+
+    W2-b fix (2026-10-16): for a real LiveUWAdapter, an ordinary GET
+    (open/F5/Back/direct-link) is now cache-first -- it reads the most
+    recently cataloged evaluation for this ticker (the SAME
+    IngestionCatalog table Market Radar already reads) and makes ZERO
+    live UW calls and writes NO new evaluation. A real rescan only
+    happens via the explicit POST refresh route, or when the adapter
+    isn't live at all (Demo Mode keeps its existing always-fresh
+    behavior, same rationale as _radar_impl)."""
+    adapter = get_adapter()
+    store = get_store()
+    catalog = get_catalog()
+    ticker = _validate_ticker_for_analysis(adapter, ticker)
+
+    is_live = isinstance(adapter, LiveUWAdapter)
+    live_fetch = refresh or not is_live
+
+    if live_fetch:
+        scan = _run_scan(adapter, store, ticker)
+        eval_freshness = "current"
+        last_evaluated_at = None
+        served_from_cache = False
+    else:
+        cached, freshness = _cached_scan_for_ticker(catalog, store, ticker)
+        if cached is None:
+            return _not_evaluated_ticker_analysis_response(ticker, store)
+        scan = cached
+        eval_freshness = freshness.state
+        last_evaluated_at = (freshness.evaluation or {}).get("retrieved_at") if freshness.evaluation else None
+        served_from_cache = True
+
     item = _to_evidence_item(scan)
     return {
         "ticker": ticker,
@@ -1526,7 +1619,42 @@ def ticker_analysis(ticker: str):
         "stock_state": scan.get("stock_state"),
         "history": store.history(ticker),
         "raw": scan["raw"],
+        "eval_freshness": eval_freshness,
+        "last_evaluated_at": last_evaluated_at,
+        "served_from_cache": served_from_cache,
     }
+
+
+@app.get("/api/ticker/{ticker}")
+def ticker_analysis(ticker: str):
+    """Ticker Analysis: full evidence drill-down for one ticker -- gates,
+    confidence, state transition, and the tip_evidence explanation.
+
+    W2-b fix (2026-10-16): strictly cache-only, same structural pattern
+    as GET /api/radar's S1 fix -- no `refresh` parameter is accepted
+    here at all. See _ticker_analysis_impl's docstring."""
+    return _ticker_analysis_impl(ticker, refresh=False)
+
+
+_ticker_refresh_lock = threading.Lock()
+
+
+@app.post("/api/ticker/{ticker}/refresh", dependencies=[Depends(require_auth)])
+def ticker_analysis_refresh(ticker: str):
+    """W2-b's explicit, user-triggered refresh action for Ticker Analysis
+    specifically -- deliberately a SEPARATE control from the watchlist's
+    POST /api/radar/refresh (different scope: one ticker a user is
+    actively drilling into vs. the whole watchlist; a shared control
+    would force refreshing the whole watchlist just to re-check one
+    ticker's chart). Authenticated, and concurrency-locked the same way
+    as the watchlist refresh -- a second concurrent refresh gets a clean
+    409 rather than double-fetching or double-cataloging."""
+    if not _ticker_refresh_lock.acquire(blocking=False):
+        raise HTTPException(status_code=409, detail="A refresh for this ticker is already in progress. Try again shortly.")
+    try:
+        return _ticker_analysis_impl(ticker, refresh=True)
+    finally:
+        _ticker_refresh_lock.release()
 
 
 # Phase B (2026-10-14): maps a user-selectable chart range to an actual
