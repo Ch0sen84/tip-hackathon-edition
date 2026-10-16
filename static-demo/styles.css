@@ -457,6 +457,33 @@ pre.raw { background: var(--panel3); padding: 12px; border-radius: 8px; overflow
   padding: 8px 10px; overflow-x: auto; font-size: 12px;
 }
 .auth-setup-fallback input { width: 280px; margin-right: 8px; }
+/* QA remediation D1/D5: pairing-code box + masked-token reveal row. */
+.auth-setup-pairing {
+  margin-top: 10px; padding-top: 10px; border-top: 1px dashed var(--border2);
+}
+.auth-setup-pairing input { width: 220px; margin-right: 8px; }
+.auth-token-field-row { display: flex; align-items: center; gap: 0; margin-top: 4px; }
+.auth-token-field-row input { width: 280px; margin-right: 8px; }
+
+/* QA remediation D7: the sidebar/nav footprint at narrow (~390px) mobile
+   widths used to consume roughly half the viewport height (brand block +
+   ticker search + every nav item, each stacked at full size, flex-wrapped
+   into several rows before any real content appeared). Collapse to a
+   compact single-row pattern -- condensed branding, icon-forward nav
+   buttons, no footer note -- while leaving the >=980px desktop sidebar
+   layout (and the existing 980px tablet breakpoint above) completely
+   unchanged. */
+@media (max-width: 480px) {
+  .brand-block { padding: 8px 12px; }
+  .brand-block .brand-product,
+  .brand-block .brand-tagline { display: none; }
+  .brand-block .mode-pill { margin-top: 6px; }
+  .cmd-search { padding: 6px 10px; }
+  nav#nav { padding: 4px 8px; gap: 4px; }
+  nav#nav .nav-group-label { display: none; }
+  nav#nav button { padding: 6px 8px; font-size: 11.5px; }
+  .sidebar-foot { display: none; }
+}
 
 /* --- Investigate with AI -------------------------------------------- */
 .ai-card {

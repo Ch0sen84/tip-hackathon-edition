@@ -65,22 +65,97 @@ function showAuthSetupBanner(variant) {
       if (ok) {
         statusEl.textContent = "";
         hideAuthSetupBanner();
+        await onAuthRestored();
       } else {
-        statusEl.textContent =
-          "Could not auto-fetch a token from this browser -- see the fallback instructions below.";
+        // QA remediation D6: a CLEAR, actionable status explaining what
+        // happened and what to do next -- re-rendering the banner with
+        // the "bootstrap_failed" variant (see renderAuthSetupBanner),
+        // not just this one status line. This is the real symptom D1
+        // fixes: a Docker Desktop browser's auto-bootstrap reliably
+        // fails here, and the pairing-code box below is the fix.
+        showAuthSetupBanner("bootstrap_failed");
       }
     });
   }
+  // QA remediation D1: the pairing-code submission flow (the new,
+  // fully-secure fallback for exactly the Docker Desktop case the
+  // button above cannot auto-resolve) -- POST /api/auth/pair, same
+  // success handling (hide banner + reload whatever view was stuck on
+  // an auth error) as every other successful-auth path below.
+  const pairingInput = document.getElementById("authPairingCodeInput");
+  const pairingBtn = document.getElementById("authPairingSubmitBtn");
+  const pairingStatusEl = document.getElementById("authPairingStatus");
+  if (pairingBtn && pairingInput) {
+    pairingBtn.addEventListener("click", async () => {
+      const code = (pairingInput.value || "").trim();
+      if (!code) return;
+      pairingStatusEl.textContent = "Pairing...";
+      try {
+        const res = await fetch(`${API_BASE}/api/auth/pair`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ pairing_code: code }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || !data.token) {
+          pairingStatusEl.textContent =
+            data.detail || "Invalid or expired pairing code -- check `docker logs <container>` for the current one.";
+          return;
+        }
+        setAuthToken(data.token);
+        pairingStatusEl.textContent = "";
+        hideAuthSetupBanner();
+        await onAuthRestored();
+      } catch (e) {
+        pairingStatusEl.textContent = "Could not reach the backend to pair this browser.";
+      }
+    });
+  }
+  // QA remediation D5: masked by default (the input itself is
+  // type="password" in the markup); this toggle is the ONLY way its
+  // value is ever shown in plaintext, and only in response to an
+  // explicit user click -- never automatically, never logged.
   const manualInput = document.getElementById("authManualTokenInput");
+  const revealBtn = document.getElementById("authManualTokenRevealBtn");
+  if (revealBtn && manualInput) {
+    revealBtn.addEventListener("click", () => {
+      const showing = manualInput.type === "text";
+      manualInput.type = showing ? "password" : "text";
+      revealBtn.textContent = showing ? "Show" : "Hide";
+    });
+  }
   const manualSaveBtn = document.getElementById("authManualTokenSaveBtn");
   if (manualSaveBtn && manualInput) {
-    manualSaveBtn.addEventListener("click", () => {
+    manualSaveBtn.addEventListener("click", async () => {
       const pasted = (manualInput.value || "").trim();
       if (!pasted) return;
       setAuthToken(pasted);
       hideAuthSetupBanner();
+      await onAuthRestored();
     });
   }
+}
+
+// QA remediation D4: after ANY successful token acquisition (auto-
+// bootstrap, D1's pairing flow, or a manually-pasted token), re-fetch
+// whatever view was previously stuck showing a stale auth-error state
+// -- without a full page reload. Market-wide Radar is the view D4's
+// report specifically names (it is require_auth-gated end to end, so
+// it is the one most likely to be showing a stuck 401 from before the
+// token existed at all); best-effort re-fetch of Market Radar too,
+// since it can independently 401 on the watchlist-scan-count write.
+// Every call here is wrapped so one view's failure never blocks
+// another's retry, and never throws back into the caller (a banner
+// click handler).
+async function onAuthRestored() {
+  const tasks = [];
+  if (document.getElementById("marketWideCandidateList")) {
+    tasks.push(loadMarketWideRadar());
+  }
+  if (document.getElementById("radarStatus") && TIP_STATE.currentView === "radar") {
+    tasks.push(loadRadar());
+  }
+  await Promise.allSettled(tasks);
 }
 
 function hideAuthSetupBanner() {
@@ -118,7 +193,13 @@ async function tryAutoBootstrapToken() {
 async function ensureAuthToken() {
   if (getAuthToken()) return true;
   const ok = await tryAutoBootstrapToken();
-  if (!ok) showAuthSetupBanner("missing");
+  // QA remediation D6: distinguish "never tried yet" from "auto-bootstrap
+  // was actually attempted and failed" -- the latter gets the specific,
+  // actionable "bootstrap_failed" banner (pairing-code instructions),
+  // not the generic first-run copy, so a genuine Docker Desktop user
+  // sees exactly what happened and what to do next on first page load,
+  // not only after clicking the button themselves.
+  if (!ok) showAuthSetupBanner("bootstrap_failed");
   return ok;
 }
 
