@@ -128,6 +128,17 @@ async function apiGet(path) {
   return res.json();
 }
 
+// Phase D: an authed-GET variant for the new require_auth-protected
+// read-only routes (/api/scheduler/status, /api/radar/market-wide) --
+// same 401 handling as apiPost/apiPut/apiDelete below (stale/missing
+// token clears + re-shows the setup banner), just for GET.
+async function apiGetAuthed(path) {
+  const res = await fetch(`${API_BASE}${path}`, { headers: _authHeaders({}) });
+  if (res.status === 401) _throwAuthError(path);
+  if (!res.ok) throw new Error(`${path} -> HTTP ${res.status}`);
+  return res.json();
+}
+
 // NOTE on credential handling: these helpers submit a key ONCE to the
 // backend to save it. The backend never echoes the real value back --
 // only a `configured` boolean and the key's last 4 characters. Nothing
@@ -884,8 +895,58 @@ async function testMcpConnection() {
   }
 }
 
+// --- Phase D: Market-wide Radar -- lazily loaded the first time its nav
+// item is selected (same pattern as Market Discovery's loadDiscovery()
+// above), so a user who never opens this view triggers zero extra
+// requests. GET /api/scheduler/status + GET /api/radar/market-wide are
+// both read-only (never a UW call themselves -- see main.py's route
+// docstrings); POST /api/scheduler/mode is the one mutating action.
+let _marketWideLoaded = false;
+
+async function loadMarketWideRadar() {
+  const statusEl = document.getElementById("marketWideStatus");
+  const listEl = document.getElementById("marketWideCandidateList");
+  const controlsEl = document.getElementById("schedulerControls");
+  try {
+    const status = await apiGetAuthed("/api/scheduler/status");
+    if (controlsEl) {
+      controlsEl.innerHTML = renderSchedulerControls(status);
+      wireSchedulerModeToggle();
+    }
+    const data = await apiGetAuthed("/api/radar/market-wide");
+    if (listEl) listEl.innerHTML = renderMarketWideRadar(data);
+    if (statusEl) statusEl.textContent = "";
+  } catch (err) {
+    if (statusEl) statusEl.textContent = `Failed to load Market-wide Radar: ${err.message}`;
+  }
+}
+
+function wireSchedulerModeToggle() {
+  const toggle = document.getElementById("schedulerModeToggle");
+  if (!toggle) return;
+  toggle.querySelectorAll("[data-scheduler-mode]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const mode = btn.dataset.schedulerMode;
+      const statusEl = document.getElementById("marketWideStatus");
+      try {
+        await apiPost("/api/scheduler/mode", { mode });
+        await loadMarketWideRadar();
+      } catch (err) {
+        if (statusEl) statusEl.textContent = `Failed to change mode: ${err.message}`;
+      }
+    });
+  });
+}
+
+function initMarketWideRadar() {
+  if (_marketWideLoaded) return;
+  _marketWideLoaded = true;
+  loadMarketWideRadar();
+}
+
 document.querySelectorAll(".nav-item").forEach((b) => {
   b.addEventListener("click", () => navigateToView(b.dataset.view));
+  if (b.dataset.view === "marketwide") b.addEventListener("click", initMarketWideRadar);
 });
 document.getElementById("refreshRadar").addEventListener("click", loadRadar);
 // Unified ticker combobox (2026-10-14, replaces the old separate

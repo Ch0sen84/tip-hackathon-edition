@@ -494,6 +494,81 @@ function wireRadarModeToggle(onDiscoverySelected) {
   });
 }
 
+// --- Phase D: Market-wide Radar -- scheduler controls + freshness-tagged
+// candidate list. Pure render functions (no fetch(), no DOM lookups by
+// id other than the DOM structure they're handed) -- app.live.js owns
+// the fetch calls and button wiring, same split as every other
+// render*/wire* pair in this file.
+
+const SCHEDULER_MODE_LABELS = {
+  disabled: "Disabled -- zero background UW calls",
+  dry_run: "Dry run -- discovery + ranking only, no per-ticker evaluation",
+  enabled: "Enabled -- discovery + bounded per-ticker evaluation",
+};
+
+function renderSchedulerControls(status) {
+  const modes = ["disabled", "dry_run", "enabled"];
+  const buttons = modes
+    .map(
+      (m) =>
+        `<button class="radar-mode-btn${m === status.mode ? " active" : ""}" data-scheduler-mode="${m}">${esc(
+          m
+        )}</button>`
+    )
+    .join("");
+  const pauseNote = status.pause_reason
+    ? `<div class="muted" style="color:#b45309">Paused: ${esc(status.pause_reason)}</div>`
+    : "";
+  return `
+    <div class="radar-mode-toggle" id="schedulerModeToggle">${buttons}</div>
+    <div class="muted" style="margin-top:6px">${esc(SCHEDULER_MODE_LABELS[status.mode] || status.mode)}</div>
+    <div class="muted" style="font-size:12px;margin-top:4px">
+      Last run: ${esc(status.last_run_finished_at || "never")} &middot;
+      Next run: ${esc(status.next_run_at || "n/a")} &middot;
+      Candidates evaluated last cycle: ${status.last_cycle_candidates_evaluated ?? "n/a"} &middot;
+      Freshness window: ${Math.round((status.freshness_window_s || 0) / 60)}m
+    </div>
+    ${pauseNote}
+  `;
+}
+
+const FRESHNESS_LABELS = {
+  current: "Current",
+  stale: "Stale",
+  unevaluated: "Unevaluated",
+};
+
+function renderMarketWideCandidateRow(candidate) {
+  const badgeClass = `freshness-badge freshness-${candidate.freshness}`;
+  const evalState = candidate.evaluation
+    ? `${esc(candidate.evaluation.state || "n/a")} (${esc(candidate.evaluation.confidence || "n/a")})`
+    : "no evaluation yet";
+  const ageNote =
+    candidate.age_s != null ? `${Math.round(candidate.age_s / 60)}m old` : "never evaluated";
+  return `
+    <div class="candidate-row" data-ticker="${esc(candidate.ticker)}">
+      <span class="ticker">${esc(candidate.ticker)}</span>
+      <span class="${badgeClass}">${esc(FRESHNESS_LABELS[candidate.freshness] || candidate.freshness)}</span>
+      <span class="muted">${evalState}</span>
+      <span class="muted" style="font-size:11px">${ageNote}</span>
+    </div>
+  `;
+}
+
+function renderMarketWideRadar(data) {
+  if (!data || !data.candidates || data.candidates.length === 0) {
+    const note = (data && data.note) || "No discovery snapshot cataloged yet.";
+    return `<div class="empty">${esc(note)}</div>`;
+  }
+  const rows = data.candidates.map(renderMarketWideCandidateRow).join("");
+  const coverage = data.coverage_note ? `<p class="muted" style="font-size:12px">${esc(data.coverage_note)}</p>` : "";
+  return `
+    <div class="muted" style="font-size:12px">Snapshot at ${esc(data.snapshot_at || "n/a")}</div>
+    <div class="candidate-list">${rows}</div>
+    ${coverage}
+  `;
+}
+
 function switchView(view) {
   document.querySelectorAll(".nav-item").forEach((b) => b.classList.toggle("active", b.dataset.view === view));
   document.querySelectorAll(".view").forEach((v) => v.classList.toggle("active", v.id === `view-${view}`));

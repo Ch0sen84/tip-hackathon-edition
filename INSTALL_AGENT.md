@@ -217,6 +217,19 @@ were told in chat — the user must supply it directly (e.g. by running the
   edit the port mapping in `docker-compose.yml` (e.g. change the host side
   of the port mapping from `8000:8000` to `8080:8000`) and use that port
   instead. Do not touch any other part of the compose file.
+- **App refuses to start / logs a `MultiWorkerConfigurationError`
+  (Phase D)**: this app is single-process by design -- its UW
+  concurrency guard is not safe across multiple worker processes (see
+  README.md "Single-process by design"). Do not add `--workers` to the
+  Dockerfile `CMD`, and do not set `WEB_CONCURRENCY` /
+  `UVICORN_WORKERS` / `GUNICORN_WORKERS` above 1 for this deployment.
+- **Market-wide Radar / background scheduler is off and I expected it
+  on**: that's the correct default -- it ships `disabled` on every
+  fresh install, and an upgrade never silently turns it on. Enable it
+  explicitly via `POST /api/scheduler/mode` with `{"mode": "dry_run"}`
+  (discovery-only) or `{"mode": "enabled"}` (bounded per-ticker
+  evaluation too), with a valid `X-TIP-Auth` header. Never enable this
+  on the user's behalf without them explicitly asking for it.
 - **Docker daemon not running**: start Docker first (see step a); `docker
   compose up` will fail immediately with a connection error otherwise.
 - **Stale build / dependency changes not picked up**: force a clean
