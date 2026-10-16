@@ -18,6 +18,31 @@ const API_BASE = new URLSearchParams(location.search).get("api") || "";
 // ensureAuthToken()/wireAuthSetupBanner() below.
 const AUTH_TOKEN_KEY = "tip_auth_token";
 
+// --- Local Mode / Network Mode (Fetch Metadata auth redesign) ---------
+//
+// GET /api/auth/mode is unauthenticated and reachable before any other
+// decision -- it tells us which mode the BACKEND actually decided is
+// active (never guessed/inferred client-side; the browser cannot know
+// its own Sec-Fetch-Site value in advance the way the server can
+// evaluate BIND_HOST). Local Mode: skip the ENTIRE auth-setup UI below
+// (no bootstrap polling, no pairing banner, no token field) -- the
+// backend's require_auth() accepts a genuine same-origin fetch() with
+// no X-TIP-Auth header at all, so there is nothing for this file to set
+// up. Network Mode: everything below this point runs completely
+// unchanged from the pre-existing Phase A / QA remediation D1 behavior.
+let TIP_AUTH_MODE = "network"; // safe default until the real check below resolves
+
+async function fetchAuthMode() {
+  try {
+    const res = await fetch(`${API_BASE}/api/auth/mode`);
+    if (!res.ok) return "network"; // fail closed to the existing token UI if this check itself fails
+    const data = await res.json();
+    return data.mode === "local" ? "local" : "network";
+  } catch (e) {
+    return "network";
+  }
+}
+
 function getAuthToken() {
   try {
     return localStorage.getItem(AUTH_TOKEN_KEY);
@@ -52,6 +77,17 @@ function _authHeaders(extra) {
 // Safe to call repeatedly (e.g. once on load, again on every 401) --
 // always re-renders from scratch, never stacks duplicate banners.
 function showAuthSetupBanner(variant) {
+  // Local Mode: page load must show ZERO authentication UI of any
+  // kind -- this is a defensive backstop (bootstrap() above already
+  // never calls ensureAuthToken() in Local Mode, so this should never
+  // be reached at all under normal same-origin browser behavior), not
+  // the primary mechanism. If a genuine 401 somehow still occurred in
+  // Local Mode, it means the SERVER already decided to require the
+  // token (see require_auth()'s fail-closed fallback) -- showing the
+  // Network Mode banner/pairing UI in that case would be actively
+  // misleading advice for a loopback-only install, so this stays
+  // suppressed either way.
+  if (TIP_AUTH_MODE === "local") return;
   const el = document.getElementById("authSetupBanner");
   if (!el) return;
   el.style.display = "";
@@ -1085,12 +1121,20 @@ window.TIP_NAV_HANDLERS = {
 };
 wireHistoryHandling();
 (async function bootstrap() {
-  // Phase A: establish the X-TIP-Auth token before anything else runs.
-  // loadSettings()/loadRadar() below are GET-only and work regardless,
-  // but doing this first means the one-time setup banner (if needed)
-  // appears immediately on load rather than only after the user's first
-  // click on a mutating action.
-  await ensureAuthToken();
+  // Local Mode / Network Mode: ask the backend which mode is actually
+  // active BEFORE deciding whether to run any Phase A auth-setup UI at
+  // all. Local Mode (the default loopback-only install): skip
+  // ensureAuthToken() entirely -- no bootstrap fetch, no pairing
+  // banner, no token field; a genuine same-origin mutating fetch()
+  // just works, with zero auth UI ever shown. Network Mode: identical,
+  // unmodified Phase A behavior (establish the X-TIP-Auth token before
+  // anything else runs, so the one-time setup banner, if needed,
+  // appears immediately on load rather than only after the user's
+  // first click on a mutating action).
+  TIP_AUTH_MODE = await fetchAuthMode();
+  if (TIP_AUTH_MODE !== "local") {
+    await ensureAuthToken();
+  }
   await loadSettings();
   await loadRadar();
   const initialState = parseNavHash(location.hash);
