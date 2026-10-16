@@ -171,6 +171,14 @@ LOCAL_MODE_ACTIVE = local_mode_module.effective_local_mode(_BIND_HOST, _TIP_LOCA
 
 _adapter: Optional[UWDataAdapter] = None
 _adapter_sig: Optional[tuple] = None
+# Reliability round (2026-10-16), item 5: survives _reset_adapter_cache()
+# calls (unlike _adapter/_adapter_sig above, which every settings save
+# unconditionally nulls) so get_adapter() can tell "mode/key genuinely
+# changed since the last live client was built" apart from "something
+# else (e.g. the watchlist) changed, forcing a new _adapter object but
+# not requiring a new underlying UW HTTP client/telemetry instance."
+_last_live_client = None
+_last_live_client_key_sig: Optional[tuple] = None
 _store: Optional[QualifyingDaysStore] = None
 _catalog: Optional[IngestionCatalog] = None
 _settings_store = SettingsStore(os.environ.get("TIP_SETTINGS_PATH", "./data/settings.json"))
@@ -322,10 +330,21 @@ def _reset_adapter_cache() -> None:
     global _adapter, _adapter_sig
     _adapter = None
     _adapter_sig = None
+    # Reliability round (2026-10-16), item 5: deliberately NOT clearing
+    # _last_live_client/_last_live_client_sig here. Every caller of this
+    # function (set_watchlist, set_mode, key save, etc.) wants the next
+    # get_adapter() to pick up fresh SETTINGS, not necessarily a fresh
+    # underlying UW HTTP client -- see get_adapter()'s reuse logic below,
+    # which is exactly why this separate pair exists instead of being
+    # folded into _adapter/_adapter_sig (those two are unconditionally
+    # nulled by this function on every settings save, including a
+    # watchlist-only one, so they can never be the thing a later
+    # get_adapter() call reads the "was it really mode/key that changed"
+    # decision from).
 
 
 def get_adapter() -> UWDataAdapter:
-    global _adapter, _adapter_sig
+    global _adapter, _adapter_sig, _last_live_client, _last_live_client_key_sig
     data = _settings_store.get_all()
     mode = data["mode"]
     key, _source = _effective_uw_key(data)
@@ -341,12 +360,48 @@ def get_adapter() -> UWDataAdapter:
         if mode != "live":
             _adapter = SyntheticDataAdapter(settings.fixtures_dir)
         else:
+            # Reliability round (2026-10-16), item 5: a watchlist-only
+            # settings save (add/remove one ticker) changes `sig` (the
+            # watchlist is deliberately part of it, see the Phase A
+            # comment above) and therefore always rebuilds `_adapter` --
+            # but rebuilding the ADAPTER must not mean rebuilding the
+            # underlying UW HTTP CLIENT, because UWRestClient owns the
+            # real diagnostics/telemetry counters (/api/diagnostics/
+            # uw-requests). Before this fix, every watchlist edit (or
+            # any other sig change that doesn't actually touch mode/key)
+            # silently handed out a brand-new client with zeroed
+            # telemetry, making the counters look like they "reset" for
+            # a reason that had nothing to do with real UW request
+            # volume. Root cause confirmed by reading LiveUWAdapter.
+            # __init__ (adapters/live_uw_adapter.py): it already accepts
+            # an optional `client=` override specifically for this kind
+            # Only construct a genuinely NEW client when mode or the
+            # effective key actually changed since the LAST LIVE CLIENT
+            # was built; reuse that client (and its accumulated
+            # telemetry) whenever only the watchlist changed in between.
+            # Deliberately read from _last_live_client_key_sig, NOT
+            # _adapter_sig/_adapter -- _reset_adapter_cache() (called by
+            # every settings save, including a watchlist-only one) always
+            # nulls those two, so they can never answer "did mode/key
+            # really change" across a reset. Telemetry itself only ever
+            # observes real HTTP attempts already made through this same
+            # client -- reusing the object changes nothing about what
+            # requests are made, only whether the counters survive.
+            key_sig = (mode, key)
+            reuse_client = (
+                _last_live_client
+                if _last_live_client is not None and _last_live_client_key_sig == key_sig
+                else None
+            )
             _adapter = LiveUWAdapter(
                 api_key=key or "",
                 base_url=settings.uw_base_url,
                 client_api_id=settings.uw_client_api_id,
                 watchlist=list(watchlist),
+                client=reuse_client,
             )
+            _last_live_client = _adapter.client
+            _last_live_client_key_sig = key_sig
         _adapter_sig = sig
     return _adapter
 
@@ -444,8 +499,27 @@ def _on_startup() -> None:
     # PairingCodeStore docstring for why this is safe against a LAN/
     # Docker-network attacker (reading container logs requires Docker
     # CLI/daemon access on the real host, not mere network reachability).
+    #
+    # Reliability round (2026-10-16), item 5: the pairing code only has a
+    # real job to do when Network Mode's token/pairing flow is actually
+    # the active auth model -- Local Mode (loopback BIND_HOST, the
+    # default/common case) never shows any pairing UI at all (see
+    # app.live.js's showAuthSetupBanner "ZERO authentication UI" guard)
+    # and never calls /api/auth/pair, so a code generated and warn-
+    # logged every single startup is pure log noise there: nothing in
+    # Local Mode will ever read or need it. Gate the WARNING-level
+    # banner behind Network Mode actually being active; still generate
+    # the code either way (force_new=True must still run every startup
+    # so a stale code from a prior process lifetime is never silently
+    # left live) and still log it, just at DEBUG, for the rare case an
+    # operator is debugging Local Mode's own gate.
     code = _pairing_store.current_code(force_new=True)
-    logging.getLogger(__name__).warning(
+    network_mode_active = not local_mode_module.effective_local_mode(
+        _BIND_HOST, _TIP_LOCAL_MODE_RAW
+    )
+    log = logging.getLogger(__name__)
+    log_fn = log.warning if network_mode_active else log.debug
+    log_fn(
         "\n%s\nTIP Hackathon Edition -- Docker Desktop / browser pairing code: %s\n"
         "If the app's auto-bootstrap (GET /api/auth/bootstrap) fails in your browser "
         "(expected on Docker Desktop for Windows/Mac), paste this code into the "
