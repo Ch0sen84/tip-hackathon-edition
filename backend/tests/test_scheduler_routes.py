@@ -141,6 +141,90 @@ def test_scheduler_run_once_runs_a_cycle_in_dry_run_mode(app_main, monkeypatch):
     assert body["candidates_evaluated"] == 0  # dry_run never evaluates
 
 
+def test_scheduler_run_once_discovery_only_works_while_mode_disabled(app_main, monkeypatch):
+    """Final round: the whole point of the decoupled path -- a one-time
+    discovery-only run succeeds over HTTP while the persisted mode is
+    (and stays) 'disabled'."""
+    from app import main as _main
+
+    class _FakeAdapter:
+        def discover_candidates(self, filters=None):
+            return {
+                "candidates": [{"ticker": "NVDA", "net_premium": 1}], "snapshot_at": "2026-10-16T14:00:00+00:00",
+                "screener_requests_used": 1, "source": "fake", "unavailable": False, "reason": None,
+            }
+
+        def get_universe(self):
+            return []
+
+    monkeypatch.setattr(_main, "get_adapter", lambda: _FakeAdapter())
+    client = TestClient(app_main.app)
+    assert client.get("/api/scheduler/status").json()["mode"] == "disabled"
+    res = client.post("/api/scheduler/run-once", json={"depth": "discovery_only"})
+    assert res.status_code == 200
+    body = res.json()
+    assert body["ran"] is True
+    assert body["depth"] == "discovery_only"
+    assert body["candidates_evaluated"] == 0
+    assert client.get("/api/scheduler/status").json()["mode"] == "disabled"
+
+
+def test_scheduler_run_once_discovery_plus_evaluation_works_while_mode_disabled(app_main, monkeypatch):
+    """Uses the real SyntheticDataAdapter (demo fixtures) so run_ticker_scan
+    -> _run_scan's full real pipeline (get_flow_alerts/get_dark_pool_trades/
+    get_stock_state/signal_engine) actually runs end-to-end, same as every
+    other scheduler test that needs genuine per-ticker evaluation."""
+    from pathlib import Path
+
+    from app import main as _main
+    from app.adapters.synthetic_adapter import SyntheticDataAdapter
+
+    fixtures_dir = Path(__file__).resolve().parents[2] / "fixtures"
+    synthetic = SyntheticDataAdapter(str(fixtures_dir))
+
+    class _DiscoveryWrappedAdapter:
+        """Delegates everything to the real synthetic adapter except
+        discover_candidates, which returns two real demo-fixture tickers
+        so evaluation has genuine scenario data to work with."""
+
+        def __getattr__(self, name):
+            return getattr(synthetic, name)
+
+        def discover_candidates(self, filters=None):
+            return {
+                "candidates": [
+                    {"ticker": "FLUX", "net_premium": 9000000}, {"ticker": "ZYNC", "net_premium": 1000000},
+                ],
+                "snapshot_at": "2026-10-16T14:00:00+00:00", "screener_requests_used": 1,
+                "source": "synthetic_wrapped", "unavailable": False, "reason": None,
+            }
+
+    monkeypatch.setattr(_main, "get_adapter", lambda: _DiscoveryWrappedAdapter())
+    client = TestClient(app_main.app)
+    res = client.post("/api/scheduler/run-once", json={"depth": "discovery_plus_evaluation"})
+    assert res.status_code == 200
+    body = res.json()
+    assert body["ran"] is True
+    assert body["depth"] == "discovery_plus_evaluation"
+    assert body["candidates_evaluated"] == 2
+    assert client.get("/api/scheduler/status").json()["mode"] == "disabled"
+
+
+def test_scheduler_run_once_rejects_invalid_depth_with_400(app_main):
+    client = TestClient(app_main.app)
+    res = client.post("/api/scheduler/run-once", json={"depth": "bogus"})
+    assert res.status_code == 400
+
+
+def test_scheduler_run_once_without_depth_preserves_legacy_disabled_refusal(app_main):
+    """Backward compat: omitting `depth` entirely must behave EXACTLY
+    like before this round -- refuses while mode is 'disabled'."""
+    client = TestClient(app_main.app)
+    res = client.post("/api/scheduler/run-once", json={})
+    assert res.status_code == 200
+    assert res.json()["reason"] == "disabled"
+
+
 def test_market_wide_radar_marks_current_vs_unevaluated(app_main):
     from app import main as _main
     from datetime import datetime, timezone

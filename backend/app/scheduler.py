@@ -73,6 +73,15 @@ from .storage import StorageGuardPausedError
 
 logger = logging.getLogger(__name__)
 
+# UX item (final round, 2026-10-16): execution-depth values for a
+# one-time run that is fully DECOUPLED from the persisted recurring
+# `mode`. See SchedulerRunner.run_once_with_depth's docstring -- these
+# are NOT a third/fourth scheduler "mode"; they only describe how deep
+# ONE manually-triggered cycle goes, and are never persisted anywhere.
+DEPTH_DISCOVERY_ONLY = "discovery_only"
+DEPTH_DISCOVERY_PLUS_EVALUATION = "discovery_plus_evaluation"
+RUN_ONCE_DEPTHS = (DEPTH_DISCOVERY_ONLY, DEPTH_DISCOVERY_PLUS_EVALUATION)
+
 DEFAULT_TOP_N = 5
 # Conservative default: a per-ticker evaluation is itself several UW
 # calls (flow-alerts, darkpool, stock-state), and this budget is SHARED
@@ -215,7 +224,7 @@ class SchedulerRunner:
         try:
             if not self._ensure_lease(now):
                 return {"ran": False, "reason": "lease_not_held"}
-            return self._run_cycle(mode, now)
+            return self._run_cycle(evaluate=(mode == "enabled"), now=now, persist_next_run=True, reported_mode=mode)
         finally:
             self._cycle_lock.release()
 
@@ -251,8 +260,59 @@ class SchedulerRunner:
         try:
             if not self._ensure_lease(now):
                 return {"ran": False, "reason": "lease_not_held", "triggered_by": "run_once"}
-            outcome = self._run_cycle(mode, now)
+            outcome = self._run_cycle(evaluate=(mode == "enabled"), now=now, persist_next_run=True, reported_mode=mode)
             outcome["triggered_by"] = "run_once"
+            return outcome
+        finally:
+            self._cycle_lock.release()
+
+    def run_once_with_depth(self, depth: str, now: Optional[datetime] = None) -> dict:
+        """Final-round item: a one-time run that is FULLY DECOUPLED from
+        the persisted recurring `mode` -- this is the actual fix for
+        Chad's 'Run Once currently requires arming Dry Run/Enabled
+        first' complaint. Unlike the legacy run_once() above (kept
+        byte-for-byte unchanged for backward compat / its own existing
+        tests), this method:
+          * NEVER refuses because mode == 'disabled' -- that is exactly
+            the gate this round removes for the one-time path. The
+            persisted mode is read ONLY for the `mode` field in the
+            returned dict (pure reporting), never for a gating decision.
+          * NEVER persists `mode` -- `store.set_mode()` is not called
+            anywhere in this method, so the recurring scheduler mode is
+            byte-for-byte unchanged before/during/after this call.
+          * NEVER persists a future `next_run_at` -- passes
+            persist_next_run=False to `_run_cycle`, so this one-time
+            run leaves no side effect that could make the (disabled)
+            recurring loop think a schedule is armed.
+          * Still goes through the EXACT SAME in-process `_cycle_lock`
+            and cross-process SQLite `scheduler_lease` as every other
+            entry point (`run_once`, `run_one_cycle_if_due`) -- a
+            second concurrent one-time call, or a genuinely different
+            worker/process (recurring or manual) already mid-cycle,
+            is rejected the same way.
+          * Applies NO market-hours/RTH gate (same as the legacy
+            run_once -- this method never calls `_is_market_open`),
+            satisfying the explicit requirement that a one-time run be
+            triggerable outside regular market hours on request.
+        `depth` selects discovery-only vs discovery+bounded-top_n-
+        evaluation; see DEPTH_DISCOVERY_ONLY / DEPTH_DISCOVERY_PLUS_EVALUATION.
+        """
+        if depth not in RUN_ONCE_DEPTHS:
+            raise ValueError(f"depth must be one of {RUN_ONCE_DEPTHS}, got {depth!r}")
+        now = now or self._now_fn()
+        acquired = self._cycle_lock.acquire(blocking=False)
+        if not acquired:
+            return {"ran": False, "reason": "cycle_already_in_progress", "triggered_by": "run_once", "depth": depth}
+        try:
+            if not self._ensure_lease(now):
+                return {"ran": False, "reason": "lease_not_held", "triggered_by": "run_once", "depth": depth}
+            persisted_mode = self.store.get_mode()  # read-only; reported, never used to gate or re-written
+            evaluate = depth == DEPTH_DISCOVERY_PLUS_EVALUATION
+            outcome = self._run_cycle(
+                evaluate=evaluate, now=now, persist_next_run=False, reported_mode=persisted_mode,
+            )
+            outcome["triggered_by"] = "run_once"
+            outcome["depth"] = depth
             return outcome
         finally:
             self._cycle_lock.release()
@@ -274,7 +334,19 @@ class SchedulerRunner:
             return True
         return False
 
-    def _run_cycle(self, mode: str, now: datetime) -> dict:
+    def _run_cycle(self, evaluate: bool, now: datetime, persist_next_run: bool = True,
+                   reported_mode: Optional[str] = None) -> dict:
+        """The one real cycle body, shared by every trigger path
+        (automatic loop, legacy run_once, and the new decoupled
+        run_once_with_depth). `evaluate` replaces the old `mode ==
+        'enabled'` check so a one-time call can request evaluation
+        without that ever being read from (or confused with) the
+        persisted recurring `mode`. `persist_next_run=False` (used only
+        by run_once_with_depth) skips writing a future `next_run_at` --
+        a one-time run must leave no side effect that could make the
+        (still-disabled) recurring loop believe a schedule is armed.
+        `reported_mode` is pure disclosure for the returned dict's
+        `mode` field; it is never used for any gating decision here."""
         self.store.record_run_started(started_at=now.isoformat())
         adapter = self.get_adapter()
         catalog = self.get_catalog()
@@ -311,7 +383,7 @@ class SchedulerRunner:
                     pause_reason = str(e)
                     candidates = []  # storage guard paused -- do not proceed into per-ticker evaluation either
 
-            if mode == "enabled" and not pause_reason:
+            if evaluate and not pause_reason:
                 bounded = [c for c in candidates if c.get("evaluate_supported")][: self.top_n]
                 for c in bounded:
                     ticker = c.get("ticker")
@@ -327,13 +399,22 @@ class SchedulerRunner:
                     except Exception:  # noqa: BLE001 -- one bad ticker must never kill the whole cycle
                         logger.exception("scheduler: per-ticker evaluation failed for %s", ticker)
         finally:
-            next_run_at = (now.timestamp() + self.scan_interval_s)
-            next_run_iso = datetime.fromtimestamp(next_run_at, tz=timezone.utc).isoformat()
+            if persist_next_run:
+                next_run_at = (now.timestamp() + self.scan_interval_s)
+                next_run_iso = datetime.fromtimestamp(next_run_at, tz=timezone.utc).isoformat()
+            else:
+                # One-time run (run_once_with_depth): must not set/clear any
+                # future recurring execution time as a side effect -- carry
+                # forward whatever next_run_at is ALREADY persisted (None if
+                # nothing was ever armed, e.g. mode has always been
+                # 'disabled') rather than writing a new value OR nulling out
+                # a real one a still-armed recurring schedule depends on.
+                next_run_iso = self.store.get_state().get("next_run_at")
             self.store.record_run_finished(
                 candidates_evaluated=candidates_evaluated, next_run_at=next_run_iso,
                 pause_reason=pause_reason, finished_at=self._now_fn().isoformat(),
             )
         return {
-            "ran": True, "mode": mode, "candidates_evaluated": candidates_evaluated,
+            "ran": True, "mode": reported_mode, "candidates_evaluated": candidates_evaluated,
             "pause_reason": pause_reason,
         }

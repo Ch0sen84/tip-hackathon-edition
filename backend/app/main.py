@@ -1209,16 +1209,38 @@ def scheduler_status():
     }
 
 
+class RunOnceBody(BaseModel):
+    # Final round (2026-10-16): optional execution-depth selector. None
+    # (the default -- every pre-existing caller/test) preserves the
+    # EXACT legacy behavior: runner.run_once(), which refuses while the
+    # persisted recurring mode is 'disabled'. Passing an explicit depth
+    # routes to runner.run_once_with_depth(), the new path that is fully
+    # decoupled from the persisted mode -- this is what the two new
+    # "Discover Once" / "Discover & Evaluate Once" UI buttons call, and
+    # the only way a one-time run is possible while mode stays Disabled.
+    depth: Optional[str] = None
+
+
 @app.post("/api/scheduler/run-once", dependencies=[Depends(require_auth)])
-def scheduler_run_once():
-    """QA remediation D9: authenticated, bounded, supervised single-cycle
-    validation action -- see scheduler.SchedulerRunner.run_once's
-    docstring for the full set of guarantees (lease + in-process lock,
-    zero AI import, bounded top_n, returns to idle afterward, a second
-    concurrent call is rejected rather than queued).
+def scheduler_run_once(body: RunOnceBody = RunOnceBody()):
+    """QA remediation D9 (legacy, mode-gated path) + final-round item
+    (decoupled one-time path): see scheduler.SchedulerRunner.run_once /
+    run_once_with_depth docstrings for the full set of guarantees (lease
+    + in-process lock, zero AI import, bounded top_n, returns to idle
+    afterward, a second concurrent call -- via EITHER path, or a
+    genuinely different worker/process on the recurring path -- is
+    rejected rather than queued, no RTH/market-hours gate applied here).
     """
     runner = get_scheduler_runner()
-    result = runner.run_once()
+    if body.depth is not None:
+        if body.depth not in scheduler_module.RUN_ONCE_DEPTHS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"depth must be one of {scheduler_module.RUN_ONCE_DEPTHS}, got {body.depth!r}",
+            )
+        result = runner.run_once_with_depth(body.depth)
+    else:
+        result = runner.run_once()
     if result.get("reason") == "cycle_already_in_progress":
         raise HTTPException(status_code=409, detail="A scheduler cycle is already in progress. Try again shortly.")
     return result
