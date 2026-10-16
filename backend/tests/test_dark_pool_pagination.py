@@ -140,6 +140,89 @@ def test_coverage_status_is_recorded_as_a_distinct_row_per_ticker_date(tmp_path)
     assert status["session_start_verified"] is True
 
 
+class TestUnscheduledClosureCannotBeMisclassifiedAsComplete:
+    """Item 5 (pre-Phase-D follow-up): trading_calendar.py's hand-written
+    NYSE holiday table has NO mechanism for an unscheduled closure (a
+    historical full-market shutdown, a weather emergency, a technical
+    outage day) -- those are not on any fixed annual pattern, so
+    `tc.is_trading_day`/`session_info` genuinely, wrongly believe such a
+    date is a completely normal trading day.
+
+    VERIFIED ANSWER (read dark_pool_pagination.py's coverage-determination
+    logic directly, not assumed): this safety net ALREADY EXISTS, and it
+    lives in `paginate_ticker_day`'s own logic, not the calendar. The
+    calendar being wrong about a date never matters here, because
+    completeness is NEVER inferred merely from a day "being a trading
+    day" -- it is *exclusively* inferred from a real, non-empty page whose
+    oldest trade's timestamp is <= session_start (`reached_session_start`).
+    On a date the market was actually fully closed (real UW pagination
+    legitimately returns zero trades, since there were genuinely none to
+    retrieve), the VERY FIRST page comes back empty. The existing
+    `if not page_trades: status = COMPLETE if reached_session_start else
+    UNKNOWN` branch cannot possibly set COMPLETE here, because
+    `reached_session_start` can only ever become True after seeing at
+    least one real, non-empty page first -- and there wasn't one. The
+    result is honestly UNKNOWN, never a phantom 'complete' day with zero
+    real trading.
+
+    This class proves that property directly against a date
+    trading_calendar.py genuinely, incorrectly believes is a normal
+    trading day (not a weekend/known-holiday -- picked to be a real
+    ordinary Tuesday with no calendar exception at all, i.e. exactly what
+    an *unscheduled* closure would look like to this calendar), with zero
+    observations available for the whole day. No code change was needed
+    -- this is the existing, correct design, and this test is the
+    regression coverage proving it, requested explicitly because it
+    did not already exist in this suite."""
+
+    UNSCHEDULED_CLOSURE_DATE = date(2026, 9, 15)  # an ordinary Tuesday; tc has no exception for it
+
+    def test_calendar_genuinely_believes_this_is_a_normal_trading_day(self):
+        """Sanity check on the premise itself: trading_calendar.py has no
+        way to know this date is special, so it reports a normal full
+        trading day -- this is the exact blind spot item 5 describes."""
+        from app.core import trading_calendar as tc
+
+        info = tc.session_info(self.UNSCHEDULED_CLOSURE_DATE)
+        assert info.is_trading_day is True
+        assert info.holiday_name is None
+        assert tc.session_start_utc(self.UNSCHEDULED_CLOSURE_DATE) is not None
+
+    def test_zero_real_observations_on_a_calendar_believed_trading_day_yields_unknown_not_complete(self, tmp_path):
+        """The real failure mode this must guard against: pagination
+        genuinely finds NO real dark-pool prints for a date the calendar
+        says should have a full session (simulating an unscheduled full-
+        market closure, or equally a genuine data gap/outage) -- this
+        must NEVER silently become 'complete'."""
+        client = _FakeClient([{"data": []}])  # the very first page is already empty
+        cat = _catalog(tmp_path)
+        result = paginate_ticker_day(client, cat, "SPY", self.UNSCHEDULED_CLOSURE_DATE, page_limit=500, max_pages=10)
+        assert result["status"] == UNKNOWN
+        assert result["status"] != COMPLETE
+
+        status_row = cat.get_coverage_status("SPY", self.UNSCHEDULED_CLOSURE_DATE.isoformat())
+        assert status_row["status"] == UNKNOWN
+        assert status_row["session_start_verified"] is False
+
+    def test_this_unknown_day_is_structurally_excluded_from_the_baseline_too(self, tmp_path):
+        """Belt-and-suspenders across the two modules: confirms the
+        UNKNOWN classification this test proves pagination produces is
+        ALSO the exact status dark_pool_baseline.eligible_sessions (Phase
+        C) filters out of the eligible historical-baseline set -- an
+        unscheduled-closure day recorded this way can never silently
+        contribute a phantom zero-activity 'normal session' data point to
+        the baseline statistics either."""
+        from app.core import dark_pool_baseline as dpb
+
+        client = _FakeClient([{"data": []}])
+        cat = _catalog(tmp_path)
+        paginate_ticker_day(client, cat, "SPY", self.UNSCHEDULED_CLOSURE_DATE, page_limit=500, max_pages=10)
+
+        coverage_rows = cat.list_coverage_status("SPY")
+        eligible = dpb.eligible_sessions(coverage_rows)
+        assert all(row["coverage_date"] != self.UNSCHEDULED_CLOSURE_DATE.isoformat() for row in eligible)
+
+
 def test_interrupted_job_resumes_from_checkpoint_not_from_scratch(tmp_path):
     """Simulates a process restart mid-pagination: run one page, then
     construct a FRESH client+catalog-handle (same underlying db file)

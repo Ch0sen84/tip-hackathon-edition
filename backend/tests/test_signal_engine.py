@@ -352,3 +352,69 @@ class TestDetermineTransition:
         gates = make_gates(dark_pool_anomaly={"passed": True, "metrics": {"ratio": 2.0, "z_score": 1.0, "bootstrap": False}})
         state, rule = se.determine_transition("CONFIRMED", gates, 2, 4.0, "bullish-lean")
         assert state != "INVALIDATED"
+
+
+class TestClassifyConfidenceNoneTierOneZRegression:
+    """Pre-Phase-D, Chad-approved narrow fix: classify_confidence used to
+    crash with TypeError on `f"...z={z:.1f}"` whenever tier1_ratio was
+    truthy but tier1_z was None. See signal_engine.py's classify_confidence
+    for the fix itself; this class is the required regression coverage
+    (zero-variance baseline, None z-score generally, and a golden-value
+    snapshot proving the ordinary case is byte-for-byte unchanged)."""
+
+    def test_zero_variance_historical_baseline_no_longer_crashes(self):
+        """A real scenario this fix targets: dark_pool_baseline.compute_baseline
+        can produce `z_score=None` even with `ratio_vs_mean` present whenever
+        historical stdev is exactly 0.0 (< 2 eligible historical sessions, or
+        every eligible session happened to have identical cumulative premium)
+        -- see compute_baseline's `z = ... if stdev > 0 else None`. Before
+        this fix, feeding that combination into classify_confidence crashed.
+        """
+        gates = make_gates(
+            dark_pool_anomaly={"passed": True, "metrics": {"ratio": 4.5, "z_score": None, "bootstrap": False}}
+        )
+        conf, sig_type, reason, qualifies = se.classify_confidence(gates)  # must not raise
+        assert conf == "medium"
+        assert sig_type == "single-signal-dark-pool"
+        assert qualifies is True
+        assert "4.5x avg" in reason
+        assert "z=" not in reason  # no z-score clause when z is genuinely unavailable
+
+    def test_missing_z_score_generally_does_not_crash(self):
+        """Same None-z fallback, independent of the specific zero-variance
+        baseline scenario above -- any caller that supplies tier1_z=None
+        with a real ratio must get a sane non-crashing result."""
+        gates = make_gates(
+            dark_pool_anomaly={"passed": True, "metrics": {"ratio": 10.0, "z_score": None, "bootstrap": False}}
+        )
+        conf, sig_type, reason, qualifies = se.classify_confidence(gates)
+        assert conf == "medium"
+        assert qualifies is True
+        assert "10.0x avg" in reason
+
+    def test_missing_ratio_and_missing_z_both_none_does_not_crash(self):
+        gates = make_gates(
+            dark_pool_anomaly={"passed": True, "metrics": {"ratio": None, "z_score": None, "bootstrap": False}}
+        )
+        conf, sig_type, reason, qualifies = se.classify_confidence(gates)
+        assert conf == "medium"
+        assert reason == "Single-category dark-pool anomaly only -- not independently corroborated"
+
+    def test_golden_value_ordinary_ratio_and_z_case_unchanged_by_this_fix(self):
+        """SNAPSHOT/GOLDEN-VALUE test: a normal case where BOTH ratio and
+        z_score are real numbers must produce the EXACT SAME reason string
+        this function always produced before the None-z fix -- proving the
+        fix changed nothing about the pre-existing, already-working
+        behavior. This is the literal pre-fix f-string's output for these
+        inputs, pinned down verbatim."""
+        gates = make_gates(
+            dark_pool_anomaly={"passed": True, "metrics": {"ratio": 5.0, "z_score": 3.25, "bootstrap": False}}
+        )
+        conf, sig_type, reason, qualifies = se.classify_confidence(gates)
+        assert conf == "medium"
+        assert sig_type == "single-signal-dark-pool"
+        assert qualifies is True
+        assert reason == (
+            "Single-category dark-pool anomaly only (5.0x avg, z=3.2) -- "
+            "real, but not independently corroborated by a 2nd category"
+        )

@@ -295,9 +295,24 @@ def classify_confidence(gates: dict, is_watchlist: bool = False) -> tuple:
     if dp["passed"]:
         ratio = dp["metrics"].get("ratio")
         z = dp["metrics"].get("z_score")
-        reason = (f"Single-category dark-pool anomaly only ({ratio:.1f}x avg, z={z:.1f}) -- "
-                   "real, but not independently corroborated by a 2nd category" if ratio
-                   else "Single-category dark-pool anomaly only -- not independently corroborated")
+        # BUG FIX (pre-Phase-D, Chad-approved narrow fix): this used to do
+        # f"...z={z:.1f}" unconditionally whenever `ratio` was truthy, which
+        # raises TypeError when tier1_z is None (e.g. a zero-variance
+        # historical baseline -- see dark_pool_baseline.compute_baseline,
+        # `stdev` can legitimately be 0.0 with < 2 historical sessions,
+        # which makes `z` None by that module's own `if stdev > 0` guard).
+        # Fix: the z-score clause is now itself conditional on z being
+        # present, independent of whether ratio is present -- when z is
+        # None, fall back to reporting the ratio alone instead of crashing.
+        # The ratio-and-z-both-present case below produces the EXACT SAME
+        # string as before this fix (see
+        # test_signal_engine.py::TestClassifyConfidenceGoldenValueUnchanged).
+        if ratio:
+            z_clause = f", z={z:.1f}" if z is not None else ""
+            reason = (f"Single-category dark-pool anomaly only ({ratio:.1f}x avg{z_clause}) -- "
+                       "real, but not independently corroborated by a 2nd category")
+        else:
+            reason = "Single-category dark-pool anomaly only -- not independently corroborated"
         return ("medium", "single-signal-dark-pool", reason, True)
 
     if of["passed"]:
