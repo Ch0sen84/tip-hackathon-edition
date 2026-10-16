@@ -127,20 +127,33 @@ tools/check_deployment_binding.sh <compose_project_name>
 This fails loudly if the container ended up published on `0.0.0.0`/`::`
 (every interface) instead of the intended `BIND_HOST`.
 
-### h. Authentication token (Phase A)
+### h. Authentication: Local Mode vs. Network Mode
 
-Every settings/credential write, the watchlist editor, Market Discovery,
-and Investigate with AI now require an `X-TIP-Auth` header (see
-README.md "Authentication" for the full design). For the normal
-localhost install this walkthrough just set up, **the frontend handles
-this automatically** -- no agent action needed; the user's browser
-self-serves the token on first page load via `GET /api/auth/bootstrap`
-(which only ever answers a same-machine/loopback caller).
+For the normal loopback-only install this walkthrough just set up
+(`BIND_HOST=127.0.0.1`, the default), the app runs in **Local Mode** --
+see README.md "Local Mode / Network Mode" for the full design. A real
+browser opening the app at `http://localhost:8000` works immediately,
+with **zero authentication prompts**: no token, no banner, no agent
+action needed. This is enforced server-side via the browser's own
+`Sec-Fetch-Site`/`Origin` headers, not via a token the frontend has to
+fetch first -- there is nothing for an installing agent to retrieve for
+a normal user-facing verification pass in this mode.
 
-If you (the installing agent) need to drive a mutating API call yourself
-for verification -- e.g. the Live-mode curl examples in step i below --
-fetch the token the same way the browser does (this call only succeeds
-because you're running on the same machine as the container):
+If you (the installing agent) changed `BIND_HOST` to something other
+than loopback, or explicitly set `TIP_LOCAL_MODE=0`, the app is in
+**Network Mode** instead -- the pre-existing `X-TIP-Auth` bootstrap/
+pairing-code token model (unchanged from the prior QA-remediation
+round) applies to every settings/credential write, the watchlist
+editor, Market Discovery, and Investigate with AI.
+
+**Driving a mutating API call yourself via `curl` for verification**
+(e.g. the Live-mode examples in step i below) is a non-browser caller,
+so it never sends real `Sec-Fetch-Site`/`Origin` headers -- it always
+needs the Network Mode token, REGARDLESS of which mode the app is
+actually running in (Local Mode's bypass is specifically for a real
+browser's same-origin fetch, not for curl). Fetch the token the same
+way a browser's auto-bootstrap would (this call only succeeds because
+you're running on the same machine as the container):
 
 ```bash
 TIP_TOKEN=$(curl -s http://localhost:8000/api/auth/bootstrap | python3 -c 'import sys,json;print(json.load(sys.stdin)["token"])')

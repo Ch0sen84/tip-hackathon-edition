@@ -189,7 +189,68 @@ and `POST /api/settings/ai-key` server-side with 403 -- defense in depth
 for the later public static-demo build, implemented now so that code path
 never needs revisiting.
 
-## Authentication (Phase A)
+## Local Mode / Network Mode (authentication redesign)
+
+As of this round, this app runs in exactly one of two authentication
+modes, decided automatically by the backend from `BIND_HOST` (see
+`.env.example`) -- there is no setup step for the common case:
+
+* **Local Mode (the default for the supported loopback-only install):**
+  `BIND_HOST=127.0.0.1` (or unset, or `::1`/`localhost`) -- opening TIP
+  in a normal browser on this same machine works **immediately, with
+  zero authentication prompts of any kind**: no banner, no pairing
+  code, no token field. State-changing requests (Settings, the
+  watchlist editor, Market Discovery, scheduler controls, Investigate
+  with AI) are allowed when, and only when, the browser's own
+  `Sec-Fetch-Site: same-origin` header is present (the browser computes
+  this itself from the actual request; it cannot be forged by a remote
+  page) AND, whenever an `Origin` header is present, it exactly matches
+  this deployment's configured origin. An unrelated website opened in
+  the same browser **cannot** perform any protected action against your
+  TIP instance -- its requests arrive with `Sec-Fetch-Site: cross-site`
+  (or, from a same-site-but-different-origin page, `same-site`), both of
+  which are explicitly rejected, with no exception for direct
+  navigation/typed-URL requests (`Sec-Fetch-Site: none`) either. A
+  browser old enough to never send `Sec-Fetch-Site` at all falls back to
+  requiring Network Mode's token (fail-**closed**, never fail-open).
+* **Network Mode (any other `BIND_HOST`, or `TIP_LOCAL_MODE=0`):** the
+  exact, unmodified `X-TIP-Auth` bootstrap/pairing-code token model
+  described below -- nothing about it changed in this round.
+
+**`BIND_HOST` is read as your STATED INTENT, never independently
+verified.** This process cannot confirm from inside a container that a
+loopback-looking `BIND_HOST` genuinely means nothing outside this
+machine can reach the port. Do **not** combine Local Mode with any of
+the following -- none of them are supported, and doing so defeats Local
+Mode's trust model entirely:
+
+* a custom `docker-compose.override.yml` (or any other Compose
+  override) that republishes or changes the port mapping;
+* a reverse proxy (nginx/Caddy/Traefik/etc.) in front of this app;
+* a tunnel (ngrok, cloudflared, Tailscale Funnel, or similar);
+* any other mechanism that makes this port reachable from anywhere but
+  the literal machine Docker is running on.
+
+If you need any of the above, either set `TIP_LOCAL_MODE=0` to force
+Network Mode and rely on its token model, or independently enforce
+authenticated access at that outer layer yourself. Setting
+`TIP_LOCAL_MODE=1` explicitly against a non-loopback `BIND_HOST` makes
+this app **refuse to start** (a loud startup failure, matching the
+existing single-process guard's fail-closed pattern) rather than
+silently run an unsafe configuration -- see
+`backend/app/core/local_mode.py`.
+
+The frontend never guesses which mode is active: it calls the
+unauthenticated `GET /api/auth/mode` before deciding whether to run any
+auth-setup UI at all.
+
+## Authentication (Phase A) -- Network Mode only
+
+Everything in this section describes **Network Mode's** behavior, which
+is completely unchanged from the prior QA-remediation round. In Local
+Mode (the default loopback-only install, see above), none of this UI or
+flow is ever shown -- state-changing requests from a genuine same-origin
+browser tab just work.
 
 Every state-changing or paid API call (settings/credential writes, the
 watchlist editor, `POST /api/radar/discover`, and `POST

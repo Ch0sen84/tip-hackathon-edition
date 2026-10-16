@@ -48,6 +48,17 @@ services:
       # genuine-MCP standalone "Test UW MCP Connection" button in
       # Settings, which never depended on this variable.
       INVESTIGATE_TRANSPORT: ${INVESTIGATE_TRANSPORT:-rest}
+      # Local Mode / Network Mode (Fetch Metadata auth redesign): leave
+      # unset ("auto", the default) for every normal install -- Local
+      # Mode activates automatically iff BIND_HOST above is loopback.
+      # Only set this explicitly if you want to FORCE Network Mode's
+      # token model even on a loopback-bound install (TIP_LOCAL_MODE=0),
+      # or you understand the guard in core/local_mode.py and are
+      # deliberately asserting Local Mode (TIP_LOCAL_MODE=1) -- doing
+      # the latter against a non-loopback BIND_HOST makes this app
+      # refuse to start, loudly, by design. See README.md "Local Mode /
+      # Network Mode" for the full design and unsupported topologies.
+      TIP_LOCAL_MODE: ${TIP_LOCAL_MODE:-auto}
       # QA remediation D9: these were all already read from the
       # environment by the app (app/scheduler.py's _env_int calls,
       # live_uw_adapter.py's TIP_UW_MAX_CONCURRENT_REQUESTS), but were
