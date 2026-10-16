@@ -114,7 +114,7 @@ EXPECTED_TICKER_ANALYSIS_KEYS = {
     "current_read", "evidence", "stock_state", "history", "raw",
 }
 
-EXPECTED_RADAR_KEYS = {"highest", "other", "scanned", "scan_scope", "last_scan_at"}
+EXPECTED_RADAR_KEYS = {"highest", "other", "scanned", "scan_scope", "last_scan_at", "served_from_cache"}
 
 
 def test_ticker_analysis_response_shape_matches_documented_contract(app_main, monkeypatch):
@@ -190,7 +190,12 @@ def test_radar_response_shape_unaffected_when_ingestion_catalog_write_is_paused(
 
     _fresh_memory_store(app_main, monkeypatch)
     _fresh_catalog(app_main, monkeypatch)  # Phase C: see _fresh_catalog's docstring
-    resp_ok = client.get("/api/radar")
+    # W2 (cache-first watchlist): this test specifically exercises a real
+    # scan's catalog-write-pause handling -- an ordinary GET no longer
+    # scans live for a LiveUWAdapter, so both calls here must explicitly
+    # request a real refresh (refresh=true), exactly like the UI's
+    # "Refresh Data" action / POST /api/radar/refresh does.
+    resp_ok = client.get("/api/radar?refresh=true")
     assert resp_ok.status_code == 200
     assert set(resp_ok.json().keys()) == EXPECTED_RADAR_KEYS
     body_ok = resp_ok.json()
@@ -217,7 +222,7 @@ def test_radar_response_shape_unaffected_when_ingestion_catalog_write_is_paused(
         list_darkpool_observations_by_date=lambda ticker: {},
     ))
     _fresh_memory_store(app_main, monkeypatch)
-    resp_paused = client.get("/api/radar")
+    resp_paused = client.get("/api/radar?refresh=true")
     assert resp_paused.status_code == 200
     body_paused = resp_paused.json()
     # `last_scan_at` is a genuine wall-clock timestamp recorded fresh on

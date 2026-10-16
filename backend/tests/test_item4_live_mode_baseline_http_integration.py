@@ -197,7 +197,13 @@ class TestLiveRadarGateGenuinelyReflectsSeededCatalogHistory:
         from app.main import app
 
         client = TestClient(app)
-        radar_resp = client.get("/api/radar")
+        # W2 (cache-first watchlist): an ordinary GET /api/radar no longer
+        # performs a live scan for a LiveUWAdapter -- this test's whole
+        # point is checking a FRESH scan's dark-pool-baseline wiring, so
+        # it must explicitly ask for one via refresh=true, exactly like
+        # the real "Refresh Data" UI action does (POST /api/radar/refresh,
+        # which calls this same route with refresh=True internally).
+        radar_resp = client.get("/api/radar?refresh=true")
         assert radar_resp.status_code == 200, radar_resp.text
         radar_body = radar_resp.json()
 

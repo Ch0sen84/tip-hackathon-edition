@@ -16,6 +16,7 @@ from __future__ import annotations
 import logging
 import os
 import sys
+import threading
 from datetime import date, timedelta
 from typing import Optional
 
@@ -1241,36 +1242,106 @@ def get_update_check():
     return _update_check.check_for_updates(info.get("commit"))
 
 
+def _cached_scan_for_ticker(catalog: IngestionCatalog, store: QualifyingDaysStore, ticker: str) -> tuple[Optional[dict], scheduler_freshness.FreshnessResult]:
+    """W2 cache-first read: the EXACT scan dict shape `_run_scan` already
+    returns, rebuilt PURELY from the most recent `signal_evaluations` row
+    already cataloged for `ticker` -- zero live adapter calls. See
+    `_catalog_scan_best_effort`: the `result` it persists is the same
+    dict `_run_scan` returns (gates/state/confidence/stock_state/raw all
+    included), so `raw_json` here IS a valid `scan` dict, not a re-derived
+    approximation. Returns (None, freshness) when nothing has ever been
+    cataloged for this ticker yet (freshness.state == "unevaluated") --
+    callers must handle that case without ever inventing data for it."""
+    latest = catalog.get_latest_signal_evaluation(ticker)
+    freshness = scheduler_freshness.classify_freshness(latest, ticker)
+    if latest is None or not latest.get("raw_json"):
+        return None, freshness
+    return latest["raw_json"], freshness
+
+
+def _not_evaluated_evidence_item(ticker: str, state: Optional[str] = None) -> dict:
+    """Placeholder evidence item for a watchlist ticker that has never
+    been evaluated yet (no cataloged signal_evaluations row at all) --
+    rendered honestly as "not evaluated" (no gates/price/evidence
+    invented), while still surfacing the ticker's real qualifying-days
+    `state` (from QualifyingDaysStore, not the UW-call-costing catalog)
+    when one is already known."""
+    return {
+        "ticker": ticker, "state": state, "gates_passed": [], "gates_metrics": {},
+        "dp": None, "options": None, "options_partial": False, "price": None,
+        "alerts": None, "context": None, "next_earnings_date": None, "research": [],
+        "catalyst_identified": False,
+    }
+
+
 @app.get("/api/radar")
-def radar():
-    """Market Radar: scan every ticker in the adapter's universe and return
-    the ones that qualify (tip_evidence.qualifies), highest-attention first.
+def radar(refresh: bool = False):
+    """Market Radar: the user's personal watchlist -- qualifying tickers,
+    highest-attention first.
+
+    W2 fix (cache-first watchlist experience): for a real LiveUWAdapter,
+    an ordinary GET (the default -- page load, refresh, nav-back, auth-
+    state-change, history restoration) makes ZERO live UW HTTP calls. It
+    reads whatever was most recently cataloged for each watchlist ticker
+    (IngestionCatalog.get_latest_signal_evaluation -- the SAME table the
+    scheduler/discovery pipeline and every prior on-demand scan already
+    write to, never a second store) and reports each ticker's freshness
+    (current/stale/unevaluated, scheduler_freshness.classify_freshness).
+    A real live rescan only happens when the caller explicitly asks for
+    one (`refresh=true` -- used by POST /api/radar/refresh below, see
+    its docstring for the user-facing "Refresh Data" action) or when the
+    adapter isn't live at all (SyntheticDataAdapter/demo mode: there is
+    no real HTTP cost to a demo scan, so Demo Mode's existing always-
+    fresh behavior is intentionally left unchanged here).
 
     Market Radar (2026-10-14, Phase A): records when this scan ran and
     how many tickers it covered (persisted -- survives container
     recreation), and explicitly discloses `scan_scope: "watchlist"` so
     the UI never implies broader-market discovery that isn't actually
-    happening. UW's REST API does offer a genuine stock/options screener
-    capable of real market-wide discovery (confirmed, not assumed) --
-    that is NOT wired up here; this remains honest watchlist-only
-    scanning until that's a separately-scoped feature."""
+    happening."""
     adapter = get_adapter()
     store = get_store()
+    catalog = get_catalog()
     universe = adapter.get_universe()
     if not universe:
         return {"highest": [], "other": [], "scanned": 0, "scan_scope": "watchlist", "last_scan_at": None}
 
+    is_live = isinstance(adapter, LiveUWAdapter)
+    live_fetch = refresh or not is_live
+
     items = []
     scans_by_ticker = {}
+    freshness_by_ticker: dict[str, scheduler_freshness.FreshnessResult] = {}
     for ticker in universe:
-        scan = _run_scan(adapter, store, ticker)
+        if live_fetch:
+            scan = _run_scan(adapter, store, ticker)
+            # Freshness after a real fetch is always "current" by definition
+            # (it was just retrieved) -- avoid a second catalog round-trip.
+            freshness_by_ticker[ticker] = scheduler_freshness.FreshnessResult(
+                ticker=ticker, state=scheduler_freshness.CURRENT, evaluation=None, age_s=0.0,
+                window_s=scheduler_freshness.freshness_window_s(),
+            )
+        else:
+            scan, freshness = _cached_scan_for_ticker(catalog, store, ticker)
+            freshness_by_ticker[ticker] = freshness
+            if scan is None:
+                scan = _not_evaluated_evidence_item(ticker)
+                # Give the placeholder the real current qualifying-days
+                # history (QualifyingDaysStore is independent of the UW-
+                # call-costing catalog -- reading it is not a live fetch).
+                scan["state"] = store.current_state(ticker) or "NEW"
+                scan["confidence"] = None
+                scan["signal_type"] = None
+                scan["qualifying_days_count"] = store.qualifying_days_count(ticker)
+                scan["gates"] = {}
         scans_by_ticker[ticker] = scan
-        items.append(_to_evidence_item(scan))
+        items.append(_to_evidence_item(scan) if scan.get("gates") else _not_evaluated_evidence_item(ticker, scan.get("state")))
 
     highest, other = tip_evidence.present(items, next_session=date.today() + timedelta(days=1))
 
     def _attach(entry: dict) -> dict:
         s = scans_by_ticker[entry["ticker"]]
+        fr = freshness_by_ticker.get(entry["ticker"])
         # Pre-existing gap found while building the Stage 2 signal-state
         # filter: tip_evidence.present()'s entry dict has never carried a
         # "state" key at all (it only tracks state internally for
@@ -1280,10 +1351,10 @@ def radar():
         # card/row has always been visually blank. Fixing here (real data
         # already computed in `scan`, just never attached) since the new
         # client-side state filter needs a real field to filter on.
-        entry["state"] = s["state"]
-        entry["confidence"] = s["confidence"]
-        entry["signal_type"] = s["signal_type"]
-        entry["qualifying_days_count"] = s["qualifying_days_count"]
+        entry["state"] = s.get("state")
+        entry["confidence"] = s.get("confidence")
+        entry["signal_type"] = s.get("signal_type")
+        entry["qualifying_days_count"] = s.get("qualifying_days_count")
         # Compact signal-history indicator (Stage 2 / P3): only non-empty
         # when this ticker genuinely has more than one real recorded scan
         # (store.history() -- never fabricated). On a freshly started
@@ -1293,6 +1364,16 @@ def radar():
         # this list has 2+ entries.
         hist = store.history(entry["ticker"])
         entry["history_states"] = [h["state"] for h in hist] if len(hist) > 1 else []
+        # W2: evaluation-freshness is a structurally DISTINCT concept from
+        # signal lifecycle (state) and confidence -- never conflated. One
+        # of "current" / "stale" / "unevaluated"; `last_evaluated_at` is
+        # the real cataloged retrieved_at (None when never evaluated).
+        if fr is not None:
+            entry["eval_freshness"] = fr.state
+            entry["last_evaluated_at"] = (fr.evaluation or {}).get("retrieved_at") if fr.evaluation else None
+        else:
+            entry["eval_freshness"] = "current"
+            entry["last_evaluated_at"] = None
         return entry
 
     scan_record = _settings_store.record_scan(len(universe))
@@ -1305,7 +1386,40 @@ def radar():
         # see this function's docstring for why that distinction matters.
         "scan_scope": "watchlist",
         "last_scan_at": scan_record["last_scan_at"],
+        # W2: lets the UI render "cached data, no live fetch happened" vs
+        # "this response just performed a real refresh" without guessing
+        # from eval_freshness alone (e.g. a brand-new live-mode watchlist
+        # with nothing cataloged yet is correctly "unevaluated" either way).
+        "served_from_cache": not live_fetch,
     }
+
+
+_radar_refresh_lock = threading.Lock()
+
+
+@app.post("/api/radar/refresh", dependencies=[Depends(require_auth)])
+def radar_refresh():
+    """W2's explicit "Refresh Data" action: the ONLY route that makes a
+    real live UW fetch for the personal watchlist. Structurally separate
+    from the market-wide scheduler (/api/scheduler/*) -- different
+    trigger (an explicit user click here vs. a scheduled/run-once cycle
+    there), different scope (the user's own watchlist vs. broader-market
+    discovery) -- sharing only the same underlying UW concurrency gate
+    (core/uw_concurrency.py, via the one shared adapter/client every
+    route already funnels through) and the same catalog tables
+    (IngestionCatalog, via the exact same `_run_scan`/
+    `_catalog_scan_best_effort` path GET /api/radar?refresh=true already
+    uses -- never a second pipeline).
+
+    Duplicate-concurrent-refresh prevention: a non-blocking lock acquire;
+    a second call while one is already in flight gets a clean 409 rather
+    than silently queuing, double-fetching, or double-counting telemetry."""
+    if not _radar_refresh_lock.acquire(blocking=False):
+        raise HTTPException(status_code=409, detail="A watchlist refresh is already in progress. Try again shortly.")
+    try:
+        return radar(refresh=True)
+    finally:
+        _radar_refresh_lock.release()
 
 
 class DiscoverFiltersBody(BaseModel):
