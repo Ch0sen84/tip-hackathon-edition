@@ -90,6 +90,14 @@ def app_main(tmp_path, monkeypatch):
     _main._adapter_sig = None
     _main._last_uw_test_result = None
     _main._auth_store = AuthTokenStore(tmp_path / ".auth_token")
+    # Phase D: reset the scheduler runner + its lease/mode store too, and
+    # the shared UW concurrency gate, so one test's scheduler mode/lease
+    # state (and in-flight counters) can never leak into the next test.
+    _main._catalog = None
+    _main._store = None
+    _main._reset_scheduler_runner()
+    from app.core import uw_concurrency as _uw_concurrency
+    _uw_concurrency.reset_shared_gate_for_tests()
     monkeypatch.setattr(_main.settings, "public_demo", False)
     monkeypatch.setattr(_main.settings, "uw_api_key", "")
     _main.auth_token = _main._auth_store.get_or_create()

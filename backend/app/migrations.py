@@ -266,6 +266,58 @@ CREATE INDEX IF NOT EXISTS idx_darkpool_coverage_status_ticker_date
     ON darkpool_coverage_status(ticker, coverage_date DESC);
 """,
     ),
+    # Phase D (2026-10-15): scheduler lease + durable mode/state tables.
+    # Both ADDITIVE ONLY, same as every migration above -- new tables,
+    # never an ALTER/DROP.
+    #
+    #   scheduler_lease -- a SINGLE-ROW (id=1) table used as an atomic
+    #   mutual-exclusion lease so a container restart, a crashed-and-
+    #   restarted process, or (if it ever happens) multiple worker
+    #   processes cannot run overlapping background collection cycles.
+    #   Acquire/renew/release are each ONE atomic UPDATE statement with a
+    #   WHERE clause that only succeeds for the rightful owner or an
+    #   expired lease (see app/core/scheduler_store.py) -- never a
+    #   read-then-write race.
+    #
+    #   scheduler_state -- a SINGLE-ROW (id=1) table holding the durable
+    #   scheduler mode ('disabled' | 'dry_run' | 'enabled') plus
+    #   last/next-run bookkeeping. CRITICAL: this migration's CREATE
+    #   TABLE IF NOT EXISTS is a no-op against a database that already
+    #   has this table from a prior run of this exact migration -- so an
+    #   upgrade that re-runs this migration (always safe/idempotent, see
+    #   module docstring) NEVER resets an existing operator-set mode row
+    #   back to the hardcoded 'disabled' default. The default row is only
+    #   ever inserted (via INSERT OR IGNORE in scheduler_store.py, not
+    #   here) the FIRST time the table is empty -- a genuinely fresh
+    #   install. See backend/tests/test_scheduler_store.py's
+    #   test_upgrade_preserves_existing_mode for the exact regression this
+    #   guards against.
+    Migration(
+        version=4,
+        name="scheduler_lease_and_state",
+        sql="""
+CREATE TABLE IF NOT EXISTS scheduler_lease (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    worker_id TEXT NOT NULL,
+    acquired_at TEXT NOT NULL,
+    heartbeat_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    lease_token TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS scheduler_state (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    mode TEXT NOT NULL DEFAULT 'disabled',
+    updated_at TEXT NOT NULL,
+    updated_by TEXT,
+    last_run_started_at TEXT,
+    last_run_finished_at TEXT,
+    next_run_at TEXT,
+    last_cycle_candidates_evaluated INTEGER,
+    pause_reason TEXT
+);
+""",
+    ),
 ]
 
 

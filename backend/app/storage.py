@@ -181,9 +181,17 @@ class QualifyingDaysStore:
             run_migrations(conn, self.db_path)
 
     def record_scan(self, ticker: str, any_gate_passed: bool, state: str,
-                     scan_date: Optional[str] = None) -> None:
+                     scan_date: Optional[str] = None, kind: str = ONDEMAND) -> None:
+        # Phase D: `kind` lets a background-sourced scan (the scheduler's
+        # bounded per-ticker evaluation) check the SAME storage_guard
+        # circuit breaker other background writes already use (the
+        # earlier, more conservative BACKGROUND threshold -- see
+        # app/storage_guard.py) instead of always checking the on-demand
+        # threshold regardless of who's actually writing. Every existing
+        # caller is unaffected: the default stays ONDEMAND, byte-for-byte
+        # the same behavior as before this phase.
         if self._storage_guard is not None:
-            result = self._storage_guard.check_before_write(ONDEMAND)
+            result = self._storage_guard.check_before_write(kind)
             if not result.allowed:
                 raise StorageGuardPausedError(result)
         scan_date = scan_date or date_cls.today().isoformat()

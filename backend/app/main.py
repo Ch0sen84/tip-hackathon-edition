@@ -53,7 +53,10 @@ from .ai.simulated import get_simulated_transcript
 from .ai.validation import ValidationError as AiValidationError
 from .auth import TOKEN_HEADER, AuthTokenStore, default_token_path, is_loopback
 from .config import settings
-from .core import dark_pool_baseline, scan_service, tip_evidence
+from .core import dark_pool_baseline, discovery, scan_service, tip_evidence
+from .core import scheduler_freshness, single_process_guard, uw_concurrency
+from .core.scheduler_store import InvalidModeError, MODES as SCHEDULER_MODES, SchedulerStore, new_worker_id
+from . import scheduler as scheduler_module
 from .core.candles import build_markers
 from .ingestion import IngestionCatalog, StorageGuardPausedError as IngestionStorageGuardPausedError
 from .settings_store import MAX_WATCHLIST_SIZE, SettingsStore, last4
@@ -208,6 +211,63 @@ def get_catalog() -> IngestionCatalog:
     return _catalog
 
 
+def _scheduler_run_ticker_scan(adapter: UWDataAdapter, ticker: str) -> dict:
+    """Phase D: the ONE function the background scheduler uses for its
+    bounded per-ticker evaluation step (mode="enabled" only) -- a thin
+    wrapper around the EXACT SAME `_run_scan` the interactive Market
+    Radar route already calls, just with kind="background" so storage
+    writes check the earlier/more-conservative background threshold
+    (see storage_guard.py) instead of the on-demand one. Intentionally
+    NOT a new evaluation pipeline -- see app/scheduler.py's module
+    docstring and Chad's item 6."""
+    return _run_scan(adapter, get_store(), ticker, kind="background")
+
+
+_scheduler_runner: Optional[scheduler_module.SchedulerRunner] = None
+
+
+def get_scheduler_runner() -> scheduler_module.SchedulerRunner:
+    """Lazily constructed exactly like _store/_adapter/_catalog above;
+    tests reset this via conftest's app_main fixture the same way."""
+    global _scheduler_runner
+    if _scheduler_runner is None:
+        _scheduler_runner = scheduler_module.SchedulerRunner(
+            db_path=settings.db_path,
+            get_adapter=get_adapter,
+            get_catalog=get_catalog,
+            run_ticker_scan=_scheduler_run_ticker_scan,
+        )
+    return _scheduler_runner
+
+
+def _reset_scheduler_runner() -> None:
+    global _scheduler_runner
+    _scheduler_runner = None
+
+
+@app.on_event("startup")
+def _on_startup() -> None:
+    """Phase D: refuse to start under a multi-worker launcher (see
+    core/single_process_guard.py -- the UW concurrency gate is
+    process-local and not safe across multiple worker processes), then
+    start the background scheduler thread. The scheduler thread itself
+    is a no-op loop whenever scheduler_state.mode == 'disabled' (the
+    hardcoded fallback for any fresh install/upgrade with no prior
+    explicit setting) -- starting the thread is NOT the same as making
+    background UW calls."""
+    single_process_guard.assert_single_process()
+    get_scheduler_runner().start()
+
+
+@app.on_event("shutdown")
+def _on_shutdown() -> None:
+    """Graceful shutdown: releases the scheduler's lease immediately
+    (see scheduler_store.SchedulerStore.release_lease) rather than
+    leaving the next process to wait out the full lease TTL."""
+    if _scheduler_runner is not None:
+        _scheduler_runner.stop()
+
+
 def _price_move_pct(stock_state: Optional[dict]) -> Optional[float]:
     if not stock_state or stock_state.get("unavailable"):
         return None
@@ -218,7 +278,7 @@ def _price_move_pct(stock_state: Optional[dict]) -> Optional[float]:
 
 
 def _catalog_scan_best_effort(adapter: UWDataAdapter, ticker: str, flow_alerts: list,
-                               darkpool_trades: list, result: dict) -> None:
+                               darkpool_trades: list, result: dict, kind: str = "on_demand") -> None:
     """Phase B: persists this scan's raw inputs + evaluation into the
     historical catalog tables -- PURELY an added persistence layer
     underneath the existing live-fetch logic above. This function's
@@ -229,14 +289,20 @@ def _catalog_scan_best_effort(adapter: UWDataAdapter, ticker: str, flow_alerts: 
     not change" requirement. Only ever called for a LiveUWAdapter scan;
     the synthetic/demo adapter's fixture data is deliberately never
     cataloged (it isn't real upstream data, and Phase A's seed_demo_
-    history already simulates multi-day history for it)."""
+    history already simulates multi-day history for it).
+
+    Phase D: `kind` is threaded through to every catalog_* write so the
+    scheduler's calls (kind="background") check storage_guard's earlier,
+    more conservative BACKGROUND threshold instead of always being
+    treated as an on-demand write regardless of who's actually writing.
+    Default stays "on_demand" -- every pre-existing caller is unaffected."""
     if not isinstance(adapter, LiveUWAdapter):
         return
     try:
         catalog = get_catalog()
-        n_flow = catalog.catalog_options_flow_observations(ticker, flow_alerts)
-        n_dp = catalog.catalog_darkpool_observations(ticker, darkpool_trades)
-        catalog.catalog_signal_evaluation(ticker, result)
+        n_flow = catalog.catalog_options_flow_observations(ticker, flow_alerts, kind=kind)
+        n_dp = catalog.catalog_darkpool_observations(ticker, darkpool_trades, kind=kind)
+        catalog.catalog_signal_evaluation(ticker, result, kind=kind)
     except Exception:  # noqa: BLE001 -- see docstring: never propagate (incl. IngestionStorageGuardPausedError)
         logging.getLogger(__name__).info(
             "Phase B ingestion catalog write skipped for %s (non-fatal, response unaffected)", ticker
@@ -271,7 +337,15 @@ def _catalog_dark_pool_baseline_best_effort(adapter: UWDataAdapter, ticker: str)
         return None
 
 
-def _run_scan(adapter: UWDataAdapter, store: QualifyingDaysStore, ticker: str) -> dict:
+def _run_scan(adapter: UWDataAdapter, store: QualifyingDaysStore, ticker: str, kind: str = "on_demand") -> dict:
+    """Phase D: `kind` ("on_demand" default, or "background" for the
+    scheduler) is threaded through to the catalog AND the qualifying-
+    days storage_guard check -- see _catalog_scan_best_effort and
+    storage.QualifyingDaysStore.record_scan. A background caller that
+    raises StorageGuardPausedError here is expected to catch it itself
+    (see app.main._scheduler_run_ticker_scan) rather than get the
+    on-demand-route-shaped HTTPException(507) below, which only makes
+    sense for an interactive HTTP request."""
     flow_alerts = adapter.get_flow_alerts(ticker)
     darkpool_trades = adapter.get_darkpool_trades(ticker)
     stock_state = adapter.get_stock_state(ticker)
@@ -290,8 +364,10 @@ def _run_scan(adapter: UWDataAdapter, store: QualifyingDaysStore, ticker: str) -
     )
     any_gate_passed = len(result["gates_passed"]) > 0
     try:
-        store.record_scan(ticker, any_gate_passed, result["state"])
+        store.record_scan(ticker, any_gate_passed, result["state"], kind=kind)
     except StorageGuardPausedError as e:
+        if kind != "on_demand":
+            raise  # background caller: let it propagate for its own handling, never shaped as an HTTP 507
         # Phase A storage guard: never a crash/500 -- a clear, structured
         # 507 ("Insufficient Storage") disclosing exactly why new writes
         # are paused. Nothing is deleted; this scan's evidence is still
@@ -303,7 +379,7 @@ def _run_scan(adapter: UWDataAdapter, store: QualifyingDaysStore, ticker: str) -
     # Phase B: added persistence layer, never changes `result` above --
     # this call happens AFTER result is fully built and must never be
     # allowed to alter it (see _catalog_scan_best_effort's docstring).
-    _catalog_scan_best_effort(adapter, ticker, flow_alerts, darkpool_trades, result)
+    _catalog_scan_best_effort(adapter, ticker, flow_alerts, darkpool_trades, result, kind=kind)
     return result
 
 
@@ -683,6 +759,107 @@ def uw_request_diagnostics():
     }
 
 
+class SchedulerModeBody(BaseModel):
+    mode: str
+
+
+@app.get("/api/scheduler/status", dependencies=[Depends(require_auth)])
+def scheduler_status():
+    """Phase D: read-only scheduler status -- current mode, last/next
+    run, how many candidates the last cycle evaluated, and the pause
+    reason if any (e.g. a storage_guard pause). Behind require_auth like
+    every other diagnostics-shaped route (same pattern as
+    /api/diagnostics/uw-requests)."""
+    runner = get_scheduler_runner()
+    state = runner.store.get_state()
+    lease = runner.store.get_lease()
+    return {
+        "mode": state["mode"],
+        "updated_at": state["updated_at"],
+        "updated_by": state["updated_by"],
+        "last_run_started_at": state["last_run_started_at"],
+        "last_run_finished_at": state["last_run_finished_at"],
+        "next_run_at": state["next_run_at"],
+        "last_cycle_candidates_evaluated": state["last_cycle_candidates_evaluated"],
+        "pause_reason": state["pause_reason"],
+        "lease_held_by": lease["worker_id"] or None,
+        "top_n": runner.top_n,
+        "scan_interval_s": runner.scan_interval_s,
+        "freshness_window_s": scheduler_freshness.freshness_window_s(),
+    }
+
+
+@app.post("/api/scheduler/mode", dependencies=[Depends(require_auth)])
+def set_scheduler_mode(body: SchedulerModeBody):
+    """Phase D: explicit, authenticated mode change -- disabled / dry_run
+    / enabled. NEVER auto-called by anything else in this app; this is
+    the only way the mode ever changes other than an upgrade preserving
+    whatever was already set (see core/scheduler_store.py)."""
+    if body.mode not in SCHEDULER_MODES:
+        raise HTTPException(status_code=400, detail=f"mode must be one of {SCHEDULER_MODES}")
+    runner = get_scheduler_runner()
+    state = runner.store.set_mode(body.mode, actor="authenticated_user")
+    return {"mode": state["mode"], "updated_at": state["updated_at"], "updated_by": state["updated_by"]}
+
+
+@app.get("/api/radar/market-wide", dependencies=[Depends(require_auth)])
+def market_wide_radar(limit: int = 20):
+    """Phase D: the Market-wide Radar view -- the most recent discovery
+    snapshot's candidates, each tagged with its real freshness state
+    (current / stale / unevaluated) per core/scheduler_freshness.py.
+    Candidates with NO cataloged discovery snapshot yet (e.g. the
+    scheduler has never run, or is disabled) return an empty list with
+    an honest `note`, never a fabricated placeholder.
+
+    Honest coverage disclosure (reusing Phase C's existing language
+    pattern, not inventing new wording): this reflects whatever the
+    MOST RECENT discovery snapshot + per-ticker evaluation already
+    cataloged -- it is never a live re-fetch triggered by this GET, and
+    it never implies broader coverage than the bounded top-N the
+    scheduler actually evaluated (see /api/scheduler/status for exactly
+    how many candidates the last cycle evaluated)."""
+    catalog = get_catalog()
+    with catalog._conn() as conn:  # noqa: SLF001 -- read-only, same pattern IngestionCatalog's own methods use internally
+        row = conn.execute(
+            "SELECT id, event_time, filters_json, candidate_count FROM discovery_snapshots "
+            "ORDER BY event_time DESC LIMIT 1"
+        ).fetchone()
+        if not row:
+            return {
+                "candidates": [], "snapshot_at": None, "note": "No discovery snapshot cataloged yet -- "
+                "the scheduler has not run a cycle yet (or is disabled). This is never a live fetch; "
+                "enable dry_run or enabled mode, or run a manual Market Discovery scan, to populate this view.",
+            }
+        snapshot_id, event_time, filters_json, candidate_count = row
+        cand_rows = conn.execute(
+            "SELECT ticker, raw_json FROM discovery_candidates WHERE snapshot_id = ? "
+            "ORDER BY id LIMIT ?",
+            (snapshot_id, limit),
+        ).fetchall()
+    import json as _json
+
+    candidates = []
+    for ticker, raw_json in cand_rows:
+        fresh = scheduler_freshness.classify_candidate(catalog, ticker)
+        candidates.append({
+            "ticker": ticker,
+            "raw": _json.loads(raw_json) if raw_json else None,
+            "freshness": fresh.state,
+            "evaluation": fresh.evaluation,
+            "age_s": fresh.age_s,
+            "freshness_window_s": fresh.window_s,
+        })
+    return {
+        "candidates": candidates,
+        "snapshot_at": event_time,
+        "candidate_count_in_snapshot": candidate_count,
+        "scan_scope": "market_wide_screener",
+        "coverage_note": "Freshness reflects the most recent cataloged signal_evaluations row for each "
+        "ticker, from EITHER a watchlist scan or a discovery/scheduler evaluation -- whichever is more "
+        "recent wins; this view never shows two conflicting entries for the same ticker.",
+    }
+
+
 @app.get("/api/settings/version")
 def get_version():
     """Build-time version/commit info (see version.py docstring for why
@@ -785,69 +962,6 @@ class DiscoverFiltersBody(BaseModel):
     limit: int = 20  # also hard-clamped server-side by the adapter regardless of this value
 
 
-def _coerce_number(v):
-    """UW's live screener sometimes returns numeric fields as strings
-    (confirmed from Chad's real Live Mode test) -- never trust a raw
-    value's Python type. Returns a float, or None when the value is
-    missing/unparseable (never a guessed 0)."""
-    if v is None:
-        return None
-    if isinstance(v, bool):
-        return None
-    if isinstance(v, (int, float)):
-        return float(v)
-    if isinstance(v, str):
-        try:
-            return float(v.strip())
-        except ValueError:
-            return None
-    return None
-
-
-def _normalize_discovery_candidate(raw: dict) -> dict:
-    """Normalizes ONE raw /api/screener/stocks row into the shape this
-    app's ranking/frontend rely on. Fixes two real bugs found in Chad's
-    live-mode test:
-      * UW's real per-day percent-change field is `one_day_perc`, not
-        `change` (this app previously read a field UW doesn't send,
-        which is why change always rendered n/a in live mode). `change`
-        is kept as a defensive fallback only, in case an older/synthetic
-        shape still uses it.
-      * UW returns some numeric fields (net_premium, call/put volume,
-        iv_rank, repeated_hits) as strings on at least some responses --
-        coerced to float here rather than left to break arithmetic later.
-    Also carries through `is_index` (real screener rows can be index
-    instruments, e.g. SPXW) and UW's own per-row snapshot `date` (renamed
-    `source_date` so it's never confused with this app's OWN fetch
-    timestamp, `snapshot_at`, set by discover_candidates() -- see Chad's
-    item #8). Never invents a field the row didn't actually have."""
-    out = dict(raw)
-    out["ticker"] = raw.get("ticker") or raw.get("symbol")
-    out["net_premium"] = _coerce_number(raw.get("net_premium"))
-    out["call_volume"] = _coerce_number(raw.get("call_volume"))
-    out["put_volume"] = _coerce_number(raw.get("put_volume"))
-    out["iv_rank"] = _coerce_number(raw.get("iv_rank"))
-    out["repeated_hits"] = _coerce_number(raw.get("repeated_hits"))
-    change_pct = raw.get("one_day_perc")
-    if change_pct is None:
-        change_pct = raw.get("change")  # defensive fallback only -- one_day_perc is the real field
-    out["change_percent"] = _coerce_number(change_pct)
-    out["is_index"] = bool(raw.get("is_index")) if raw.get("is_index") is not None else False
-    out["source_date"] = raw.get("date")
-    return out
-
-
-def _rank_discovery_candidates(candidates: list) -> list:
-    """Rank by |net_premium| magnitude primarily, repeated_hits as a
-    tiebreaker -- a sensible, documented, non-mysterious ranking. Never
-    alters the raw candidate dicts; only reorders them. Candidates are
-    expected to already be normalized (see _normalize_discovery_candidate)
-    so net_premium/repeated_hits are real floats, never a raw string."""
-    def _key(c: dict):
-        return (abs(float(c.get("net_premium") or 0)), float(c.get("repeated_hits") or 0))
-    return sorted(candidates, key=_key, reverse=True)
-
-
 @app.post("/api/radar/discover", dependencies=[Depends(require_auth)])
 def radar_discover(body: DiscoverFiltersBody):
     """Market Discovery (C2b/C2c): EXACTLY ONE bounded call to the
@@ -857,7 +971,12 @@ def radar_discover(body: DiscoverFiltersBody):
     ranked, plus a snapshot timestamp and an explicit quota-cost
     disclosure (screener_requests_used). A candidate only becomes
     'evaluated' when the user explicitly calls GET /api/ticker/{ticker}
-    (the 'Evaluate in TIP' action) -- never automatically here."""
+    (the 'Evaluate in TIP' action) -- never automatically here.
+
+    Phase D: the actual normalize/rank/annotate logic now lives in
+    core/discovery.run_discovery -- moved there verbatim so the Phase D
+    background scheduler calls through this EXACT SAME pipeline rather
+    than a second, duplicate one. This route is now a thin wrapper."""
     adapter = get_adapter()
     filters = {
         "min_premium": body.min_premium,
@@ -868,37 +987,7 @@ def radar_discover(body: DiscoverFiltersBody):
         "max_change": body.max_change,
         "limit": body.limit,
     }
-    result = adapter.discover_candidates(filters)
-    normalized = [_normalize_discovery_candidate(c) for c in (result.get("candidates") or [])]
-    candidates = _rank_discovery_candidates(normalized)
-    for c in candidates:
-        # Explicit state model (item 1c of the Market Discovery spec):
-        # a raw screener row is ALWAYS "candidate" here -- never
-        # "evaluating"/"evaluated"/a signal_engine state. Those only
-        # ever come from a real GET /api/ticker/{ticker} call.
-        c["discovery_state"] = "candidate"
-        # Chad's item #10: a real screener row can be an index instrument
-        # (observed: SPXW with is_index=true) -- the per-ticker
-        # scan_service/signal_engine pipeline this app's "Evaluate in TIP"
-        # reuses is built and tested against equities (flow-alert/dark-
-        # pool/stock-state calls keyed by a stock ticker), never verified
-        # against an index/derivative symbol. Rather than silently offer
-        # an action that may error or produce meaningless gates for an
-        # unsupported instrument type, mark it explicitly so the frontend
-        # can disable Evaluate for it instead of guessing it's safe.
-        c["evaluate_supported"] = not c.get("is_index")
-    return {
-        "candidates": candidates,
-        "count": len(candidates),
-        "snapshot_at": result.get("snapshot_at"),
-        "screener_requests_used": result.get("screener_requests_used", 1),
-        "source": result.get("source"),
-        "unavailable": result.get("unavailable", False),
-        "reason": result.get("reason"),
-        "scan_scope": "market_wide_screener",
-        "limit_applied": body.limit,
-        "limit_cap": 50,
-    }
+    return discovery.run_discovery(adapter, filters)
 
 
 @app.get("/api/ticker/{ticker}")
