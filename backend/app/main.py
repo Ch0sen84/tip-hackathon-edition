@@ -42,7 +42,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from .adapters.base import UWDataAdapter
-from .adapters.live_uw_adapter import ERROR, UNAUTHORIZED, UNAVAILABLE, LiveUWAdapter, UWRestClient
+from .adapters.live_uw_adapter import DISCOVERY_LIMIT_CAP, ERROR, UNAUTHORIZED, UNAVAILABLE, LiveUWAdapter, UWRestClient
 from .adapters.synthetic_adapter import SyntheticDataAdapter
 from .ai import orchestrator as ai_orchestrator
 from .ai import llm_provider as ai_llm_provider
@@ -1238,7 +1238,7 @@ def set_scheduler_mode(body: SchedulerModeBody):
 
 
 @app.get("/api/radar/market-wide", dependencies=[Depends(require_auth)])
-def market_wide_radar(limit: int = 20):
+def market_wide_radar(limit: int = DISCOVERY_LIMIT_CAP):
     """Phase D: the Market-wide Radar view -- the most recent discovery
     snapshot's candidates, each tagged with its real freshness state
     (current / stale / unevaluated) per core/scheduler_freshness.py.
@@ -1252,7 +1252,25 @@ def market_wide_radar(limit: int = 20):
     cataloged -- it is never a live re-fetch triggered by this GET, and
     it never implies broader coverage than the bounded top-N the
     scheduler actually evaluated (see /api/scheduler/status for exactly
-    how many candidates the last cycle evaluated)."""
+    how many candidates the last cycle evaluated).
+
+    UX round (2026-10-16), item 1 root-cause fix: the frontend's Market
+    Intelligence summary shows `candidate_count_in_snapshot` (the FULL
+    count recorded by catalog_discovery_snapshot at write time) right
+    next to the rendered candidate rows (this route's own `candidates`
+    list) -- a real, user-visible discrepancy whenever this route's own
+    SQL LIMIT truncated the rows below the full snapshot size. The
+    default here used to be a plain, undocumented 20, completely
+    decoupled from discovery.py's own DISCOVERY_LIMIT_CAP (50) that
+    actually bounds how many candidates a snapshot can contain -- so a
+    normal, uncapped scan (up to 50 candidates) silently showed only
+    its first 20 rows while the summary honestly reported the real,
+    larger total. Defaulting this route's own limit to that SAME cap
+    makes the common case match again; `candidates_shown` and
+    `rows_truncated_note` below are the explicit, honest fallback for
+    any remaining case (an explicit smaller `limit` query param, or a
+    pre-existing snapshot recorded under an older/looser cap) where a
+    real truncation still happens -- never a silent, undisclosed one."""
     catalog = get_catalog()
     with catalog._conn() as conn:  # noqa: SLF001 -- read-only, same pattern IngestionCatalog's own methods use internally
         row = conn.execute(
@@ -1284,10 +1302,20 @@ def market_wide_radar(limit: int = 20):
             "age_s": fresh.age_s,
             "freshness_window_s": fresh.window_s,
         })
+    candidates_shown = len(candidates)
+    rows_truncated_note = None
+    if candidate_count is not None and candidates_shown < candidate_count:
+        rows_truncated_note = (
+            f"Showing {candidates_shown} of {candidate_count} discovered candidates from this "
+            f"snapshot -- the remaining {candidate_count - candidates_shown} aren't rendered below "
+            "(display limit), not missing data."
+        )
     return {
         "candidates": candidates,
         "snapshot_at": event_time,
         "candidate_count_in_snapshot": candidate_count,
+        "candidates_shown": candidates_shown,
+        "rows_truncated_note": rows_truncated_note,
         "scan_scope": "market_wide_screener",
         "coverage_note": "Freshness reflects the most recent cataloged signal_evaluations row for each "
         "ticker, from EITHER a watchlist scan or a discovery/scheduler evaluation -- whichever is more "
