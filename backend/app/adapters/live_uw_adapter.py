@@ -24,6 +24,12 @@ PORTING NOTES:
 """
 from __future__ import annotations
 
+import os
+import random
+import threading
+import time
+from collections import defaultdict
+from dataclasses import dataclass
 from typing import Optional
 
 import requests
@@ -37,6 +43,141 @@ DEFAULT_BASE_URL = "https://api.unusualwhales.com"
 UNAVAILABLE = "unavailable_on_tier"
 UNAUTHORIZED = "unauthorized"
 ERROR = "error"
+CIRCUIT_OPEN = "circuit_open"
+
+# --- Phase B: UW request-handling design constants ------------------------
+#
+# CONFIRMED THIS SESSION (2026-10-15, live validation + UW's own
+# changelog/dashboard): UW removed its daily and per-minute rate limits
+# on the Basic plan, but a HARD CEILING OF 3 CONCURRENT REQUESTS is still
+# enforced server-side and returns HTTP 429 above it. This default is
+# NOT a guess -- default to 3, always; configurable via env var only for
+# an account on a different plan with a verified different ceiling.
+DEFAULT_MAX_CONCURRENT_REQUESTS = 3
+DEFAULT_TIMEOUT_S = 20
+DEFAULT_MAX_RETRIES = 2  # retries AFTER the first attempt -- 3 attempts total
+DEFAULT_RETRY_BASE_DELAY_S = 0.2
+DEFAULT_CIRCUIT_BREAKER_THRESHOLD = 5
+DEFAULT_CIRCUIT_BREAKER_COOLDOWN_S = 30.0
+
+RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return default
+
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return default
+
+
+@dataclass
+class RequestOutcome:
+    path: str
+    status_code: Optional[int]
+    outcome: str  # "success" | "retried_success" | "rate_limited" | "unauthorized" |
+                   # "unavailable_on_tier" | "server_error" | "network_error" | "circuit_open"
+    attempts: int
+    latency_s: float
+
+
+class RequestTelemetry:
+    """Simple in-process counters/latencies per endpoint path -- exposed
+    read-only via a small diagnostics structure (see main.py's
+    /api/diagnostics/uw-requests route, which sits behind require_auth
+    like every other sensitive route). Never persisted, never exposes a
+    credential; purely request counts/latencies/outcomes."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._by_path: dict = defaultdict(lambda: {
+            "count": 0, "success": 0, "retried": 0, "failed": 0,
+            "by_outcome": defaultdict(int), "total_latency_s": 0.0,
+        })
+
+    def record(self, outcome: RequestOutcome) -> None:
+        with self._lock:
+            entry = self._by_path[outcome.path]
+            entry["count"] += 1
+            entry["total_latency_s"] += outcome.latency_s
+            entry["by_outcome"][outcome.outcome] += 1
+            if outcome.attempts > 1:
+                entry["retried"] += 1
+            if outcome.outcome in ("success", "retried_success"):
+                entry["success"] += 1
+            else:
+                entry["failed"] += 1
+
+    def summary(self) -> dict:
+        with self._lock:
+            out = {}
+            for path, entry in self._by_path.items():
+                count = entry["count"]
+                out[path] = {
+                    "count": count,
+                    "success": entry["success"],
+                    "retried": entry["retried"],
+                    "failed": entry["failed"],
+                    "avg_latency_s": round(entry["total_latency_s"] / count, 4) if count else 0.0,
+                    "by_outcome": dict(entry["by_outcome"]),
+                }
+            return out
+
+
+class CircuitOpenError(Exception):
+    def __init__(self, path: str, retry_after_s: float):
+        super().__init__(f"circuit open for {path!r}; retry after {retry_after_s:.1f}s")
+        self.path = path
+        self.retry_after_s = retry_after_s
+
+
+@dataclass
+class _CircuitState:
+    consecutive_failures: int = 0
+    open_until: float = 0.0
+
+
+class CircuitBreaker:
+    """Per-endpoint-path circuit breaker: after `threshold` consecutive
+    failures (network error or 5xx/429 exhausting retries) to the SAME
+    path, pauses further calls to that path for `cooldown_s` before
+    trying again. A success anywhere resets that path's counter. This
+    never affects OTHER paths -- one endpoint misbehaving doesn't pause
+    the whole client."""
+
+    def __init__(self, threshold: int = DEFAULT_CIRCUIT_BREAKER_THRESHOLD,
+                 cooldown_s: float = DEFAULT_CIRCUIT_BREAKER_COOLDOWN_S):
+        self.threshold = threshold
+        self.cooldown_s = cooldown_s
+        self._lock = threading.Lock()
+        self._state: dict = defaultdict(_CircuitState)
+
+    def before_call(self, path: str, now: Optional[float] = None) -> None:
+        now = time.monotonic() if now is None else now
+        with self._lock:
+            state = self._state[path]
+            if state.open_until and now < state.open_until:
+                raise CircuitOpenError(path, state.open_until - now)
+
+    def record_success(self, path: str) -> None:
+        with self._lock:
+            state = self._state[path]
+            state.consecutive_failures = 0
+            state.open_until = 0.0
+
+    def record_failure(self, path: str, now: Optional[float] = None) -> None:
+        now = time.monotonic() if now is None else now
+        with self._lock:
+            state = self._state[path]
+            state.consecutive_failures += 1
+            if state.consecutive_failures >= self.threshold:
+                state.open_until = now + self.cooldown_s
 
 # Market Discovery (C2b/C2c, 2026-10-15): hard server-side cap on how many
 # screener rows a single /api/radar/discover call may request, regardless
@@ -68,12 +209,47 @@ class UWRestClient:
     (e.g. missing ticker arg) since that's a bug, not an API/tier issue."""
 
     def __init__(self, api_key: str, base_url: str = DEFAULT_BASE_URL,
-                 client_api_id: str = "", timeout: int = 20, session: Optional[requests.Session] = None):
+                 client_api_id: str = "", timeout: Optional[int] = None,
+                 session: Optional[requests.Session] = None,
+                 max_concurrent_requests: Optional[int] = None,
+                 max_retries: Optional[int] = None,
+                 retry_base_delay_s: Optional[float] = None,
+                 circuit_breaker_threshold: Optional[int] = None,
+                 circuit_breaker_cooldown_s: Optional[float] = None,
+                 telemetry: Optional[RequestTelemetry] = None,
+                 circuit_breaker: Optional[CircuitBreaker] = None,
+                 sleep_fn=None, jitter_fn=None):
         self.api_key = api_key
         self.base_url = base_url.rstrip("/")
         self.client_api_id = client_api_id
-        self.timeout = timeout
+        self.timeout = timeout if timeout is not None else _env_int("TIP_UW_TIMEOUT_S", DEFAULT_TIMEOUT_S)
         self.session = session or requests.Session()
+        # Phase B: hard ceiling of 3 CONCURRENT requests, confirmed live
+        # this session as still server-side enforced (429 above it) even
+        # though UW removed daily/per-minute caps on Basic -- default
+        # must stay 3; only override via env var for a verified
+        # different plan/ceiling.
+        self.max_concurrent_requests = (
+            max_concurrent_requests if max_concurrent_requests is not None
+            else _env_int("TIP_UW_MAX_CONCURRENT_REQUESTS", DEFAULT_MAX_CONCURRENT_REQUESTS)
+        )
+        self._semaphore = threading.Semaphore(max(1, self.max_concurrent_requests))
+        self.max_retries = (
+            max_retries if max_retries is not None else _env_int("TIP_UW_MAX_RETRIES", DEFAULT_MAX_RETRIES)
+        )
+        self.retry_base_delay_s = (
+            retry_base_delay_s if retry_base_delay_s is not None
+            else _env_float("TIP_UW_RETRY_BASE_DELAY_S", DEFAULT_RETRY_BASE_DELAY_S)
+        )
+        self.circuit_breaker = circuit_breaker or CircuitBreaker(
+            threshold=(circuit_breaker_threshold if circuit_breaker_threshold is not None
+                       else _env_int("TIP_UW_CIRCUIT_BREAKER_THRESHOLD", DEFAULT_CIRCUIT_BREAKER_THRESHOLD)),
+            cooldown_s=(circuit_breaker_cooldown_s if circuit_breaker_cooldown_s is not None
+                        else _env_float("TIP_UW_CIRCUIT_BREAKER_COOLDOWN_S", DEFAULT_CIRCUIT_BREAKER_COOLDOWN_S)),
+        )
+        self.telemetry = telemetry or RequestTelemetry()
+        self._sleep = sleep_fn or time.sleep
+        self._jitter = jitter_fn or (lambda: random.uniform(0, 0.1))
 
     def _headers(self) -> dict:
         headers = {"Accept": "application/json"}
@@ -83,26 +259,118 @@ class UWRestClient:
             headers["UW-CLIENT-API-ID"] = self.client_api_id
         return headers
 
+    def _backoff_delay(self, attempt: int, retry_after: Optional[float]) -> float:
+        """Exponential backoff + jitter, honoring a real `Retry-After`
+        header when the server sent one (429 case) -- otherwise
+        `retry_base_delay_s * 2**attempt` plus a small random jitter so
+        many clients retrying at once don't all collide on the same
+        instant."""
+        if retry_after is not None and retry_after > 0:
+            return retry_after + self._jitter()
+        return self.retry_base_delay_s * (2 ** attempt) + self._jitter()
+
+    @staticmethod
+    def _parse_retry_after(resp) -> Optional[float]:
+        header = resp.headers.get("Retry-After") if hasattr(resp, "headers") else None
+        if not header:
+            return None
+        try:
+            return float(header)
+        except (TypeError, ValueError):
+            return None
+
     def get(self, path: str, params: Optional[dict] = None) -> dict:
         if not self.api_key:
             return _unavailable(path, 401, "No UW_API_KEY configured", UNAUTHORIZED)
+
+        try:
+            self.circuit_breaker.before_call(path)
+        except CircuitOpenError as e:
+            self.telemetry.record(RequestOutcome(path, None, CIRCUIT_OPEN, 0, 0.0))
+            return _unavailable(
+                path, 0,
+                f"Circuit breaker open for {path} after repeated failures; "
+                f"retry in {e.retry_after_s:.1f}s",
+                ERROR,
+            )
+
         url = f"{self.base_url}{path}"
         clean_params = {k: v for k, v in (params or {}).items() if v is not None}
-        try:
-            resp = self.session.get(url, headers=self._headers(), params=clean_params, timeout=self.timeout)
-        except requests.RequestException as e:
-            return _unavailable(path, 0, f"{type(e).__name__}: {e}", ERROR)
 
-        if resp.status_code == 401:
-            return _unavailable(path, 401, resp.text, UNAUTHORIZED)
-        if resp.status_code == 403:
-            return _unavailable(path, 403, resp.text, UNAVAILABLE)
-        if not resp.ok:
-            return _unavailable(path, resp.status_code, resp.text, ERROR)
-        try:
-            return resp.json()
-        except ValueError:
-            return _unavailable(path, resp.status_code, resp.text, ERROR)
+        attempts = 0
+        max_attempts = self.max_retries + 1
+        last_result: Optional[dict] = None
+        start = time.monotonic()
+        while attempts < max_attempts:
+            attempts += 1
+            with self._semaphore:
+                try:
+                    resp = self.session.get(url, headers=self._headers(), params=clean_params, timeout=self.timeout)
+                except requests.RequestException as e:
+                    last_result = _unavailable(path, 0, f"{type(e).__name__}: {e}", ERROR)
+                    if attempts < max_attempts:
+                        self._sleep(self._backoff_delay(attempts - 1, None))
+                        continue
+                    self.circuit_breaker.record_failure(path)
+                    self.telemetry.record(RequestOutcome(path, None, "network_error", attempts,
+                                                           time.monotonic() - start))
+                    return last_result
+
+            # 401/403 are DEFINITIVE, non-transient problems (bad
+            # credentials / endpoint not on this tier) -- surfaced
+            # immediately, NEVER retried (retrying a bad key just wastes
+            # the concurrency budget on a call that will never succeed).
+            if resp.status_code == 401:
+                self.circuit_breaker.record_success(path)  # not an endpoint-health failure
+                self.telemetry.record(RequestOutcome(path, 401, "unauthorized", attempts,
+                                                       time.monotonic() - start))
+                return _unavailable(path, 401, resp.text, UNAUTHORIZED)
+            if resp.status_code == 403:
+                self.circuit_breaker.record_success(path)
+                self.telemetry.record(RequestOutcome(path, 403, "unavailable_on_tier", attempts,
+                                                       time.monotonic() - start))
+                return _unavailable(path, 403, resp.text, UNAVAILABLE)
+
+            if resp.status_code == 429:
+                last_result = _unavailable(path, 429, resp.text, ERROR)
+                if attempts < max_attempts:
+                    retry_after = self._parse_retry_after(resp)
+                    self._sleep(self._backoff_delay(attempts - 1, retry_after))
+                    continue
+                self.circuit_breaker.record_failure(path)
+                self.telemetry.record(RequestOutcome(path, 429, "rate_limited", attempts,
+                                                       time.monotonic() - start))
+                return last_result
+
+            if resp.status_code >= 500:
+                last_result = _unavailable(path, resp.status_code, resp.text, ERROR)
+                if attempts < max_attempts:
+                    self._sleep(self._backoff_delay(attempts - 1, None))
+                    continue
+                self.circuit_breaker.record_failure(path)
+                self.telemetry.record(RequestOutcome(path, resp.status_code, "server_error", attempts,
+                                                       time.monotonic() - start))
+                return last_result
+
+            if not resp.ok:
+                # Any other non-success (4xx other than 401/403/429) is
+                # not retried -- it's a client-side request problem, not
+                # a transient server/rate-limit condition.
+                self.circuit_breaker.record_success(path)
+                self.telemetry.record(RequestOutcome(path, resp.status_code, ERROR, attempts,
+                                                       time.monotonic() - start))
+                return _unavailable(path, resp.status_code, resp.text, ERROR)
+
+            self.circuit_breaker.record_success(path)
+            outcome = "success" if attempts == 1 else "retried_success"
+            self.telemetry.record(RequestOutcome(path, resp.status_code, outcome, attempts,
+                                                   time.monotonic() - start))
+            try:
+                return resp.json()
+            except ValueError:
+                return _unavailable(path, resp.status_code, resp.text, ERROR)
+
+        return last_result if last_result is not None else _unavailable(path, 0, "exhausted retries", ERROR)
 
     # --- Endpoint wrappers (same set as production uw_client.py) -----------
 
