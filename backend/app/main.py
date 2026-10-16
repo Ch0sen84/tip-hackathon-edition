@@ -1468,6 +1468,17 @@ def _radar_impl(refresh: bool):
     items = []
     scans_by_ticker = {}
     freshness_by_ticker: dict[str, scheduler_freshness.FreshnessResult] = {}
+    # UX remediation item 2: a watchlist ticker with NO cataloged
+    # evaluation at all (never scanned, ever) must still be visible in
+    # the response -- tip_evidence.present()'s `qualifies()` filter
+    # below is deliberately strict (a plain, evaluated-but-non-
+    # qualifying ticker correctly stays out of highest/other, matching
+    # this app's existing, unrelated design), but that filter has no
+    # way to distinguish "evaluated, didn't qualify" from "never
+    # evaluated at all" -- both get silently dropped. Track the latter
+    # set explicitly here so it can be force-appended below, without
+    # touching qualifies()/present()'s qualifying semantics at all.
+    never_evaluated_tickers: set[str] = set()
     for ticker in universe:
         if live_fetch:
             scan = _run_scan(adapter, store, ticker)
@@ -1481,6 +1492,7 @@ def _radar_impl(refresh: bool):
             scan, freshness = _cached_scan_for_ticker(catalog, store, ticker)
             freshness_by_ticker[ticker] = freshness
             if scan is None:
+                never_evaluated_tickers.add(ticker)
                 scan = _not_evaluated_evidence_item(ticker)
                 # Give the placeholder the real current qualifying-days
                 # history (QualifyingDaysStore is independent of the UW-
@@ -1494,6 +1506,21 @@ def _radar_impl(refresh: bool):
         items.append(_to_evidence_item(scan) if scan.get("gates") else _not_evaluated_evidence_item(ticker, scan.get("state")))
 
     highest, other = tip_evidence.present(items, next_session=date.today() + timedelta(days=1))
+
+    # UX remediation item 2: force-include any never-evaluated ticker
+    # that present() dropped (qualifies() is always False for an empty-
+    # gates placeholder) -- honestly labeled, never fabricated evidence.
+    shown_tickers = {e["ticker"] for e in highest} | {e["ticker"] for e in other}
+    for ticker in never_evaluated_tickers:
+        if ticker in shown_tickers:
+            continue
+        other.append({
+            "ticker": ticker, "name": None, "families": [], "evidence": [],
+            "current_read": "This ticker has not been scanned yet.",
+            "headline": "Not yet evaluated", "label": None, "categories": [],
+            "index_context": False, "question": None, "research": [],
+            "enriched": False, "price": None,
+        })
 
     def _attach(entry: dict) -> dict:
         s = scans_by_ticker[entry["ticker"]]
@@ -1535,10 +1562,20 @@ def _radar_impl(refresh: bool):
     # W2-a fix: only a REAL live fetch may write a new last_scan_at/
     # last_scan_count -- a cache-only read must report the existing
     # persisted values untouched, never overwrite them with "now".
+    #
+    # UX remediation item 2 (2026-10-16): both the write and the read
+    # are now explicitly scoped to the mode THIS scan actually ran
+    # under ("demo" when the adapter isn't live, "live" otherwise) --
+    # see SettingsStore.record_scan/get_last_scan's docstrings for the
+    # real Demo-mode-leaking-into-Live-mode bug this closes. The
+    # cache-only branch is only ever reached when is_live is True (see
+    # `live_fetch` above), so it is always reading the Live-scoped
+    # pair here -- never accidentally the Demo one.
+    current_scan_mode = "live" if is_live else "demo"
     if live_fetch:
-        scan_record = _settings_store.record_scan(len(universe))
+        scan_record = _settings_store.record_scan(len(universe), mode=current_scan_mode)
     else:
-        scan_record = _settings_store.get_all()
+        scan_record = _settings_store.get_last_scan(current_scan_mode)
     return {
         "highest": [_attach(e) for e in highest],
         "other": [_attach(e) for e in other],

@@ -42,11 +42,33 @@ _FIELDS = (
     # last-scan telemetry, persisted the same way everything else here
     # is -- survives container recreation, same file. `watchlist` is
     # None until the user ever saves one (falls back to the env-seeded
-    # default, see get_watchlist() below); `last_scan_at`/`last_scan_count`
-    # are None until the first /api/radar call actually runs.
+    # default, see get_watchlist() below).
+    #
+    # UX remediation item 2 (2026-10-16): last-scan telemetry is now
+    # scoped PER MODE (last_scan_at_demo/last_scan_count_demo vs.
+    # last_scan_at_live/last_scan_count_live) rather than one shared
+    # pair. REAL BUG this fixes: the old single `last_scan_at`/
+    # `last_scan_count` pair was written on EVERY real live_fetch in
+    # _radar_impl, including every ordinary Demo Mode page load (Demo
+    # Mode's adapter is never a LiveUWAdapter, so live_fetch is always
+    # True there) -- a Demo-mode scan timestamp/count then leaked
+    # straight into Live Mode's displayed freshness the moment the user
+    # switched modes, because Live Mode's cache-only GET /api/radar read
+    # that SAME shared field with zero awareness it was ever written by
+    # a different mode. Two independent pairs, written and read by the
+    # mode the route is actually scoped to (see _radar_impl's
+    # `record_scan(..., mode=...)` / `get_last_scan(mode)` calls), make
+    # this leak structurally impossible rather than papering over one
+    # reproduction of it. This is a new pair of plain JSON keys in this
+    # flat settings file (no SQL table, no migrations.py version bump,
+    # no schema in the migration-framework sense) -- an old file simply
+    # lacks these keys and _read() fills in None defaults, exactly like
+    # every other field addition this store has ever had.
     "watchlist",
-    "last_scan_at",
-    "last_scan_count",
+    "last_scan_at_demo",
+    "last_scan_count_demo",
+    "last_scan_at_live",
+    "last_scan_count_live",
 )
 
 
@@ -60,8 +82,10 @@ def _defaults() -> dict:
         "verified_uw_key_hash": None,
         "verified_uw_key_at": None,
         "watchlist": None,
-        "last_scan_at": None,
-        "last_scan_count": None,
+        "last_scan_at_demo": None,
+        "last_scan_count_demo": None,
+        "last_scan_at_live": None,
+        "last_scan_count_live": None,
     }
 
 
@@ -230,18 +254,42 @@ class SettingsStore:
             self._write(data)
             return data
 
-    def record_scan(self, ticker_count: int) -> dict:
-        """Called once per real /api/radar scan -- persists when it ran
-        and how many tickers it covered, so a container restart doesn't
-        lose "last scanned" context (the honest alternative to either
-        showing nothing or silently claiming the data is fresher than
-        it is)."""
+    def record_scan(self, ticker_count: int, mode: str = "live") -> dict:
+        """Called once per real live_fetch in _radar_impl -- persists
+        when it ran and how many tickers it covered, so a container
+        restart doesn't lose "last scanned" context (the honest
+        alternative to either showing nothing or silently claiming the
+        data is fresher than it is).
+
+        UX remediation item 2 (2026-10-16): `mode` ("demo" or "live")
+        selects WHICH pair of fields gets written -- see this module's
+        _FIELDS comment for the real Demo-mode-leaking-into-Live-mode
+        bug this closes. The caller always passes the mode the scan
+        that just ran was actually performed under (never guessed here).
+        Returns the mode-scoped {"last_scan_at", "last_scan_count"} pair
+        just written (same shape as get_last_scan below), not the whole
+        settings dict, so callers can't accidentally read the other
+        mode's fields by habit."""
+        if mode not in ("demo", "live"):
+            raise ValueError("mode must be 'demo' or 'live'")
         with self._lock:
             data = self._read()
-            data["last_scan_at"] = time.time()
-            data["last_scan_count"] = ticker_count
+            data[f"last_scan_at_{mode}"] = time.time()
+            data[f"last_scan_count_{mode}"] = ticker_count
             self._write(data)
-            return data
+            return {"last_scan_at": data[f"last_scan_at_{mode}"], "last_scan_count": data[f"last_scan_count_{mode}"]}
+
+    def get_last_scan(self, mode: str) -> dict:
+        """Read-only counterpart to record_scan -- the mode-scoped
+        {"last_scan_at", "last_scan_count"} pair for `mode`, never the
+        other mode's values. Used by _radar_impl's cache-only read path
+        (which is always Live Mode, by construction) so a Live Mode
+        display can never show a timestamp/count that was actually
+        recorded by a Demo Mode scan, or vice versa."""
+        if mode not in ("demo", "live"):
+            raise ValueError("mode must be 'demo' or 'live'")
+        data = self.get_all()
+        return {"last_scan_at": data.get(f"last_scan_at_{mode}"), "last_scan_count": data.get(f"last_scan_count_{mode}")}
 
     def set_ai_key(self, provider: str, api_key: str) -> dict:
         with self._lock:

@@ -99,12 +99,15 @@ def test_ordinary_page_load_still_zero_calls_with_no_cache_at_all(app_main, monk
     resp = client.get("/api/radar")
     assert resp.status_code == 200, resp.text
     body = resp.json()
-    # Never-evaluated tickers (empty gates_passed) correctly don't qualify
-    # for Market Radar's highest/other lists -- same pre-existing
-    # qualifies()-gated contract as a ticker that scanned today and
-    # passed zero gates; "scanned" still reports the full watchlist size.
+    # UX remediation item 2 (2026-10-16): never-evaluated tickers must be
+    # shown, not hidden -- "highest" correctly stays empty (nothing here
+    # has ever qualified), but every watchlist ticker now appears in
+    # "other", honestly labeled "Not yet evaluated" rather than silently
+    # dropped by tip_evidence.present()'s qualifying filter.
     assert body["highest"] == []
-    assert body["other"] == []
+    assert {e["ticker"] for e in body["other"]} == set(watchlist_tickers)
+    for e in body["other"]:
+        assert e["headline"] == "Not yet evaluated"
     assert body["scanned"] == len(watchlist_tickers)
     assert body["served_from_cache"] is True
     assert mock_session.get.call_count == 0
@@ -196,10 +199,11 @@ def test_cached_eval_freshness_distinguishes_current_stale_and_unevaluated(app_m
     resp = client.get("/api/radar")
     body = resp.json()
     by_ticker = {e["ticker"]: e for e in body["highest"] + body["other"]}
-    # NVRW never qualifies (no gates passed, nothing cataloged) so it
-    # correctly does not appear in highest/other -- same pre-existing
-    # qualifies()-gated contract; "scanned" still counts all 3 tickers.
-    assert "NVRW" not in by_ticker
+    # UX remediation item 2 (2026-10-16): NVRW was never cataloged at
+    # all -- it must still be SHOWN (in "other", honestly labeled), not
+    # silently dropped just because it never qualified either.
+    assert "NVRW" in by_ticker
+    assert by_ticker["NVRW"]["headline"] == "Not yet evaluated"
     assert body["scanned"] == 3
     assert by_ticker["CURW"]["eval_freshness"] == "current"
     assert by_ticker["STLW"]["eval_freshness"] == "stale"

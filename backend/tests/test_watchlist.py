@@ -139,8 +139,8 @@ def test_last_scan_time_persists_across_a_fresh_settings_store_instance():
     with tempfile.TemporaryDirectory() as td:
         path = Path(td) / "settings.json"
         store1 = SettingsStore(path)
-        store1.record_scan(7)
+        store1.record_scan(7, mode="live")
         store2 = SettingsStore(path)  # fresh instance, same file
-        data = store2.get_all()
-        assert data["last_scan_count"] == 7
-        assert data["last_scan_at"] is not None
+        last_scan = store2.get_last_scan("live")
+        assert last_scan["last_scan_count"] == 7
+        assert last_scan["last_scan_at"] is not None
