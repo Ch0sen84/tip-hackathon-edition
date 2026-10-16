@@ -61,6 +61,7 @@ from .auth import (
 )
 from .config import settings
 from .core import dark_pool_baseline, discovery, scan_service, tip_evidence
+from .core import local_mode as local_mode_module
 from .core import scheduler_freshness, single_process_guard, uw_concurrency
 from .core.scheduler_store import InvalidModeError, MODES as SCHEDULER_MODES, SchedulerStore, new_worker_id
 from . import scheduler as scheduler_module
@@ -129,6 +130,20 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# --- Local Mode / Network Mode (Fetch Metadata auth redesign) ----------
+#
+# Local Mode is the DEFAULT loopback-only install's zero-token same-
+# origin bypass (Sec-Fetch-Site + exact Origin validation, see
+# require_auth() below); Network Mode is the pre-existing, completely
+# unmodified X-TIP-Auth bootstrap/pairing-code token model. BIND_HOST is
+# read here as the operator's STATED intent only, never independently
+# verified -- see core/local_mode.py's module docstring. TIP_LOCAL_MODE
+# is an optional explicit override (unset/"auto" is the zero-config
+# default: Local Mode is active iff BIND_HOST is loopback, Network Mode
+# otherwise -- exactly today's documented safe-by-default behavior).
+_TIP_LOCAL_MODE_RAW = os.environ.get("TIP_LOCAL_MODE")
+LOCAL_MODE_ACTIVE = local_mode_module.effective_local_mode(_BIND_HOST, _TIP_LOCAL_MODE_RAW)
+
 _adapter: Optional[UWDataAdapter] = None
 _adapter_sig: Optional[tuple] = None
 _store: Optional[QualifyingDaysStore] = None
@@ -162,11 +177,95 @@ _pairing_store = PairingCodeStore(
 )
 
 
+def _origin_header_matches_configured_origin(origin: Optional[str]) -> bool:
+    return origin == ALLOWED_ORIGIN
+
+
+def _sec_fetch_site_is_same_origin(request: Request) -> bool:
+    """Refinement #1: ONLY the literal value "same-origin" ever counts.
+    "cross-site", "same-site", and "none" (direct navigation/typed-URL/
+    bookmark/missing header entirely) are all explicitly NOT sufficient
+    for the Local Mode bypass -- there is no broadened/partial match
+    here. A missing Sec-Fetch-Site header (an unsupported/very old
+    browser) falls into this same "not same-origin" bucket by
+    construction (.get() returns None, which != "same-origin") -- the
+    fail-closed "unsupported browser" case from refinement #7(e)."""
+    return request.headers.get("sec-fetch-site") == "same-origin"
+
+
+def _local_mode_bypass_allowed(request: Request) -> bool:
+    """Refinements #1/#2/#3: the Local Mode zero-token bypass requires
+    ALL of:
+      * LOCAL_MODE_ACTIVE (BIND_HOST says loopback, or an explicit
+        TIP_LOCAL_MODE=1 confirms it -- see core/local_mode.py; this is
+        read as the operator's stated intent, not re-verified here).
+      * a genuine Sec-Fetch-Site: same-origin header -- cross-site,
+        same-site, none, and missing-entirely are all refused (see
+        _sec_fetch_site_is_same_origin above). No narrow exception is
+        implemented for any MUTATING route in this app: every route
+        gated by require_auth (this function) is a state-changing or
+        paid action, and the one case that genuinely can't avoid a
+        "none"/missing Sec-Fetch-Site -- a plain non-mutating page-load
+        GET -- was already unauthenticated/ungated before this change
+        (e.g. GET /api/radar, GET /api/ticker/{t}, GET /api/auth/mode)
+        and stays that way; it never needed, and never gets, a
+        broadened Sec-Fetch-Site rule.
+      * IF an Origin header is present, it must exactly match
+        ALLOWED_ORIGIN -- a present-but-mismatched Origin is already
+        rejected outright by require_auth before this function is even
+        called (see below), so by the time we get here a present
+        Origin is already known to match. A genuinely MISSING Origin
+        does not, by itself, grant the bypass -- it is accepted here
+        only because a real Sec-Fetch-Site: same-origin signal is
+        already independently established above (refinement #2: a
+        missing Origin is never treated as evidence of legitimacy on
+        its own; it never substitutes for proof, it is simply not
+        independently disqualifying once Sec-Fetch-Site already is).
+    """
+    if not LOCAL_MODE_ACTIVE:
+        return False
+    return _sec_fetch_site_is_same_origin(request)
+
+
 def require_auth(request: Request) -> None:
-    """FastAPI dependency applied to every mutating (POST/PUT/DELETE)
-    route under /api/ except /api/auth/bootstrap itself. Compares the
-    X-TIP-Auth header against the real stored token with
-    hmac.compare_digest (constant-time) -- see AuthTokenStore.matches()."""
+    """FastAPI dependency applied to every mutating (POST/PUT/DELETE) /
+    sensitive-read route under /api/ except /api/auth/bootstrap and
+    /api/auth/pair themselves (their own, separate gates -- see those
+    routes' docstrings).
+
+    Two-stage check, in order:
+      1. Origin validation (refinement #2) -- applies identically in
+         BOTH Local Mode and Network Mode, unconditionally, BEFORE any
+         mode-specific branching: whenever an Origin header is present
+         on the request, it must exactly equal this deployment's
+         configured ALLOWED_ORIGIN or the request is rejected outright
+         (403), regardless of what Sec-Fetch-Site says and regardless
+         of whether a valid X-TIP-Auth token is also present. A missing
+         Origin header is NOT evidence of anything by itself -- it just
+         means this check has nothing to validate, and falls through to
+         step 2.
+      2. Local Mode bypass (refinements #1/#3) -- see
+         _local_mode_bypass_allowed above. When it does not apply
+         (Network Mode, or Local Mode without a genuine same-origin
+         Sec-Fetch-Site), this is EXACTLY the original, completely
+         unmodified X-TIP-Auth token check (refinement #4: Network
+         Mode's protections are provably unweakened -- see
+         test_network_mode_unweakened.py) -- fail CLOSED to the token
+         requirement, never fail-open.
+    """
+    origin = request.headers.get("origin")
+    if origin is not None and not _origin_header_matches_configured_origin(origin):
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                f"Origin header {origin!r} does not match this deployment's configured "
+                f"origin ({ALLOWED_ORIGIN!r}). A missing Origin header is never treated as "
+                "proof of legitimacy on its own, but a PRESENT, mismatched one is always "
+                "rejected outright, in both Local Mode and Network Mode."
+            ),
+        )
+    if _local_mode_bypass_allowed(request):
+        return
     candidate = request.headers.get(TOKEN_HEADER)
     if not _auth_store.matches(candidate):
         raise HTTPException(
@@ -298,6 +397,12 @@ def _on_startup() -> None:
     hardcoded fallback for any fresh install/upgrade with no prior
     explicit setting) -- starting the thread is NOT the same as making
     background UW calls."""
+    # Local Mode / Network Mode refinement #3: refuse to start (fail
+    # loud, never silently downgrade) if TIP_LOCAL_MODE explicitly
+    # requests Local Mode against a non-loopback BIND_HOST -- see
+    # core/local_mode.py's docstring. Mirrors single_process_guard's
+    # own fail-closed startup pattern immediately below.
+    local_mode_module.assert_local_mode_configuration(_BIND_HOST, _TIP_LOCAL_MODE_RAW)
     single_process_guard.assert_single_process()
     get_scheduler_runner().start()
     # QA remediation D1: loudly surface the pairing code on every real
@@ -529,6 +634,26 @@ def health():
 @app.get("/api/mode")
 def mode():
     return {"mode": _settings_store.get_mode()}
+
+
+@app.get("/api/auth/mode")
+def auth_mode_indicator():
+    """Refinement #5: unauthenticated, reachable before any auth
+    decision -- lets the frontend branch its auth UI on a real backend
+    fact (which mode is actually active right now) instead of guessing
+    client-side. Local Mode: the frontend shows ZERO auth UI (no
+    banner, no bootstrap polling, no token field). Network Mode: the
+    frontend's existing pairing/bootstrap/token-entry UI stays fully
+    intact and functional, completely unchanged.
+
+    Discloses only which mode is active -- no token, no secret, no
+    credential of any kind. This is a plain GET/non-mutating read (like
+    /api/health, /api/mode, /api/settings/version), so it is exactly
+    the kind of route a "none"/missing Sec-Fetch-Site genuinely can't
+    avoid on first page load -- and, consistent with every other
+    read-only route in this app, it was never gated on Sec-Fetch-Site/
+    Origin/token in the first place (see require_auth's docstring)."""
+    return {"mode": "local" if LOCAL_MODE_ACTIVE else "network", "local_mode_active": LOCAL_MODE_ACTIVE}
 
 
 @app.get("/api/auth/bootstrap")
