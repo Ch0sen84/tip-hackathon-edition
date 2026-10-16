@@ -39,6 +39,7 @@
       <div class="nav-group-label">Workspace</div>
       <button class="nav-item active" data-view="radar"><span class="ic">&#9673;</span>Market Radar</button>
       <button class="nav-item" data-view="ticker"><span class="ic">&#128269;</span>Ticker Analysis</button>
+      <button class="nav-item" data-view="marketwide"><span class="ic">&#127760;</span>Market-wide Radar</button>
       <div class="nav-group-label">App</div>
       <button class="nav-item" data-view="settings"><span class="ic">&#9881;</span>Settings</button>
       <button class="nav-item" data-view="about"><span class="ic">&#8505;</span>About / Beyond the Hackathon</button>
@@ -162,6 +163,23 @@
         <div id="discoveryStatus" class="muted" style="margin:10px 0"></div>
         <div id="discoveryCandidateList"></div>
       </div>
+    </section>
+
+    <!-- Phase D: Market-wide Radar -- scheduler mode controls (disabled/
+         dry_run/enabled) + the real freshness-tagged candidate list.
+         Lazily loaded only the first time this nav item is selected (see
+         app.live.js's initMarketWideRadar()), same pattern as Market
+         Discovery's lazy-load above. -->
+    <section id="view-marketwide" class="view">
+      <h2 class="section-title eyebrow">Market-wide Radar</h2>
+      <p class="muted" style="margin-top:-6px">
+        Background discovery + bounded evaluation, built on the same screener and evaluation pipeline
+        Market Discovery and Ticker Analysis already use -- never a second pipeline. See the coverage
+        note below each run for exactly what this reflects.
+      </p>
+      <div id="schedulerControls"></div>
+      <div id="marketWideStatus" class="muted" style="margin:8px 0"></div>
+      <div id="marketWideCandidateList"></div>
     </section>
 
     <section id="view-ticker" class="view">

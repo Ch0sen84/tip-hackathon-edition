@@ -33,13 +33,19 @@ def _client(session, **kwargs):
     return UWRestClient("fake-key", session=session, **kwargs)
 
 
-def test_default_max_concurrent_requests_is_three():
+def test_default_max_concurrent_requests_is_two():
     """CONFIRMED live this session: UW still enforces a hard 3-
     concurrent-request ceiling even though daily/per-minute caps were
-    removed. This default must never silently drift."""
-    assert DEFAULT_MAX_CONCURRENT_REQUESTS == 3
+    removed. Phase D (2026-10-15, Chad's review): this app's OWN default
+    guard is deliberately ONE BELOW that real ceiling (2, not 3) now
+    that the background scheduler shares this exact budget with
+    interactive requests -- see live_uw_adapter.py's
+    DEFAULT_MAX_CONCURRENT_REQUESTS docstring for the full rationale.
+    This default must never silently drift back up without an explicit,
+    reviewed reason."""
+    assert DEFAULT_MAX_CONCURRENT_REQUESTS == 2
     client = UWRestClient("k", session=MagicMock())
-    assert client.max_concurrent_requests == 3
+    assert client.max_concurrent_requests == 2
 
 
 def test_max_concurrent_requests_configurable_via_env(monkeypatch):

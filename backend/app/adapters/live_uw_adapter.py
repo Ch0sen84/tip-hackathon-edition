@@ -38,6 +38,7 @@ from .base import UWDataAdapter
 from ..core.candles import (
     build_candles, clamp_limit, raw_limit_for_trading_days, select_regular_session_bars,
 )
+from ..core import uw_concurrency
 
 DEFAULT_BASE_URL = "https://api.unusualwhales.com"
 UNAVAILABLE = "unavailable_on_tier"
@@ -50,10 +51,22 @@ CIRCUIT_OPEN = "circuit_open"
 # CONFIRMED THIS SESSION (2026-10-15, live validation + UW's own
 # changelog/dashboard): UW removed its daily and per-minute rate limits
 # on the Basic plan, but a HARD CEILING OF 3 CONCURRENT REQUESTS is still
-# enforced server-side and returns HTTP 429 above it. This default is
-# NOT a guess -- default to 3, always; configurable via env var only for
-# an account on a different plan with a verified different ceiling.
-DEFAULT_MAX_CONCURRENT_REQUESTS = 3
+# enforced server-side and returns HTTP 429 above it.
+#
+# Phase D (2026-10-15, Chad's review): this app's OWN default guard is
+# now 2, not 3 -- deliberately one below UW's real hard ceiling. Two
+# reasons: (1) the Phase D background scheduler now shares this exact
+# budget with interactive requests (see uw_concurrency.py), so the
+# previous "use the whole ceiling" default left zero headroom for a
+# legitimate momentary overlap (e.g. the scheduler's own retry backoff
+# landing at the same instant as a user-initiated scan); (2) the gate
+# this value sizes is CONFIRMED process-local (threading.Semaphore-
+# based), not cross-process-safe -- see uw_concurrency.py and
+# core/single_process_guard.py for how that gap is closed structurally
+# (refuse to start under a multi-worker launcher) rather than papered
+# over with a bigger number. Configurable via env var only for a
+# verified different ceiling/plan.
+DEFAULT_MAX_CONCURRENT_REQUESTS = 2
 DEFAULT_TIMEOUT_S = 20
 DEFAULT_MAX_RETRIES = 2  # retries AFTER the first attempt -- 3 attempts total
 DEFAULT_RETRY_BASE_DELAY_S = 0.2
@@ -233,7 +246,18 @@ class UWRestClient:
             max_concurrent_requests if max_concurrent_requests is not None
             else _env_int("TIP_UW_MAX_CONCURRENT_REQUESTS", DEFAULT_MAX_CONCURRENT_REQUESTS)
         )
-        self._semaphore = threading.Semaphore(max(1, self.max_concurrent_requests))
+        # Phase D: a SHARED, process-wide gate (see core/uw_concurrency.py)
+        # rather than an instance-private threading.Semaphore. A plain
+        # instance semaphore only ever worked by accident: app.main's
+        # get_adapter() caches one adapter (and therefore one client) per
+        # (mode, key, watchlist) signature, but the moment that signature
+        # changes -- a mode toggle, a saved-key change, a watchlist edit --
+        # a BRAND NEW UWRestClient is constructed with a BRAND NEW
+        # semaphore, silently resetting the in-flight count for whatever
+        # the OLD instance still had outstanding. Pulling the gate from a
+        # process-wide registry closes that gap for every call path, not
+        # just the common case where the adapter signature never changes.
+        self._gate = uw_concurrency.get_shared_gate(self.max_concurrent_requests)
         self.max_retries = (
             max_retries if max_retries is not None else _env_int("TIP_UW_MAX_RETRIES", DEFAULT_MAX_RETRIES)
         )
@@ -303,7 +327,7 @@ class UWRestClient:
         start = time.monotonic()
         while attempts < max_attempts:
             attempts += 1
-            with self._semaphore:
+            with self._gate.acquire(priority=uw_concurrency.current_priority()):
                 try:
                     resp = self.session.get(url, headers=self._headers(), params=clean_params, timeout=self.timeout)
                 except requests.RequestException as e:

@@ -7,7 +7,7 @@ response or real licensed market data.
 """
 from fastapi.testclient import TestClient
 
-from app.main import _normalize_discovery_candidate
+from app.core.discovery import normalize_discovery_candidate as _normalize_discovery_candidate
 
 
 class _FakeAdapter:

@@ -517,6 +517,32 @@ class IngestionCatalog:
             grouped.setdefault(date_key, []).append({"event_time": event_time, "premium": premium})
         return grouped
 
+    # --- Phase D: read-only accessor for freshness/dedup (market-wide
+    # Radar). ONE query, ORDER BY retrieved_at DESC -- this is the whole
+    # dedup mechanism between watchlist-sourced and discovery-sourced
+    # evaluations of the same ticker: both paths write into this SAME
+    # table via catalog_signal_evaluation above, so "most recent wins
+    # regardless of source" falls straight out of this one query with no
+    # separate source-tracking column needed. See
+    # core/scheduler_freshness.py for the classification built on top of
+    # this.
+
+    def get_latest_signal_evaluation(self, ticker: str) -> Optional[dict]:
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT id, ticker, event_time, retrieved_at, state, confidence, "
+                "engine_rule_version, raw_json FROM signal_evaluations "
+                "WHERE ticker = ? ORDER BY retrieved_at DESC, id DESC LIMIT 1",
+                (ticker,),
+            ).fetchone()
+        if not row:
+            return None
+        return {
+            "id": row[0], "ticker": row[1], "event_time": row[2], "retrieved_at": row[3],
+            "state": row[4], "confidence": row[5], "engine_rule_version": row[6],
+            "raw_json": json.loads(row[7]) if row[7] else None,
+        }
+
     # --- freshness decision (used by backfill/pagination jobs ONLY --
     # never by the on-demand Radar/Ticker-Analysis/Discovery routes,
     # which must always reflect a fresh live fetch; see module docstring) --

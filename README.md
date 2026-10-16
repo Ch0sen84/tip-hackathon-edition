@@ -414,6 +414,69 @@ Install and verify "TIP Hackathon Edition" on this machine.
     resolved (or couldn't resolve) them.
 ```
 
+## Market-wide Radar / background scheduler (Phase D)
+
+A background scheduler can run market-wide discovery (and, bounded,
+per-ticker evaluation) on an interval, reusing the SAME screener and
+evaluation pipeline Market Discovery and Ticker Analysis already use --
+it is not a second data pipeline. It ships **disabled by default** on
+every fresh install and upgrade (an upgrade that already has an
+explicit setting from a prior version keeps it, never silently resets
+or silently turns it on).
+
+Three modes, settable via `POST /api/scheduler/mode` (requires
+`X-TIP-Auth` like every other mutating route):
+
+* `disabled` -- zero background UW calls, ever.
+* `dry_run` -- one bounded screener call per cycle, writes a discovery
+  snapshot + ranked candidates. No per-ticker evaluation, no UW calls
+  beyond that one screener call.
+* `enabled` -- `dry_run`'s discovery step, plus a bounded top-N
+  (`TIP_SCHEDULER_TOP_N`, default 5) subset evaluated through the
+  existing per-ticker pipeline.
+
+`GET /api/scheduler/status` (also auth-required) reports the current
+mode, last/next run, how many candidates the last cycle evaluated, and
+any pause reason (e.g. the storage guard pausing background writes).
+`GET /api/radar/market-wide` (auth-required) returns the most recent
+discovery snapshot's candidates, each tagged `current` / `stale` /
+`unevaluated` based on how recently it has a cataloged evaluation
+(`TIP_EVAL_FRESHNESS_WINDOW_S`, default 1200s/20min) -- a ticker
+evaluated via both a watchlist scan and a discovery/scheduler
+evaluation the same day shows exactly one entry (whichever is most
+recent), never two conflicting rows.
+
+Market-hours-aware (reuses the real NYSE calendar, `TIP_SCHEDULER_INTERVAL_S`
+default 900s/15min) and durably cross-restart-safe: a SQLite-backed
+lease (`scheduler_lease` table) ensures a container restart, a crashed-
+and-restarted process, or more than one worker process cannot ever run
+overlapping collection cycles. Graceful shutdown releases the lease
+immediately.
+
+### Single-process by design
+
+This app's UW concurrency guard (`TIP_UW_MAX_CONCURRENT_REQUESTS`,
+default **2** -- intentionally one below UW's confirmed hard ceiling of
+3 concurrent requests, since the background scheduler now shares this
+same budget with interactive requests) is a `threading`-based gate,
+confirmed **process-local**: it has no visibility into any other
+process. The real Dockerfile's `CMD` runs plain `uvicorn` with no
+`--workers` flag -- exactly one worker process. The app refuses to
+start (see `app/core/single_process_guard.py`) if it detects
+`WEB_CONCURRENCY` / `UVICORN_WORKERS` / `GUNICORN_WORKERS` / a Gunicorn
+`--workers` invocation configured above 1, rather than silently running
+with an unenforced concurrency ceiling across multiple processes. If
+you genuinely need multiple worker processes, the concurrency gate
+needs real cross-process coordination (e.g. via the same SQLite lease
+pattern the scheduler uses) before raising this -- don't just remove
+the guard.
+
+Interactive (user-initiated) UW requests are never starved by
+background scheduler traffic competing for the same concurrency
+budget: a background call backs off whenever an interactive caller is
+waiting for a slot (`app/core/uw_concurrency.py`), rather than racing
+it evenly.
+
 ## Tests
 
 ```bash
