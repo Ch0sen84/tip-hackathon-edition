@@ -91,6 +91,56 @@ def test_market_wide_radar_shows_cataloged_candidates_with_freshness(app_main, m
     assert "coverage_note" in body
 
 
+def test_scheduler_status_exposes_effective_config_d9(app_main):
+    """QA remediation D9: effective running configuration (not just
+    documented defaults) is visible via the existing authenticated
+    diagnostics/status endpoint."""
+    client = TestClient(app_main.app)
+    body = client.get("/api/scheduler/status").json()
+    assert body["uw_max_concurrent_requests"] is None or isinstance(body["uw_max_concurrent_requests"], int)
+    assert "lease_ttl_s" in body
+    assert "poll_interval_s" in body
+    assert "cycle_in_progress" in body
+
+
+def test_scheduler_run_once_requires_auth(app_main):
+    client = TestClient(app_main.app)
+    client.headers.pop("X-TIP-Auth", None)
+    res = client.post("/api/scheduler/run-once")
+    assert res.status_code == 401
+
+
+def test_scheduler_run_once_refuses_when_disabled(app_main):
+    client = TestClient(app_main.app)
+    res = client.post("/api/scheduler/run-once")
+    assert res.status_code == 200
+    assert res.json()["reason"] == "disabled"
+
+
+def test_scheduler_run_once_runs_a_cycle_in_dry_run_mode(app_main, monkeypatch):
+    from app import main as _main
+
+    class _FakeAdapter:
+        def discover_candidates(self, filters=None):
+            return {
+                "candidates": [{"ticker": "NVDA", "net_premium": 1}], "snapshot_at": "2026-10-15T14:00:00+00:00",
+                "screener_requests_used": 1, "source": "fake", "unavailable": False, "reason": None,
+            }
+
+        def get_universe(self):
+            return []
+
+    monkeypatch.setattr(_main, "get_adapter", lambda: _FakeAdapter())
+    client = TestClient(app_main.app)
+    client.post("/api/scheduler/mode", json={"mode": "dry_run"})
+    res = client.post("/api/scheduler/run-once")
+    assert res.status_code == 200
+    body = res.json()
+    assert body["ran"] is True
+    assert body["triggered_by"] == "run_once"
+    assert body["candidates_evaluated"] == 0  # dry_run never evaluates
+
+
 def test_market_wide_radar_marks_current_vs_unevaluated(app_main):
     from app import main as _main
     from datetime import datetime, timezone

@@ -62,10 +62,37 @@ def test_dockerfile_cmd_has_no_workers_flag():
     Dockerfile's CMD is plain uvicorn with no --workers flag. This test
     guards against someone adding one later without also addressing the
     process-local concurrency gate (see core/uw_concurrency.py /
-    core/single_process_guard.py)."""
+    core/single_process_guard.py).
+
+    QA remediation D8: `parents[2] / "Dockerfile"` resolves correctly
+    when this suite runs from a real source checkout (backend/tests ->
+    backend -> repo root, where the Dockerfile genuinely lives) -- but
+    this suite can ALSO be run from inside the built runtime image
+    (e.g. `docker exec <container> python -m pytest`), where the
+    working tree is `/srv/backend` and `/srv` is the image root. The
+    Dockerfile itself is deliberately never `COPY`'d into that image
+    (see Dockerfile's own COPY lines -- only backend/frontend/fixtures
+    are), so `parents[2]` there resolves to `/srv/Dockerfile`, which
+    genuinely does not exist and never should (adding it just to satisfy
+    this test would bloat the production image with a build-time-only
+    file for zero runtime benefit). Skip gracefully with a clear reason
+    instead of failing when that's the actual situation -- this is a
+    real difference in the RUNTIME environment, not a real regression in
+    the single-process guarantee the Dockerfile's CMD provides, and the
+    guarantee itself is fully covered by the multi-worker-detection tests
+    above regardless of whether the Dockerfile source file happens to be
+    reachable from this process's working directory."""
     from pathlib import Path
 
     dockerfile = Path(__file__).resolve().parents[2] / "Dockerfile"
+    if not dockerfile.exists():
+        pytest.skip(
+            f"{dockerfile} not found -- this suite is running from inside the built runtime "
+            "image (or some other context without the repo's source tree), where the "
+            "Dockerfile is intentionally never copied into /srv (see Dockerfile's own COPY "
+            "lines). This is a real difference in the test's runtime context, not something "
+            "to fix by adding the Dockerfile to the production image."
+        )
     text = dockerfile.read_text(encoding="utf-8")
     cmd_lines = [line for line in text.splitlines() if line.strip().startswith("CMD")]
     assert cmd_lines, "no CMD line found in Dockerfile"
