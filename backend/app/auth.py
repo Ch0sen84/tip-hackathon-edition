@@ -118,3 +118,155 @@ def default_token_path(settings_path: "str | os.PathLike") -> str:
     existing `tip-data` named volume). Overridable via TIP_AUTH_TOKEN_PATH
     for anyone who wants it elsewhere."""
     return str(Path(settings_path).resolve().parent / TOKEN_FILENAME)
+
+
+# --- QA remediation D1: secure pairing/provisioning fallback -----------
+#
+# ROOT CAUSE (real Windows Docker Desktop test, D1 in the QA report): on
+# Docker Desktop, a browser request made FROM the Windows host arrives at
+# this container through Docker Desktop's internal network bridge/VM, so
+# `request.client.host` is the bridge gateway address (something like
+# 172.x.x.1), never a real 127.0.0.1/::1 peer. is_loopback() correctly
+# rejects that (it is NOT loopback, and -- this is the whole point --
+# cannot be told apart from some OTHER device on the same Docker/LAN
+# network just by looking at the IP). The bootstrap route above therefore
+# 403s for every genuine Docker Desktop browser, forcing a manual
+# `docker exec ... cat .auth_token`.
+#
+# REJECTED FIXES (all explicitly forbidden by Chad's brief, and why):
+#   * "Trust the Docker bridge gateway IP" -- the gateway address is a
+#     fixed, well-known, GUESSABLE value (typically x.x.x.1) on every
+#     Docker Desktop install; any other container, or any device that can
+#     reach this one over the LAN via port-forwarding, can spoof traffic
+#     that LOOKS like it came from the gateway. It proves nothing about
+#     who is actually driving a browser on the real host.
+#   * "Trust any RFC1918 private range" -- this is just a wider version of
+#     the same mistake: it would also trust a phone on the same office
+#     WiFi, a different VM, or a compromised machine elsewhere on the LAN.
+#   * "Trust X-Forwarded-For / X-Real-IP / Host: localhost" -- every one
+#     of these is a plain HTTP header the CLIENT sends. A remote attacker
+#     controls every header in their own request; "trusting" a header as
+#     proof of origin is trusting the attacker's own unverified claim.
+#
+# THE ACTUAL FIX: a short-lived, single-use PAIRING CODE, generated at
+# process startup and surfaced ONLY through a channel an attacker on the
+# LAN/Docker network cannot read: `docker logs <container>` (this
+# process's own stdout, loudly, at startup -- see main.py's startup
+# handler) and the persisted sibling file inside the SAME host-mounted
+# volume the auth token itself already lives in (readable via
+# `docker exec`, same as the token was before this fix, but no longer
+# the ONLY way to get a working session). Reading either of those
+# requires Docker CLI/daemon access on the real host -- not "being on
+# the same network", not "guessing a gateway IP", not "sending a header".
+# This is exactly option (a) from Chad's brief: a one-time code written
+# host-side that a legitimate user copy/pastes into the browser once, to
+# mint a token with NO network-origin trust decision involved at all.
+#
+# The existing loopback bootstrap route above is UNCHANGED and remains
+# the fully-automatic path for every topology where it genuinely works
+# (plain `uvicorn` locally, Docker on Linux without Desktop's extra
+# bridging, etc.) -- this pairing mechanism is purely the fallback for
+# when it doesn't, never a replacement that weakens the loopback case.
+PAIRING_CODE_FILENAME = ".pairing_code"
+PAIRING_CODE_TTL_S = 15 * 60  # rotates automatically after 15 minutes
+PAIRING_CODE_MAX_FAILED_ATTEMPTS = 20  # defense-in-depth on top of 64 bits of entropy
+
+
+class PairingCodeStore:
+    """Generates/persists/rotates the one-time Docker-host pairing code.
+
+    Deliberately modeled on AuthTokenStore above (same tmp_path-isolated
+    construction for tests, same 0600 file permissions) but is its own
+    separate secret/file -- consuming a pairing code never reveals or
+    rotates the real long-lived auth token's file, and vice versa.
+    """
+
+    def __init__(self, code_path: "str | os.PathLike", ttl_s: float = PAIRING_CODE_TTL_S):
+        import threading
+
+        self.code_path = Path(code_path)
+        self.ttl_s = ttl_s
+        self._lock = threading.Lock()
+        self._code: Optional[str] = None
+        self._expires_at: float = 0.0
+        self._failed_attempts = 0
+
+    def _write(self, code: str) -> None:
+        self.code_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = self.code_path.with_suffix(self.code_path.suffix + ".tmp")
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            f.write(code)
+        try:
+            os.chmod(tmp_path, 0o600)
+        except OSError:
+            pass
+        os.replace(tmp_path, self.code_path)
+        try:
+            os.chmod(self.code_path, 0o600)
+        except OSError:
+            pass
+
+    def _generate_locked(self) -> str:
+        import time
+
+        # 16 hex chars = 64 bits of entropy -- short enough to type/paste
+        # from a terminal, far too large to brute-force online even
+        # without the attempt cap below.
+        code = secrets.token_hex(8)
+        self._code = code
+        self._expires_at = time.monotonic() + self.ttl_s
+        self._failed_attempts = 0
+        self._write(code)
+        return code
+
+    def current_code(self, force_new: bool = False) -> str:
+        """Returns the live pairing code, generating/rotating it first if
+        none exists yet or the previous one has expired. `force_new=True`
+        is used at process startup so every restart gets a fresh code
+        (never reuses a code that may have already been shown/used in a
+        previous process lifetime)."""
+        import time
+
+        with self._lock:
+            if force_new or self._code is None or time.monotonic() > self._expires_at:
+                return self._generate_locked()
+            return self._code
+
+    def consume(self, candidate: Optional[str]) -> bool:
+        """One-time-use check: on a correct, still-valid code, rotates to
+        a brand-new code (so the SAME code can never be replayed/reused)
+        and returns True. Every other case (wrong code, expired, too
+        many recent failed attempts -- a brute-force defense independent
+        of the already-large keyspace) returns False and never mutates
+        the live code, so a wrong guess doesn't invalidate a code the
+        real user hasn't used yet."""
+        import time
+
+        with self._lock:
+            if self._failed_attempts >= PAIRING_CODE_MAX_FAILED_ATTEMPTS:
+                return False
+            if (
+                not candidate
+                or self._code is None
+                or time.monotonic() > self._expires_at
+            ):
+                self._failed_attempts += 1
+                return False
+            if hmac.compare_digest(self._code, candidate):
+                self._generate_locked()  # one-time use: rotate immediately on success
+                return True
+            self._failed_attempts += 1
+            return False
+
+    def reset_cache(self) -> None:
+        """Test-only: forces the next current_code() call to generate a
+        brand-new code rather than reuse one left from a previous test."""
+        self._code = None
+        self._failed_attempts = 0
+
+
+def default_pairing_code_path(settings_path: "str | os.PathLike") -> str:
+    """Same sibling-of-settings.json placement as default_token_path --
+    SAME persistent volume, different filename, overridable via
+    TIP_PAIRING_CODE_PATH."""
+    return str(Path(settings_path).resolve().parent / PAIRING_CODE_FILENAME)

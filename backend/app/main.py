@@ -51,7 +51,14 @@ from .ai.mcp_tool_client import MCPSubprocessError
 from .ai.schemas import MalformedAIResponse
 from .ai.simulated import get_simulated_transcript
 from .ai.validation import ValidationError as AiValidationError
-from .auth import TOKEN_HEADER, AuthTokenStore, default_token_path, is_loopback
+from .auth import (
+    TOKEN_HEADER,
+    AuthTokenStore,
+    PairingCodeStore,
+    default_pairing_code_path,
+    default_token_path,
+    is_loopback,
+)
 from .config import settings
 from .core import dark_pool_baseline, discovery, scan_service, tip_evidence
 from .core import scheduler_freshness, single_process_guard, uw_concurrency
@@ -81,7 +88,31 @@ _BIND_PORT = os.environ.get("BIND_PORT", "8000")
 ALLOWED_ORIGIN = os.environ.get("ALLOWED_ORIGIN", f"http://{_BIND_HOST}:{_BIND_PORT}")
 ALLOWED_HOST = os.environ.get("ALLOWED_HOST", _BIND_HOST)
 
-_ALLOWED_HOSTS = [ALLOWED_HOST]
+# QA remediation D2: localhost:8000 returned 400 while 127.0.0.1:8000
+# worked, because the default ALLOWED_HOST list only ever contained
+# whichever single literal value BIND_HOST/ALLOWED_HOST resolved to
+# (127.0.0.1 by default) -- "localhost" was never in it, so
+# TrustedHostMiddleware rejected that Host header outright. Since D1's
+# new pairing mechanism and the existing loopback bootstrap both treat
+# 127.0.0.1/::1/localhost as equally "this machine" already (see
+# auth.LOOPBACK_HOSTS), the consistent fix is to accept BOTH spellings
+# of loopback by default too -- not to pick one as "the" canonical
+# address and document the other as unsupported. An operator who has
+# explicitly set ALLOWED_HOST to something else (a reverse-proxy
+# hostname, a specific LAN IP) keeps getting EXACTLY that one value and
+# nothing else added -- this widening only ever applies to the
+# loopback-default case, never silently broadens a custom deployment.
+_LOOPBACK_HOST_ALIASES = {"127.0.0.1", "localhost"}
+if ALLOWED_HOST in _LOOPBACK_HOST_ALIASES:
+    _ALLOWED_HOSTS = sorted(_LOOPBACK_HOST_ALIASES)
+else:
+    _ALLOWED_HOSTS = [ALLOWED_HOST]
+# Optional explicit override/extension for anyone who needs a specific
+# extra host accepted (comma-separated) without relying on the
+# loopback-alias widening above.
+_extra_hosts = os.environ.get("ALLOWED_HOSTS_EXTRA", "").strip()
+if _extra_hosts:
+    _ALLOWED_HOSTS += [h.strip() for h in _extra_hosts.split(",") if h.strip()]
 # Test-only widening: fastapi.testclient.TestClient has no real network
 # interface, so its requests' Host header is whatever base_url the test
 # gave it. This can ONLY ever add hosts during an actual pytest run (same
@@ -115,6 +146,18 @@ _auth_store = AuthTokenStore(
     os.environ.get(
         "TIP_AUTH_TOKEN_PATH",
         default_token_path(os.environ.get("TIP_SETTINGS_PATH", "./data/settings.json")),
+    )
+)
+
+# QA remediation D1: the Docker-Desktop-safe pairing fallback -- see
+# auth.PairingCodeStore's docstring for the full security design. One
+# instance lives on this module for the process lifetime, exactly like
+# _auth_store above; tests replace it with their own tmp_path-isolated
+# instance (see conftest.py's `app_main` fixture).
+_pairing_store = PairingCodeStore(
+    os.environ.get(
+        "TIP_PAIRING_CODE_PATH",
+        default_pairing_code_path(os.environ.get("TIP_SETTINGS_PATH", "./data/settings.json")),
     )
 )
 
@@ -257,6 +300,23 @@ def _on_startup() -> None:
     background UW calls."""
     single_process_guard.assert_single_process()
     get_scheduler_runner().start()
+    # QA remediation D1: loudly surface the pairing code on every real
+    # startup (force_new=True -- never reuse a code a previous process
+    # lifetime may have already shown/used). This is the ONLY place this
+    # code is ever printed -- `docker logs <container>` is the host-only
+    # channel a legitimate operator reads it from. See auth.py's
+    # PairingCodeStore docstring for why this is safe against a LAN/
+    # Docker-network attacker (reading container logs requires Docker
+    # CLI/daemon access on the real host, not mere network reachability).
+    code = _pairing_store.current_code(force_new=True)
+    logging.getLogger(__name__).warning(
+        "\n%s\nTIP Hackathon Edition -- Docker Desktop / browser pairing code: %s\n"
+        "If the app's auto-bootstrap (GET /api/auth/bootstrap) fails in your browser "
+        "(expected on Docker Desktop for Windows/Mac), paste this code into the "
+        "'Pair this browser' prompt shown in the UI. One-time use; expires in 15 minutes "
+        "-- restart the container (or wait) for a fresh one if it expires.\n%s",
+        "=" * 70, code, "=" * 70,
+    )
 
 
 @app.on_event("shutdown")
@@ -335,6 +395,48 @@ def _catalog_dark_pool_baseline_best_effort(adapter: UWDataAdapter, ticker: str)
             "Phase C dark-pool baseline computation skipped for %s (non-fatal, falls back to bootstrap)", ticker
         )
         return None
+
+
+def _catalog_discovery_best_effort(adapter: UWDataAdapter, filters: dict, result: dict, kind: str = "on_demand") -> None:
+    """QA remediation D3: the ONE shared persistence call for a Market
+    Discovery snapshot, used by BOTH this route and the Phase D
+    scheduler's background cycle (see scheduler.py's _run_cycle, updated
+    this round to call through here too instead of calling
+    catalog_discovery_snapshot directly) -- never a second/duplicate
+    discovery-persistence pipeline.
+
+    Same Demo/Live separation mechanism every other catalog_*_best_effort
+    helper in this file already uses: ONLY ever persists for a real
+    LiveUWAdapter scan. SyntheticDataAdapter's demo-mode candidates are
+    deliberately never written to discovery_snapshots/discovery_candidates
+    -- they are not real upstream data, and persisting them would let
+    synthetic/demo rows contaminate the same historical catalog tables
+    Live data relies on for Market-wide Radar/freshness. Same invariant
+    as every sibling helper: failures here are swallowed, never allowed
+    to change what the route returns to its caller.
+    """
+    if not isinstance(adapter, LiveUWAdapter):
+        return
+    try:
+        catalog = get_catalog()
+        catalog.catalog_discovery_snapshot(
+            filters=filters,
+            candidates=result.get("candidates") or [],
+            snapshot_at=result.get("snapshot_at") or scheduler_module_utcnow(),
+            kind=kind,
+        )
+    except Exception:  # noqa: BLE001 -- see docstring: never propagate (incl. StorageGuardPausedError)
+        logging.getLogger(__name__).info(
+            "Discovery catalog snapshot write skipped (non-fatal, response unaffected)"
+        )
+
+
+def scheduler_module_utcnow() -> str:
+    """Tiny shared helper so _catalog_discovery_best_effort never needs a
+    second import of scheduler_store just for a timestamp fallback."""
+    from .core.scheduler_store import utcnow_iso
+
+    return utcnow_iso()
 
 
 def _run_scan(adapter: UWDataAdapter, store: QualifyingDaysStore, ticker: str, kind: str = "on_demand") -> dict:
@@ -447,6 +549,40 @@ def auth_bootstrap(request: Request):
                 "For a LAN or remote deployment, retrieve the token yourself: "
                 "`docker exec <container> cat /srv/data/.auth_token` -- see README.md / "
                 "INSTALL_AGENT.md 'Authentication' section."
+            ),
+        )
+    return {"token": _auth_store.get_or_create()}
+
+
+class PairBody(BaseModel):
+    pairing_code: str
+
+
+@app.post("/api/auth/pair")
+def auth_pair(body: PairBody):
+    """QA remediation D1: the secure fallback for exactly the real-world
+    failure mode this item reproduces -- a genuine Docker Desktop browser
+    whose request arrives at `is_loopback()` as the bridge-gateway
+    address, not a real loopback peer, so GET /api/auth/bootstrap 403s.
+
+    This route is intentionally NOT gated on request.client.host at all
+    -- see auth.PairingCodeStore's module comment for why: the security
+    boundary here is possession of the one-time code itself (64 bits of
+    entropy, single-use, 15-minute TTL, rate-limited), which is only ever
+    disclosed via `docker logs`/the host-mounted volume file -- channels
+    a LAN/Docker-network-adjacent attacker who is NOT at the real host
+    cannot read. Knowing this app is reachable, or even being on the
+    exact same Docker bridge network, gives an attacker zero information
+    about the current code.
+    """
+    if not _pairing_store.consume(body.pairing_code.strip()):
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Invalid, expired, or already-used pairing code. Run `docker logs <container>` "
+                "(or `docker compose logs`) on the Docker host and look for the most recent "
+                "'Docker Desktop / browser pairing code' line -- codes rotate every 15 minutes "
+                "and are single-use. See README.md / INSTALL_AGENT.md 'Authentication' section."
             ),
         )
     return {"token": _auth_store.get_or_create()}
@@ -748,14 +884,54 @@ def uw_request_diagnostics():
     adapter = get_adapter()
     client = getattr(adapter, "client", None)
     telemetry = getattr(client, "telemetry", None)
+    scheduler_mode = get_scheduler_runner().store.get_mode()
     if telemetry is None:
-        return {"mode": getattr(adapter, "mode", "unknown"), "by_path": {},
-                "max_concurrent_requests": None, "note": "No live UW HTTP client in this mode."}
+        return {
+            "mode": getattr(adapter, "mode", "unknown"), "by_path": {},
+            "max_concurrent_requests": None, "note": "No live UW HTTP client in this mode.",
+            "collection_mode": scheduler_mode,
+            "counts_reset_on": "process restart (in-memory only, never persisted)",
+        }
+    gate = uw_concurrency.get_shared_gate(client.max_concurrent_requests)
+    by_path = telemetry.summary()
+    # QA remediation D10: aggregate, bounded totals across the whole
+    # by_path breakdown -- never a second high-cardinality store, just a
+    # sum over the SAME fixed-size per-endpoint counters above.
+    total_logical = sum(e["logical_requests"] for e in by_path.values())
+    total_http_attempts = sum(e["http_attempts"] for e in by_path.values())
+    total_retried = sum(e["retried"] for e in by_path.values())
     return {
         "mode": adapter.mode,
-        "by_path": telemetry.summary(),
+        # QA remediation D9/D10: the ACTUAL collection mode this process
+        # is configured with right now (disabled/dry_run/enabled) -- lets
+        # a tester correlate request volume with whether the scheduler
+        # was actually doing anything, without a separate call.
+        "collection_mode": scheduler_mode,
+        "by_path": by_path,
+        "totals": {
+            "logical_requests": total_logical,
+            "http_attempts": total_http_attempts,
+            "retried_logical_requests": total_retried,
+        },
         "max_concurrent_requests": client.max_concurrent_requests,
         "max_retries": client.max_retries,
+        # Live, real-time in-flight counts from the ONE shared
+        # PriorityGate every call path funnels through (core/
+        # uw_concurrency.py) -- "currently observed" is literal: these
+        # change from one call to the next, unlike the by_path counters
+        # above, which only ever grow until a restart.
+        "in_flight": {
+            "interactive": gate.interactive_in_flight,
+            "background": gate.background_in_flight,
+            "max_observed_concurrent": gate.max_observed_in_flight,
+        },
+        # Bounded-by-design disclosure (Chad's explicit D10 requirement):
+        # this is a small, fixed-size aggregate -- never keyed by raw
+        # ticker/timestamp, never unbounded per-request history -- and it
+        # resets to zero on every process restart, not on any rolling
+        # schedule. A tester seeing small numbers right after a redeploy
+        # is seeing a genuinely fresh process, not a bug.
+        "counts_reset_on": "process restart (in-memory only, never persisted)",
     }
 
 
@@ -773,6 +949,8 @@ def scheduler_status():
     runner = get_scheduler_runner()
     state = runner.store.get_state()
     lease = runner.store.get_lease()
+    adapter = get_adapter()
+    uw_client = getattr(adapter, "client", None)
     return {
         "mode": state["mode"],
         "updated_at": state["updated_at"],
@@ -786,7 +964,34 @@ def scheduler_status():
         "top_n": runner.top_n,
         "scan_interval_s": runner.scan_interval_s,
         "freshness_window_s": scheduler_freshness.freshness_window_s(),
+        # QA remediation D9: the EFFECTIVE running configuration -- the
+        # actual values this process is using right now, not just the
+        # documented defaults/env-var names. uw_max_concurrent_requests
+        # is None (never 0 or a guessed number) when there is no live UW
+        # HTTP client at all in the current mode (demo mode).
+        "uw_max_concurrent_requests": getattr(uw_client, "max_concurrent_requests", None),
+        "lease_ttl_s": runner.lease_ttl_s,
+        "poll_interval_s": runner.poll_interval_s,
+        # Whether a run-once (or automatic) cycle is actively executing
+        # right now -- lets the UI disable the "Run once" button instead
+        # of letting a user fire a call that's guaranteed to be rejected.
+        "cycle_in_progress": runner._cycle_lock.locked(),  # noqa: SLF001 -- read-only status disclosure
     }
+
+
+@app.post("/api/scheduler/run-once", dependencies=[Depends(require_auth)])
+def scheduler_run_once():
+    """QA remediation D9: authenticated, bounded, supervised single-cycle
+    validation action -- see scheduler.SchedulerRunner.run_once's
+    docstring for the full set of guarantees (lease + in-process lock,
+    zero AI import, bounded top_n, returns to idle afterward, a second
+    concurrent call is rejected rather than queued).
+    """
+    runner = get_scheduler_runner()
+    result = runner.run_once()
+    if result.get("reason") == "cycle_already_in_progress":
+        raise HTTPException(status_code=409, detail="A scheduler cycle is already in progress. Try again shortly.")
+    return result
 
 
 @app.post("/api/scheduler/mode", dependencies=[Depends(require_auth)])
@@ -987,7 +1192,21 @@ def radar_discover(body: DiscoverFiltersBody):
         "max_change": body.max_change,
         "limit": body.limit,
     }
-    return discovery.run_discovery(adapter, filters)
+    result = discovery.run_discovery(adapter, filters)
+    # QA remediation D3: this used to be the ONLY difference between this
+    # route and the Phase D scheduler's background discovery cycle --
+    # the scheduler persisted every snapshot via IngestionCatalog.
+    # catalog_discovery_snapshot (see scheduler.py's _run_cycle), this
+    # manual route never did, so a manually-triggered real discovery scan
+    # never produced a discovery_snapshots/discovery_candidates row and
+    # therefore never showed up on Market-wide Radar (which only ever
+    # reads the most recent cataloged snapshot -- never an in-memory
+    # response). Fix: persist through the EXACT SAME catalog call the
+    # scheduler already uses -- see _catalog_discovery_best_effort below,
+    # which both this route and scheduler.py now call, so there is still
+    # only one write path, never a second one invented for this route.
+    _catalog_discovery_best_effort(adapter, filters, result)
+    return result
 
 
 @app.get("/api/ticker/{ticker}")

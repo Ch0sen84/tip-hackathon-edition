@@ -200,22 +200,56 @@ and persisted to `.auth_token` inside the SAME persistent volume
 Docker deployment -- the existing `tip-data` named volume, never a new
 one), file mode `0600`.
 
-**Localhost / Docker Desktop (the default, and the common case):** nothing
-to do. The frontend automatically calls `GET /api/auth/bootstrap` on
-first load, which hands out the token to a browser running ON the same
-machine as the backend (checked server-side via the request's real peer
-IP, not anything the browser claims) and caches it in `localStorage`. A
-one-time "Set up access" banner only ever appears if that automatic step
-fails (e.g. a LAN/remote deployment); a mutating call that ever gets a
-real 401 (stale/missing token) clears the cached token and re-shows the
-same banner with a specific "authentication required" message, not a
-generic error.
+**Plain localhost (no Docker Desktop) / Docker on Linux:** nothing to do.
+The frontend automatically calls `GET /api/auth/bootstrap` on first load,
+which hands out the token to a browser running ON the same machine as the
+backend (checked server-side via the request's real peer IP, not anything
+the browser claims) and caches it in `localStorage`.
+
+**Docker Desktop (Windows/Mac) -- QA remediation D1:** `GET
+/api/auth/bootstrap` reliably 403s here even for a genuine same-machine
+browser. This is a real, confirmed Docker Desktop networking quirk, not a
+bug introduced by this app: a browser request made from the Windows/Mac
+host arrives at the container through Docker Desktop's internal network
+bridge, so the backend sees the bridge gateway address as the peer, never
+a real loopback IP -- and the backend correctly refuses to treat that as
+proof the request came from the real host (a gateway/bridge IP is not
+meaningfully different from "some other device on the same Docker/LAN
+network" from the server's point of view; trusting it would be exactly
+the kind of spoofable-signal shortcut this app deliberately avoids).
+
+The fix is a one-time **pairing code**, which this is genuinely simpler
+than the old fallback: open the UI, and if auto-bootstrap failed you'll
+see a "Pair this browser" banner with a code-entry box. Get the current
+code by running:
+
+```bash
+docker logs <container>   # or: docker compose logs
+```
+
+and looking for the most recent line like:
+
+```
+TIP Hackathon Edition -- Docker Desktop / browser pairing code: 3f9a1c2b7e8d4a01
+```
+
+A fresh code is printed every time the container starts; it also rotates
+automatically every 15 minutes and is single-use (entering it once mints
+a real session and immediately invalidates that code). Paste it into the
+banner -- no `docker exec`, no finding/mounting a file by hand. This is a
+secure *provisioning* step, not a network-trust shortcut: the code is
+never derivable from the request itself (not the IP, not a header), only
+from a channel that requires real Docker CLI/daemon access on the host
+machine -- something nobody merely sharing the same LAN/Docker bridge
+network can read.
 
 **LAN or remote deployment (`BIND_HOST` set to something other than
-`127.0.0.1`, or any reverse proxy):** `GET /api/auth/bootstrap` refuses
-with 403 for any non-loopback caller, by design -- there is no way to
-self-serve the token over the network. Retrieve it yourself and paste it
-into the banner's fallback box:
+`127.0.0.1`/`localhost`, or any reverse proxy):** neither `GET
+/api/auth/bootstrap` nor the pairing-code banner is reachable to you with
+any advantage over anyone else on that network (the loopback bootstrap
+still 403s for a non-loopback peer, same as before; the pairing code
+still requires reading `docker logs`/the host-mounted file). Retrieve the
+token the same way as before:
 
 ```bash
 docker exec <container> cat /srv/data/.auth_token
@@ -311,13 +345,22 @@ docker compose up --build
 ```
 
 Serves on `http://127.0.0.1:8000/` by default -- loopback-only, not
-reachable from your LAN or the internet. `BIND_HOST`/`BIND_PORT` in
-`.env.example` control this; see that file for how to open it to a
-specific LAN interface if you want to reach it from another device
-(**never** set `BIND_HOST=0.0.0.0`, which exposes it on every interface,
-including any public one). The Settings UI's credential-management
-endpoints have no authentication of their own -- they rely entirely on
-this network-level binding, so after deploying, verify the actual
+reachable from your LAN or the internet. **QA remediation D2:** both
+`http://127.0.0.1:8000/` and `http://localhost:8000/` work out of the
+box -- `TrustedHostMiddleware`'s allowed-host list now accepts both
+loopback spellings by default (it previously only accepted whichever
+single literal value `BIND_HOST` resolved to, so `localhost:8000`
+returned 400 even though `127.0.0.1:8000` worked). If you've explicitly
+set `ALLOWED_HOST`/`BIND_HOST` to something else (a reverse-proxy
+hostname, a specific LAN IP), only that exact value is accepted, same as
+before -- this widening only applies to the default loopback case.
+`BIND_HOST`/`BIND_PORT` in `.env.example` control this; see that file for
+how to open it to a specific LAN interface if you want to reach it from
+another device (**never** set `BIND_HOST=0.0.0.0`, which exposes it on
+every interface, including any public one). The Settings UI's credential-management
+endpoints DO require authentication (the `X-TIP-Auth` token -- see
+"Authentication" above); the network-level binding below is your first
+line of defense, not your only one. After deploying, verify the actual
 published binding matches what you intended:
 
 ```bash
@@ -436,8 +479,13 @@ Three modes, settable via `POST /api/scheduler/mode` (requires
   existing per-ticker pipeline.
 
 `GET /api/scheduler/status` (also auth-required) reports the current
-mode, last/next run, how many candidates the last cycle evaluated, and
-any pause reason (e.g. the storage guard pausing background writes).
+mode, last/next run, how many candidates the last cycle evaluated, any
+pause reason (e.g. the storage guard pausing background writes), and
+(QA remediation D9) the **effective running configuration** actually in
+effect right now: `top_n`, `scan_interval_s`, `lease_ttl_s`,
+`poll_interval_s`, `uw_max_concurrent_requests`, and whether a cycle is
+currently in progress (`cycle_in_progress`) -- not just the documented
+defaults, the real values this process picked up from its environment.
 `GET /api/radar/market-wide` (auth-required) returns the most recent
 discovery snapshot's candidates, each tagged `current` / `stale` /
 `unevaluated` based on how recently it has a cataloged evaluation
@@ -452,6 +500,32 @@ lease (`scheduler_lease` table) ensures a container restart, a crashed-
 and-restarted process, or more than one worker process cannot ever run
 overlapping collection cycles. Graceful shutdown releases the lease
 immediately.
+
+**QA remediation D9: configuration is genuinely per-deployment now.**
+`TIP_SCHEDULER_TOP_N` / `TIP_SCHEDULER_INTERVAL_S` / `TIP_SCHEDULER_LEASE_TTL_S`
+/ `TIP_SCHEDULER_POLL_S` / `TIP_UW_MAX_CONCURRENT_REQUESTS` were already
+read from the environment by the app code, but `docker-compose.yml` never
+forwarded them into the container -- setting them in `.env` previously had
+no real effect on a Docker deployment. Fixed: the Compose file now passes
+all five through (see `.env.example`). `TIP_SCHEDULER_TOP_N=1` is a
+supported, safe minimum (bounds exactly one ticker per cycle in `enabled`
+mode -- no off-by-one/division issue). Do not raise
+`TIP_UW_MAX_CONCURRENT_REQUESTS` above its default of `2` without
+independently re-verifying UW's real concurrency ceiling.
+
+**QA remediation D9: bounded "Run once" validation.** `POST
+/api/scheduler/run-once` (auth-required) runs **exactly one** discovery
+(+bounded top-N evaluation, if the scheduler's current mode is `enabled`;
+discovery-only if `dry_run`) cycle on demand and returns to idle --
+no new recurring timer is started by calling it, and it never makes an
+Anthropic call under any circumstance (same zero-AI-import guarantee as
+the automatic scheduler). It reuses the exact same SQLite
+`scheduler_lease` the automatic background loop uses, plus an in-process
+lock, so a second `run-once` call while one is already executing (or
+while the automatic loop happens to be mid-cycle) gets a `409` --
+rejected outright, never queued for later. Calling `run-once` while the
+scheduler's mode is `disabled` returns `{"ran": false, "reason":
+"disabled"}` -- set `dry_run` or `enabled` first.
 
 ### Single-process by design
 

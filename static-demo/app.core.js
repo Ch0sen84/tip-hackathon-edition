@@ -30,13 +30,27 @@ const TIP_STATE = { currentTicker: null, currentView: "radar" };
 //                explicit "authentication failed" message up top instead
 //                of a generic exception.
 function renderAuthSetupBanner(variant) {
+  // QA remediation D6: the auto-bootstrap failure case gets its OWN
+  // distinct heading/explanation (not the same generic copy as a stale-
+  // token 401) -- this is the real actionable status the user needs,
+  // not just a browser-console message. "success" never reaches this
+  // function at all (see app.live.js's hideAuthSetupBanner(), called
+  // immediately on any successful bootstrap/pairing/manual-save) -- the
+  // banner genuinely never renders on the success path.
   const heading =
     variant === "error"
       ? "Authentication required"
+      : variant === "bootstrap_failed"
+      ? "Couldn't automatically set up access"
       : "One-time setup required before you can change settings or run Investigate with AI";
   const subMessage =
     variant === "error"
       ? "Your saved access token is missing or no longer valid (the server rejected it with 401)."
+      : variant === "bootstrap_failed"
+      ? "This is expected on Docker Desktop (Windows/Mac) -- a browser request from the host " +
+        "arrives at the container through Docker Desktop's network bridge, so the automatic " +
+        "same-machine check can't confirm it came from this computer. Use the pairing code " +
+        "below instead (see 'Pair this browser')."
       : "This app requires a one-time access token before any setting, watchlist change, or Investigate with AI call will work.";
   return `
     <div class="auth-setup-card">
@@ -44,16 +58,30 @@ function renderAuthSetupBanner(variant) {
       <p>${esc(subMessage)}</p>
       <button class="btn" id="authBootstrapBtn">Set up access (same machine only)</button>
       <span id="authBootstrapStatus" class="auth-setup-status"></span>
+      <div class="auth-setup-pairing">
+        <strong>Pair this browser (Docker Desktop -- QA remediation D1)</strong>
+        <p>
+          Run <code>docker logs &lt;container&gt;</code> on the Docker host and look for the most
+          recent "Docker Desktop / browser pairing code" line, then paste it here. One-time use;
+          rotates automatically every 15 minutes.
+        </p>
+        <input type="text" id="authPairingCodeInput" placeholder="Paste pairing code here" autocomplete="off" />
+        <button class="btn" id="authPairingSubmitBtn">Pair</button>
+        <span id="authPairingStatus" class="auth-setup-status"></span>
+      </div>
       <details class="auth-setup-fallback">
-        <summary>On a different machine, or the button above didn't work?</summary>
+        <summary>Still stuck, or on a different machine entirely?</summary>
         <p>
           Token bootstrap only works for a browser running on the SAME machine as the
           Docker host (it is refused for any other IP, by design -- see README.md
-          "Authentication"). For a LAN or remote setup, retrieve the token yourself and
-          paste it below:
+          "Authentication"). For a LAN/remote setup (not Docker Desktop), retrieve the token
+          yourself and paste it below:
         </p>
         <pre>docker exec &lt;container&gt; cat /srv/data/.auth_token</pre>
-        <input type="text" id="authManualTokenInput" placeholder="Paste token here" autocomplete="off" />
+        <div class="auth-token-field-row">
+          <input type="password" id="authManualTokenInput" placeholder="Paste token here" autocomplete="off" />
+          <button type="button" class="btn-link" id="authManualTokenRevealBtn" aria-label="Show token">Show</button>
+        </div>
         <button class="btn-link" id="authManualTokenSaveBtn">Save token</button>
       </details>
     </div>`;
@@ -506,13 +534,25 @@ const SCHEDULER_MODE_LABELS = {
   enabled: "Enabled -- discovery + bounded per-ticker evaluation",
 };
 
+// QA remediation D7: the mode TOGGLE BUTTONS below used to render the
+// raw backend identifier (`dry_run`, `enabled`) directly as their label
+// -- readable only to someone who already knows the API's vocabulary.
+// This short-label map is ONLY for display; data-scheduler-mode
+// attributes (and every API call) still use the real backend values
+// (disabled/dry_run/enabled) unchanged.
+const SCHEDULER_MODE_SHORT_LABELS = { disabled: "Disabled", dry_run: "Dry Run", enabled: "Enabled" };
+
+function schedulerModeShortLabel(mode) {
+  return SCHEDULER_MODE_SHORT_LABELS[mode] || mode;
+}
+
 function renderSchedulerControls(status) {
   const modes = ["disabled", "dry_run", "enabled"];
   const buttons = modes
     .map(
       (m) =>
         `<button class="radar-mode-btn${m === status.mode ? " active" : ""}" data-scheduler-mode="${m}">${esc(
-          m
+          schedulerModeShortLabel(m)
         )}</button>`
     )
     .join("");

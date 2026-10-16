@@ -90,6 +90,11 @@ def app_main(tmp_path, monkeypatch):
     _main._adapter_sig = None
     _main._last_uw_test_result = None
     _main._auth_store = AuthTokenStore(tmp_path / ".auth_token")
+    # QA remediation D1: same isolation for the new pairing-code store --
+    # never the real deployed code/file, a fresh one per test.
+    from app.auth import PairingCodeStore
+
+    _main._pairing_store = PairingCodeStore(tmp_path / ".pairing_code")
     # Phase D: reset the scheduler runner + its lease/mode store too, and
     # the shared UW concurrency gate, so one test's scheduler mode/lease
     # state (and in-flight counters) can never leak into the next test.

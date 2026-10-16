@@ -98,20 +98,40 @@ class RequestOutcome:
                    # "unavailable_on_tier" | "server_error" | "network_error" | "circuit_open"
     attempts: int
     latency_s: float
+    # QA remediation D10: which caller originated this LOGICAL request --
+    # "interactive" (a manual/user-driven HTTP request to this app) or
+    # "background" (the Phase D scheduler). Sourced from
+    # core.uw_concurrency.current_priority(), the SAME thread-local tag
+    # that mechanism already relies on -- no new signature threaded
+    # through every adapter method, no new concept invented.
+    priority: str = "interactive"
 
 
 class RequestTelemetry:
-    """Simple in-process counters/latencies per endpoint path -- exposed
-    read-only via a small diagnostics structure (see main.py's
-    /api/diagnostics/uw-requests route, which sits behind require_auth
-    like every other sensitive route). Never persisted, never exposes a
-    credential; purely request counts/latencies/outcomes."""
+    """In-process counters/latencies per endpoint path, PLUS (D10) the
+    distinction between a LOGICAL request (one call site, e.g. one
+    get_flow_alerts() call) and the actual number of HTTP ATTEMPTS it
+    took (a logical call retried twice at the HTTP layer is still one
+    logical request and three HTTP attempts) -- exposed read-only via
+    main.py's /api/diagnostics/uw-requests route (require_auth, same as
+    every other sensitive route). Never persisted, never exposes a
+    credential; purely request counts/latencies/outcomes.
+
+    BOUNDED BY DESIGN: this is a fixed-size dict keyed by endpoint path
+    (a small, closed set of real UW endpoints this app calls -- never a
+    high-cardinality key like a raw ticker or timestamp) crossed with
+    exactly two priority buckets (interactive/background). It holds
+    aggregate counters only, never per-request history, and is reset to
+    zero whenever this process restarts (see the diagnostics route's
+    `counts_reset_on` field for why a tester seeing small/zero numbers
+    right after a redeploy is expected, not a bug)."""
 
     def __init__(self):
         self._lock = threading.Lock()
         self._by_path: dict = defaultdict(lambda: {
             "count": 0, "success": 0, "retried": 0, "failed": 0,
-            "by_outcome": defaultdict(int), "total_latency_s": 0.0,
+            "http_attempts": 0, "by_outcome": defaultdict(int), "total_latency_s": 0.0,
+            "by_priority": defaultdict(lambda: {"logical_requests": 0, "http_attempts": 0}),
         })
 
     def record(self, outcome: RequestOutcome) -> None:
@@ -120,12 +140,16 @@ class RequestTelemetry:
             entry["count"] += 1
             entry["total_latency_s"] += outcome.latency_s
             entry["by_outcome"][outcome.outcome] += 1
+            entry["http_attempts"] += max(outcome.attempts, 0)
             if outcome.attempts > 1:
                 entry["retried"] += 1
             if outcome.outcome in ("success", "retried_success"):
                 entry["success"] += 1
             else:
                 entry["failed"] += 1
+            pr = entry["by_priority"][outcome.priority]
+            pr["logical_requests"] += 1
+            pr["http_attempts"] += max(outcome.attempts, 0)
 
     def summary(self) -> dict:
         with self._lock:
@@ -133,12 +157,15 @@ class RequestTelemetry:
             for path, entry in self._by_path.items():
                 count = entry["count"]
                 out[path] = {
-                    "count": count,
+                    "logical_requests": count,
+                    "count": count,  # kept for backward compatibility with existing callers/tests
+                    "http_attempts": entry["http_attempts"],
                     "success": entry["success"],
                     "retried": entry["retried"],
                     "failed": entry["failed"],
                     "avg_latency_s": round(entry["total_latency_s"] / count, 4) if count else 0.0,
                     "by_outcome": dict(entry["by_outcome"]),
+                    "by_priority": {k: dict(v) for k, v in entry["by_priority"].items()},
                 }
             return out
 
@@ -307,10 +334,18 @@ class UWRestClient:
         if not self.api_key:
             return _unavailable(path, 401, "No UW_API_KEY configured", UNAUTHORIZED)
 
+        # QA remediation D10: captured ONCE per logical call from the SAME
+        # thread-local tag uw_concurrency.background_priority() already
+        # sets for the scheduler -- every telemetry.record() below tags
+        # its RequestOutcome with it, so diagnostics can break request
+        # counts down by manual-interactive vs scheduled-background
+        # without threading a new parameter through every call site.
+        _priority = uw_concurrency.current_priority()
+
         try:
             self.circuit_breaker.before_call(path)
         except CircuitOpenError as e:
-            self.telemetry.record(RequestOutcome(path, None, CIRCUIT_OPEN, 0, 0.0))
+            self.telemetry.record(RequestOutcome(path, None, CIRCUIT_OPEN, 0, 0.0, priority=_priority))
             return _unavailable(
                 path, 0,
                 f"Circuit breaker open for {path} after repeated failures; "
@@ -337,7 +372,7 @@ class UWRestClient:
                         continue
                     self.circuit_breaker.record_failure(path)
                     self.telemetry.record(RequestOutcome(path, None, "network_error", attempts,
-                                                           time.monotonic() - start))
+                                                           time.monotonic() - start, priority=_priority))
                     return last_result
 
             # 401/403 are DEFINITIVE, non-transient problems (bad
@@ -347,12 +382,12 @@ class UWRestClient:
             if resp.status_code == 401:
                 self.circuit_breaker.record_success(path)  # not an endpoint-health failure
                 self.telemetry.record(RequestOutcome(path, 401, "unauthorized", attempts,
-                                                       time.monotonic() - start))
+                                                       time.monotonic() - start, priority=_priority))
                 return _unavailable(path, 401, resp.text, UNAUTHORIZED)
             if resp.status_code == 403:
                 self.circuit_breaker.record_success(path)
                 self.telemetry.record(RequestOutcome(path, 403, "unavailable_on_tier", attempts,
-                                                       time.monotonic() - start))
+                                                       time.monotonic() - start, priority=_priority))
                 return _unavailable(path, 403, resp.text, UNAVAILABLE)
 
             if resp.status_code == 429:
@@ -363,7 +398,7 @@ class UWRestClient:
                     continue
                 self.circuit_breaker.record_failure(path)
                 self.telemetry.record(RequestOutcome(path, 429, "rate_limited", attempts,
-                                                       time.monotonic() - start))
+                                                       time.monotonic() - start, priority=_priority))
                 return last_result
 
             if resp.status_code >= 500:
@@ -373,7 +408,7 @@ class UWRestClient:
                     continue
                 self.circuit_breaker.record_failure(path)
                 self.telemetry.record(RequestOutcome(path, resp.status_code, "server_error", attempts,
-                                                       time.monotonic() - start))
+                                                       time.monotonic() - start, priority=_priority))
                 return last_result
 
             if not resp.ok:
@@ -382,13 +417,13 @@ class UWRestClient:
                 # a transient server/rate-limit condition.
                 self.circuit_breaker.record_success(path)
                 self.telemetry.record(RequestOutcome(path, resp.status_code, ERROR, attempts,
-                                                       time.monotonic() - start))
+                                                       time.monotonic() - start, priority=_priority))
                 return _unavailable(path, resp.status_code, resp.text, ERROR)
 
             self.circuit_breaker.record_success(path)
             outcome = "success" if attempts == 1 else "retried_success"
             self.telemetry.record(RequestOutcome(path, resp.status_code, outcome, attempts,
-                                                   time.monotonic() - start))
+                                                   time.monotonic() - start, priority=_priority))
             try:
                 return resp.json()
             except ValueError:

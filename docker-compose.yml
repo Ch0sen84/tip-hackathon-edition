@@ -48,6 +48,24 @@ services:
       # genuine-MCP standalone "Test UW MCP Connection" button in
       # Settings, which never depended on this variable.
       INVESTIGATE_TRANSPORT: ${INVESTIGATE_TRANSPORT:-rest}
+      # QA remediation D9: these were all already read from the
+      # environment by the app (app/scheduler.py's _env_int calls,
+      # live_uw_adapter.py's TIP_UW_MAX_CONCURRENT_REQUESTS), but were
+      # never actually forwarded by this Compose file -- so setting them
+      # in a deployment's .env had zero real effect inside the
+      # container; only the hardcoded code-level defaults ever applied.
+      # Forwarded now so they are genuinely configurable per-deployment.
+      # Defaults match the existing code-level defaults exactly -- zero
+      # behavior change for anyone who doesn't set these.
+      TIP_SCHEDULER_TOP_N: ${TIP_SCHEDULER_TOP_N:-5}
+      TIP_SCHEDULER_INTERVAL_S: ${TIP_SCHEDULER_INTERVAL_S:-900}
+      TIP_SCHEDULER_LEASE_TTL_S: ${TIP_SCHEDULER_LEASE_TTL_S:-90}
+      TIP_SCHEDULER_POLL_S: ${TIP_SCHEDULER_POLL_S:-20}
+      # Do NOT raise this above 2 without re-verifying UW's real
+      # concurrency ceiling (see live_uw_adapter.py's
+      # DEFAULT_MAX_CONCURRENT_REQUESTS docstring) -- kept here only so
+      # it is genuinely configurable, never to suggest raising it.
+      TIP_UW_MAX_CONCURRENT_REQUESTS: ${TIP_UW_MAX_CONCURRENT_REQUESTS:-2}
     volumes:
       - tip-data:/srv/data
 
