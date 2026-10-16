@@ -48,6 +48,44 @@ services:
       # genuine-MCP standalone "Test UW MCP Connection" button in
       # Settings, which never depended on this variable.
       INVESTIGATE_TRANSPORT: ${INVESTIGATE_TRANSPORT:-rest}
+      # Local Mode / Network Mode (Fetch Metadata auth redesign): leave
+      # unset ("auto", the default) for every normal install -- Local
+      # Mode activates automatically iff BIND_HOST above is loopback.
+      # Only set this explicitly if you want to FORCE Network Mode's
+      # token model even on a loopback-bound install (TIP_LOCAL_MODE=0),
+      # or you understand the guard in core/local_mode.py and are
+      # deliberately asserting Local Mode (TIP_LOCAL_MODE=1) -- doing
+      # the latter against a non-loopback BIND_HOST makes this app
+      # refuse to start, loudly, by design. See README.md "Local Mode /
+      # Network Mode" for the full design and unsupported topologies.
+      TIP_LOCAL_MODE: ${TIP_LOCAL_MODE:-auto}
+      # REAL BUG FIX (Windows Docker Desktop QA round 2, findings B1/B2):
+      # BIND_HOST/BIND_PORT were used ABOVE in the `ports:` line to decide
+      # what this container is actually published on, but were never
+      # forwarded into the container's own environment -- so the app
+      # process running inside the container could never see what it was
+      # really published on, and always fell back to its code-level
+      # defaults (127.0.0.1:8000) for Local Mode's loopback-safety
+      # decision (core/local_mode.py) and for computing which Origin to
+      # accept (app/main.py's ALLOWED_ORIGIN/ALLOWED_ORIGINS). Concretely,
+      # this meant: (B1) a custom BIND_PORT (e.g. 18000) made every
+      # protected browser action 403 because the app still computed its
+      # allowed Origin as port 8000; (B2 -- SECURITY-CRITICAL) setting
+      # BIND_HOST=0.0.0.0 to publish on the LAN did NOT turn off Local
+      # Mode's zero-token bypass inside the container, because the
+      # container never learned BIND_HOST was anything other than the
+      # 127.0.0.1 default -- i.e. a LAN-exposed instance could silently
+      # keep running with zero authentication. Forwarding the SAME
+      # ${BIND_HOST:-127.0.0.1}/${BIND_PORT:-8000} shell variables used in
+      # the `ports:` mapping above into the container's real environment
+      # makes the Compose-level publish and the in-container decision
+      # derive from one shared source, structurally unable to diverge --
+      # see core/local_mode.py's module docstring and
+      # tests/test_compose_config_rendering.py for the regression test
+      # that renders this exact file and asserts the two stay consistent
+      # for the default, custom-port, and BIND_HOST=0.0.0.0 cases.
+      BIND_HOST: ${BIND_HOST:-127.0.0.1}
+      BIND_PORT: ${BIND_PORT:-8000}
       # QA remediation D9: these were all already read from the
       # environment by the app (app/scheduler.py's _env_int calls,
       # live_uw_adapter.py's TIP_UW_MAX_CONCURRENT_REQUESTS), but were

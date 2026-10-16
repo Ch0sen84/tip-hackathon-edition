@@ -18,6 +18,7 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import { fileURLToPath } from "node:url";
+import { obtainAuthToken } from "./test_lib_auth.mjs";
 
 const BASE = process.argv[2] || "http://127.0.0.1:8899";
 
@@ -130,10 +131,14 @@ function check(name, fn) {
 // HTTP call, since this Node process and the backend are on the same
 // machine) and seed a minimal localStorage stub with it before any
 // mutating call runs.
+//
+// Windows Docker Desktop QA round 2 (finding T1): bootstrap-only token
+// acquisition fails under real Docker Desktop's port-publishing NAT --
+// see frontend/test_lib_auth.mjs's module docstring for the full root
+// cause and the pairing-code fallback this now uses (mirrors the
+// backend's own pre-existing D1 pairing mechanism, untouched here).
 async function seedAuthToken() {
-  const res = await fetch(`${BASE}/api/auth/bootstrap`);
-  if (!res.ok) throw new Error(`GET /api/auth/bootstrap -> HTTP ${res.status}`);
-  const { token } = await res.json();
+  const token = await obtainAuthToken(BASE);
   const store = { tip_auth_token: token };
   global.localStorage = {
     getItem: (k) => (k in store ? store[k] : null),

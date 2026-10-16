@@ -14,6 +14,7 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import { fileURLToPath } from "node:url";
+import { obtainAuthToken } from "./test_lib_auth.mjs";
 
 const BASE = process.argv[2] || "http://127.0.0.1:8899";
 
@@ -84,10 +85,11 @@ const lib = loadReal(
 // HTTP from this same machine) before any mutating call -- see
 // test_navigation.mjs's seedAuthToken() for the full rationale; this
 // harness's loadReal() strips the real bootstrap() IIFE the same way.
+// Windows Docker Desktop QA round 2 (finding T1): falls back to the
+// pairing code (TIP_TEST_PAIRING_CODE) when bootstrap fails under real
+// Docker Desktop's port-publishing NAT -- see test_lib_auth.mjs.
 async function seedAuthToken() {
-  const res = await fetch(`${BASE}/api/auth/bootstrap`);
-  if (!res.ok) throw new Error(`GET /api/auth/bootstrap -> HTTP ${res.status}`);
-  const { token } = await res.json();
+  const token = await obtainAuthToken(BASE);
   const store = { tip_auth_token: token };
   global.localStorage = {
     getItem: (k) => (k in store ? store[k] : null),
