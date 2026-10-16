@@ -195,6 +195,28 @@ class TestDetermineTransition:
         gates = make_gates(dark_pool_anomaly={"passed": True, "metrics": {"ratio": 5.0, "z_score": 1.0, "bootstrap": False}})
         state, rule = se.determine_transition(None, gates, 0, None, None)
         assert state == "NEW"
+        assert rule == "first_qualifying_gate"
+
+    def test_new_ticker_first_eval_with_zero_qualifying_gates_gets_honest_reason(self):
+        """ZERO-GATE LABEL FIX (Chad-approved, 2026-10-16): the confirmed
+        real-world defect -- tickers ARTNA/MSEX/CZWI (Windows QA) showing
+        ZERO qualifying gates on their FIRST evaluation (current_state is
+        None) were still labeled "first_qualifying_gate", a reason string
+        that falsely implied a gate had actually qualified. The lifecycle
+        state is still correctly NEW; only the reason string changes when
+        no gate passed on this first scan."""
+        gates = make_gates()  # nothing passing -- zero qualifying evidence
+        state, rule = se.determine_transition(None, gates, 0, None, None)
+        assert state == "NEW"
+        assert rule == "no_qualifying_evidence_yet"
+
+    def test_new_ticker_first_eval_with_a_qualifying_gate_is_unchanged(self):
+        """The real qualifying path on first evaluation must be completely
+        unchanged by the zero-gate label fix above."""
+        gates = make_gates(dark_pool_anomaly={"passed": True, "metrics": {"ratio": 5.0, "z_score": 4.0, "bootstrap": False}})
+        state, rule = se.determine_transition(None, gates, 0, None, None)
+        assert state == "NEW"
+        assert rule == "first_qualifying_gate"
 
     def test_new_to_building_on_single_signal_reeval(self):
         gates = make_gates(dark_pool_anomaly={"passed": True, "metrics": {"ratio": 2.0, "z_score": 1.0, "bootstrap": False}})

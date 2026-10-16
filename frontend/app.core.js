@@ -1837,6 +1837,7 @@ const STATE_GLOSS = {
 
 const TRANSITION_RULE_GLOSS = {
   first_qualifying_gate: "First time this ticker qualified.",
+  no_qualifying_evidence_yet: "No qualifying signal detected yet.",
   multi_signal_or_persistence_on_first_reeval: "Two+ signals fired together, or this is at least the 2nd qualifying day.",
   single_signal_reevaluated: "Still only one signal firing on re-evaluation.",
   no_gate_passed_while_building: "No gate passed this scan while still BUILDING.",

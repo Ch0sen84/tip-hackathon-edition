@@ -420,7 +420,20 @@ def determine_transition(current_state: Optional[str], gates: dict,
     confirmed = gates["multi_signal_confirmation"]["passed"]
 
     if current_state is None:
-        return ("NEW", "first_qualifying_gate")
+        # ZERO-GATE LABEL FIX (2026-10-16, Chad-approved, narrowly scoped):
+        # this branch used to return reason "first_qualifying_gate"
+        # unconditionally on a ticker's first evaluation, even when
+        # `any_gate_passed` is False -- i.e. zero gates passed this scan.
+        # The lifecycle STATE "NEW" was always correct here; only the
+        # REASON STRING falsely implied a qualifying gate had actually
+        # fired (confirmed real-world case: ARTNA/MSEX/CZWI on Windows QA
+        # showing zero qualifying gates yet labeled as if qualification
+        # had occurred). Reuses the already-computed `any_gate_passed`
+        # from above -- no recomputation, no new state, no threshold or
+        # confidence changes.
+        if any_gate_passed:
+            return ("NEW", "first_qualifying_gate")
+        return ("NEW", "no_qualifying_evidence_yet")
 
     if current_state == "NEW":
         if confirmed:
