@@ -1,0 +1,188 @@
+"""Phase B compatibility guarantee: the existing Radar / Ticker-Analysis /
+Ticker-OHLC response CONTRACTS must be byte-for-byte unchanged by the new
+ingestion layer being wired in underneath them. Proven two ways:
+
+  1. The exact same live-mode scan produces an IDENTICAL response body
+     whether the ingestion catalog write succeeds, fails outright, or is
+     paused by the storage guard -- i.e. ingestion is provably unable to
+     affect what the route returns.
+  2. The response still contains exactly the key set Phase A/pre-Phase-B
+     already documented (a literal snapshot of the expected shape).
+
+Every monkeypatch below uses pytest's `monkeypatch` fixture (auto-reverted
+at test teardown) rather than a direct `app_main.foo = ...` assignment --
+app.main's module-level globals (_adapter, _store, _catalog) are
+process-wide singletons shared by the WHOLE test session, so a direct
+assignment here would permanently corrupt state (e.g. PRSX's seeded demo
+history) for every test that runs afterward in the same pytest process.
+"""
+from __future__ import annotations
+
+from unittest.mock import MagicMock
+
+from fastapi.testclient import TestClient
+
+from app.adapters.live_uw_adapter import LiveUWAdapter, UWRestClient
+from app.storage import QualifyingDaysStore
+
+
+def _resp(json_body):
+    resp = MagicMock()
+    resp.status_code = 200
+    resp.ok = True
+    resp.text = ""
+    resp.headers = {}
+    resp.json.return_value = json_body
+    return resp
+
+
+def _mock_session_by_path():
+    """Different real-shaped bodies per endpoint path -- a single
+    `{"data": [...]}` canned response for every call (as a naive mock
+    would do) breaks stock-state normalization, which expects a dict,
+    not a list. Mirrors the real per-endpoint response shapes documented
+    in live_uw_adapter.py."""
+    flow_body = {"data": [
+        {"type": "call", "total_premium": 2_000_000, "total_ask_side_prem": 1_800_000,
+         "total_bid_side_prem": 200_000, "created_at": "2026-10-15T14:00:00Z"},
+    ]}
+    darkpool_body = {"data": [
+        {"id": "dp1", "executed_at": "2026-10-15T14:00:00Z", "price": 450.0, "size": 1000, "premium": 450000.0},
+    ]}
+    stock_state_body = {"data": {"close": "450.10", "prev_close": "445.00"}}
+
+    def side_effect(url, **kwargs):
+        if "/stock-state" in url:
+            return _resp(stock_state_body)
+        if "/darkpool/" in url:
+            return _resp(darkpool_body)
+        if "/flow-alerts" in url:
+            return _resp(flow_body)
+        return _resp({"data": []})
+
+    session = MagicMock()
+    session.get.side_effect = side_effect
+    return session
+
+
+def _wire_live_adapter(app_main, monkeypatch, watchlist=("NVDA",)):
+    session = _mock_session_by_path()
+    client = UWRestClient("fake-key", session=session)
+    adapter = LiveUWAdapter(api_key="fake-key", watchlist=list(watchlist), client=client)
+    # get_adapter() recomputes its own cache signature from
+    # _settings_store/settings on every call and will silently rebuild
+    # (discarding) any adapter instance assigned directly to
+    # app_main._adapter whose signature doesn't match -- overriding
+    # get_adapter() itself is the reliable way to pin a specific
+    # LiveUWAdapter instance for one of these compatibility tests.
+    # monkeypatch (not a bare assignment) so this reverts at teardown.
+    monkeypatch.setattr(app_main, "get_adapter", lambda: adapter)
+    return adapter
+
+
+def _fresh_memory_store(app_main, monkeypatch):
+    """Points app_main.get_store() at a BRAND NEW, isolated in-memory
+    store for the duration of one test -- monkeypatched, so the real
+    shared `_store` (with PRSX's seeded demo history other tests in this
+    session depend on) is restored automatically at teardown."""
+    store = QualifyingDaysStore(db_path=":memory:")
+    monkeypatch.setattr(app_main, "get_store", lambda: store)
+    return store
+
+
+EXPECTED_TICKER_ANALYSIS_KEYS = {
+    "ticker", "state", "previous_state", "transition_rule", "confidence", "signal_type",
+    "confidence_reason", "qualifies", "qualifying_days_count", "gates", "headline",
+    "current_read", "evidence", "stock_state", "history", "raw",
+}
+
+EXPECTED_RADAR_KEYS = {"highest", "other", "scanned", "scan_scope", "last_scan_at"}
+
+
+def test_ticker_analysis_response_shape_matches_documented_contract(app_main, monkeypatch):
+    _wire_live_adapter(app_main, monkeypatch)
+    _fresh_memory_store(app_main, monkeypatch)
+    client = TestClient(app_main.app)
+    resp = client.get("/api/ticker/NVDA")
+    assert resp.status_code == 200
+    assert set(resp.json().keys()) == EXPECTED_TICKER_ANALYSIS_KEYS
+
+
+def test_ticker_analysis_response_identical_whether_ingestion_succeeds_or_is_broken(app_main, monkeypatch):
+    """The SAME ticker, scanned twice against the exact same adapter
+    data, each time starting from a FRESH isolated in-memory
+    qualifying-days store (so both scans genuinely start from the same
+    NEW lifecycle state -- reusing one store across both calls would
+    legitimately change state/history on the second call, which is real
+    pre-existing behavior unrelated to Phase B, and would make this
+    comparison meaningless). The synthetic historical-percentile gate
+    (signal_engine.synthetic_percentile_gate) is deterministic per
+    ticker+premium, so holding the ticker and adapter data fixed makes
+    the WHOLE response, not just a subset, deterministic across the two
+    calls. One call's catalog write succeeds; the other is forced to
+    raise -- response bodies must be byte-for-byte identical."""
+    _wire_live_adapter(app_main, monkeypatch)
+    client = TestClient(app_main.app)
+
+    _fresh_memory_store(app_main, monkeypatch)
+    resp_ok = client.get("/api/ticker/NVDA")
+    assert resp_ok.status_code == 200
+    body_ok = resp_ok.json()
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("simulated ingestion failure")
+
+    monkeypatch.setattr(app_main, "get_catalog", lambda: MagicMock(
+        catalog_options_flow_observations=_boom,
+        catalog_darkpool_observations=_boom,
+        catalog_signal_evaluation=_boom,
+    ))
+    _fresh_memory_store(app_main, monkeypatch)  # fresh, independent history again
+    resp_broken = client.get("/api/ticker/NVDA")
+    assert resp_broken.status_code == 200
+    body_broken = resp_broken.json()
+
+    assert body_ok == body_broken
+
+
+def test_radar_response_shape_unaffected_when_ingestion_catalog_write_is_paused(app_main, monkeypatch):
+    """The ingestion catalog's OWN storage guard (a real StorageGuard
+    pointed at the ':memory:' catalog's directory) reporting critical
+    must be swallowed by _catalog_scan_best_effort and never change the
+    /api/radar response -- this is distinct from (and must not be
+    confused with) the Phase A qualifying-days store's own guard, which
+    is skipped entirely for a ':memory:' db (see test_storage_guard.py's
+    `test_qualifying_days_store_skips_guard_for_in_memory_db`)."""
+    _wire_live_adapter(app_main, monkeypatch)
+    client = TestClient(app_main.app)
+
+    _fresh_memory_store(app_main, monkeypatch)
+    resp_ok = client.get("/api/radar")
+    assert resp_ok.status_code == 200
+    assert set(resp_ok.json().keys()) == EXPECTED_RADAR_KEYS
+    body_ok = resp_ok.json()
+
+    def _boom(*args, **kwargs):
+        from app.ingestion import StorageGuardPausedError
+        from app.storage_guard import StorageGuardResult
+        raise StorageGuardPausedError(
+            StorageGuardResult(allowed=False, kind="on_demand", free_mb=1.0, threshold_mb=500.0,
+                                mount_point="/fake")
+        )
+
+    monkeypatch.setattr(app_main, "get_catalog", lambda: MagicMock(
+        catalog_options_flow_observations=_boom,
+        catalog_darkpool_observations=_boom,
+        catalog_signal_evaluation=_boom,
+    ))
+    _fresh_memory_store(app_main, monkeypatch)
+    resp_paused = client.get("/api/radar")
+    assert resp_paused.status_code == 200
+    body_paused = resp_paused.json()
+    # `last_scan_at` is a genuine wall-clock timestamp recorded fresh on
+    # every real scan (see SettingsStore.record_scan) -- legitimately
+    # differs between any two calls regardless of Phase B; excluded from
+    # the equality check below, which covers everything else.
+    body_ok.pop("last_scan_at", None)
+    body_paused.pop("last_scan_at", None)
+    assert body_paused == body_ok

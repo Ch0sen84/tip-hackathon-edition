@@ -109,6 +109,27 @@ def test_investigate_rejected_without_auth(app_main):
     assert resp.status_code == 401
 
 
+# --- Phase B diagnostics route: new, but must follow the SAME rule as
+# every other sensitive route from Phase A -- behind require_auth, never
+# a new unauthenticated endpoint. ---------------------------------------
+
+
+def test_uw_request_diagnostics_rejected_without_auth(app_main):
+    client = _client_without_auth(app_main)
+    resp = client.get("/api/diagnostics/uw-requests")
+    assert resp.status_code == 401
+
+
+def test_uw_request_diagnostics_succeeds_with_valid_token(app_main):
+    client = TestClient(app_main.app)
+    resp = client.get("/api/diagnostics/uw-requests")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert "by_path" in body
+    # Never leaks a credential -- just counts/latencies/outcomes.
+    assert FAKE_UW_KEY not in str(body)
+
+
 def test_investigate_succeeds_with_valid_token_in_demo_mode(app_main):
     """Demo mode never calls a real LLM/UW endpoint (see
     get_simulated_transcript) -- safe to exercise end-to-end with a valid

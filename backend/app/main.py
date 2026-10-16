@@ -55,6 +55,7 @@ from .auth import TOKEN_HEADER, AuthTokenStore, default_token_path, is_loopback
 from .config import settings
 from .core import scan_service, tip_evidence
 from .core.candles import build_markers
+from .ingestion import IngestionCatalog, StorageGuardPausedError as IngestionStorageGuardPausedError
 from .settings_store import MAX_WATCHLIST_SIZE, SettingsStore, last4
 from .storage import QualifyingDaysStore, StorageGuardPausedError
 from . import update_check as _update_check
@@ -97,6 +98,7 @@ app.add_middleware(
 _adapter: Optional[UWDataAdapter] = None
 _adapter_sig: Optional[tuple] = None
 _store: Optional[QualifyingDaysStore] = None
+_catalog: Optional[IngestionCatalog] = None
 _settings_store = SettingsStore(os.environ.get("TIP_SETTINGS_PATH", "./data/settings.json"))
 _last_uw_test_result: Optional[str] = None  # in-memory only, informational; never persisted
 
@@ -193,6 +195,19 @@ def get_store() -> QualifyingDaysStore:
     return _store
 
 
+def get_catalog() -> IngestionCatalog:
+    """Phase B: the shared historical-catalog writer -- SAME db file as
+    get_store()'s QualifyingDaysStore (settings.db_path), so the new
+    catalog tables live in the one existing `tip-data` Docker volume
+    file, never a second database. Lazily constructed exactly like
+    _store/_adapter above; tests reset this via conftest's app_main
+    fixture the same way."""
+    global _catalog
+    if _catalog is None:
+        _catalog = IngestionCatalog(settings.db_path)
+    return _catalog
+
+
 def _price_move_pct(stock_state: Optional[dict]) -> Optional[float]:
     if not stock_state or stock_state.get("unavailable"):
         return None
@@ -200,6 +215,32 @@ def _price_move_pct(stock_state: Optional[dict]) -> Optional[float]:
         if stock_state.get(key) is not None:
             return float(stock_state[key])
     return None
+
+
+def _catalog_scan_best_effort(adapter: UWDataAdapter, ticker: str, flow_alerts: list,
+                               darkpool_trades: list, result: dict) -> None:
+    """Phase B: persists this scan's raw inputs + evaluation into the
+    historical catalog tables -- PURELY an added persistence layer
+    underneath the existing live-fetch logic above. This function's
+    success/failure can NEVER change what _run_scan returns to its
+    caller (every exception is swallowed here, not propagated) --
+    see app/ingestion.py's module docstring for why that invariant is
+    load-bearing for this phase's "observable response contract must
+    not change" requirement. Only ever called for a LiveUWAdapter scan;
+    the synthetic/demo adapter's fixture data is deliberately never
+    cataloged (it isn't real upstream data, and Phase A's seed_demo_
+    history already simulates multi-day history for it)."""
+    if not isinstance(adapter, LiveUWAdapter):
+        return
+    try:
+        catalog = get_catalog()
+        n_flow = catalog.catalog_options_flow_observations(ticker, flow_alerts)
+        n_dp = catalog.catalog_darkpool_observations(ticker, darkpool_trades)
+        catalog.catalog_signal_evaluation(ticker, result)
+    except Exception:  # noqa: BLE001 -- see docstring: never propagate (incl. IngestionStorageGuardPausedError)
+        logging.getLogger(__name__).info(
+            "Phase B ingestion catalog write skipped for %s (non-fatal, response unaffected)", ticker
+        )
 
 
 def _run_scan(adapter: UWDataAdapter, store: QualifyingDaysStore, ticker: str) -> dict:
@@ -229,6 +270,10 @@ def _run_scan(adapter: UWDataAdapter, store: QualifyingDaysStore, ticker: str) -
         raise HTTPException(status_code=507, detail=str(e)) from e
     result["stock_state"] = stock_state
     result["raw"] = {"flow_alerts": flow_alerts, "darkpool_trades": darkpool_trades}
+    # Phase B: added persistence layer, never changes `result` above --
+    # this call happens AFTER result is fully built and must never be
+    # allowed to alter it (see _catalog_scan_best_effort's docstring).
+    _catalog_scan_best_effort(adapter, ticker, flow_alerts, darkpool_trades, result)
     return result
 
 
@@ -585,6 +630,29 @@ def test_mcp():
     return {**result, "proves_ai_synthesis_works": False}
 
 
+@app.get("/api/diagnostics/uw-requests", dependencies=[Depends(require_auth)])
+def uw_request_diagnostics():
+    """Phase B: READ-ONLY UW request-handling telemetry (per-endpoint
+    counts/success/retried/failed/avg-latency/outcome breakdown) --
+    behind require_auth like every other sensitive route, never a new
+    unauthenticated endpoint. Exposes zero credentials (no API key, no
+    header values) -- counters and latencies only. Empty/zero-valued
+    when running in demo mode (SyntheticDataAdapter has no HTTP client
+    at all) or before any live UW call has happened yet this process."""
+    adapter = get_adapter()
+    client = getattr(adapter, "client", None)
+    telemetry = getattr(client, "telemetry", None)
+    if telemetry is None:
+        return {"mode": getattr(adapter, "mode", "unknown"), "by_path": {},
+                "max_concurrent_requests": None, "note": "No live UW HTTP client in this mode."}
+    return {
+        "mode": adapter.mode,
+        "by_path": telemetry.summary(),
+        "max_concurrent_requests": client.max_concurrent_requests,
+        "max_retries": client.max_retries,
+    }
+
+
 @app.get("/api/settings/version")
 def get_version():
     """Build-time version/commit info (see version.py docstring for why
@@ -928,6 +996,23 @@ def ticker_ohlc(ticker: str, timeframe: str = "1d", limit: int = 180, range: Opt
     darkpool_trades = adapter.get_darkpool_trades(ticker)
     markers = build_markers(flow_alerts, darkpool_trades)
     candles = ohlc.get("candles", [])
+    # Phase B: added persistence layer only -- catalogs the SAME
+    # already-session-classified/delta-corrected candles this route is
+    # about to return, plus this call's flow/dark-pool inputs. Never
+    # changes `candles`/`markers`/anything else returned below (see
+    # _catalog_scan_best_effort's docstring for the invariant this
+    # mirrors; failures here are swallowed, never surfaced to the
+    # caller).
+    if isinstance(adapter, LiveUWAdapter):
+        try:
+            catalog = get_catalog()
+            catalog.catalog_price_bars(ticker, timeframe, candles)
+            catalog.catalog_options_flow_observations(ticker, flow_alerts)
+            catalog.catalog_darkpool_observations(ticker, darkpool_trades)
+        except Exception:  # noqa: BLE001 -- never propagate, see module docstring
+            logging.getLogger(__name__).info(
+                "Phase B ingestion catalog write skipped for %s OHLC (non-fatal, response unaffected)", ticker
+            )
     # Phase B (2026-10-14) honest coverage disclosure -- production-
     # inspired (its own range_fully_satisfied/available_span_days
     # pattern): never claim a range is fully covered when UW simply
