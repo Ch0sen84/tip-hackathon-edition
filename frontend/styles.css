@@ -308,8 +308,18 @@ nav#nav .ic { font-size: 13px; width: 16px; text-align: center; opacity: .7; }
    flex-wrap layout fixes this without touching .candidate-row itself,
    so Market Radar's own freshness rows (still plain .candidate-row,
    4 real columns) are completely unaffected. */
-.market-wide-row { display: flex; flex-direction: column; gap: 4px; }
-.market-wide-row-main { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.market-wide-row { display: flex; flex-direction: column; gap: 3px; }
+/* UX remediation item 4 (2026-10-16): tighter, strictly left-aligned,
+   more information-dense row to better match production TIP's own
+   row convention (read read-only from ~/.hermes/scripts/uw/webapp/ for
+   reference per this item's instructions) -- a density/alignment
+   tweak only, not a redesign: same fields, same classes, same flex-wrap
+   fallback for narrow viewports (unchanged from the prior round's real
+   mobile-width CDP fix), just tighter gap/padding and an explicit
+   text-align:left so nothing can inherit a centered/justified default
+   from an ancestor. */
+.market-wide-row-main { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-start; gap: 8px; text-align: left; }
+.market-wide-row-main > * { text-align: left; }
 .freshness-badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; text-align: center; }
 .freshness-badge.freshness-current { background: #dcfce7; color: #166534; }
 .freshness-badge.freshness-stale { background: #fef3c7; color: #92400e; }

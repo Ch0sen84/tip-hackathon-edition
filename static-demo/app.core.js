@@ -14,7 +14,20 @@
 // library. navigateToTicker() is the one function both adapters call from
 // a Market Radar "Investigate" click so the user never has to reselect a
 // ticker they already clicked on.
-const TIP_STATE = { currentTicker: null, currentView: "radar" };
+// UX remediation item 4 (2026-10-16): `lastTicker` is a SEPARATE,
+// deliberately-never-cleared-by-plain-navigation memory of "the most
+// recent real ticker the user was looking at", distinct from
+// `currentTicker` (which means "the ticker relevant to the CURRENT
+// view" and is legitimately null on every non-ticker view). Real bug
+// this fixes: navigateToView() below used to null out `currentTicker`
+// the moment the user navigated to any other view, so clicking the
+// "Ticker Analysis" NAV ITEM again afterward (as opposed to browser
+// Back/Forward, which replays the real stored history entry and
+// therefore already worked) landed on a blank "select a ticker"
+// state instead of the ticker the user had actually been analyzing.
+// Only an explicit mode-invalidation (clearTickerView, when the old
+// ticker may not even exist under the new adapter) clears this.
+const TIP_STATE = { currentTicker: null, lastTicker: null, currentView: "radar" };
 
 // --- Phase A: auth setup banner (pure render, no fetch) --------------------
 //
@@ -156,6 +169,7 @@ function buildNavHash(view, ticker) {
 function pushNav(view, ticker) {
   TIP_STATE.currentView = view;
   TIP_STATE.currentTicker = ticker || null;
+  if (ticker) TIP_STATE.lastTicker = ticker; // see TIP_STATE's own comment above
   try {
     history.pushState({ view, ticker: ticker || null }, "", buildNavHash(view, ticker));
   } catch (e) {
@@ -166,6 +180,7 @@ function pushNav(view, ticker) {
 function replaceNav(view, ticker) {
   TIP_STATE.currentView = view;
   TIP_STATE.currentTicker = ticker || null;
+  if (ticker) TIP_STATE.lastTicker = ticker; // see TIP_STATE's own comment above
   try {
     history.replaceState({ view, ticker: ticker || null }, "", buildNavHash(view, ticker));
   } catch (e) {
@@ -177,9 +192,21 @@ function replaceNav(view, ticker) {
 // Settings / About). Pushes a new entry by default; pass push:false for
 // the mode-switch-invalidation case, which must REPLACE the current entry
 // rather than add a new one.
+//
+// UX remediation item 4 (2026-10-16): falls back to TIP_STATE.lastTicker
+// when navigating TO "ticker" with nothing more specific already in
+// play (currentTicker is null here on every real-world call to this
+// branch, since it was just nulled by whatever navigateToView call took
+// the user away from Ticker Analysis in the first place) -- this is
+// what makes clicking the "Ticker Analysis" nav item again actually
+// return to the ticker the user was looking at, instead of a blank
+// "select a ticker" state. Browser Back/Forward never hit this path at
+// all (popstate restores the exact stored {view, ticker} from history
+// directly via applyNavState), so this fix is scoped to the nav-item-
+// click case specifically, which is the gap that was actually missing.
 function navigateToView(view, opts = {}) {
   const { push = true } = opts;
-  const ticker = view === "ticker" ? TIP_STATE.currentTicker : null;
+  const ticker = view === "ticker" ? (TIP_STATE.currentTicker || TIP_STATE.lastTicker) : null;
   if (push) pushNav(view, ticker); else replaceNav(view, ticker);
   switchView(view);
 }
@@ -312,6 +339,13 @@ function wireHistoryHandling() {
 // one shared, byte-identical file.
 function clearTickerView() {
   TIP_STATE.currentTicker = null;
+  // UX remediation item 4 (2026-10-16): this explicit invalidation path
+  // (a Demo<->Live mode switch) is the one case that SHOULD also wipe
+  // the "return to this ticker" memory -- the old ticker may not even
+  // exist under the new adapter, so there is nothing honest to return
+  // to. Plain navigation to another view must never reach this
+  // function at all (see navigateToView's own comment).
+  TIP_STATE.lastTicker = null;
   setTickerComboValue("");
   const detailEl = document.getElementById("tickerDetail");
   if (detailEl) detailEl.innerHTML = `<div class="empty">Select a ticker to analyze.</div>`;
@@ -634,26 +668,18 @@ function renderSchedulerControls(status) {
   const pauseNote = status.pause_reason
     ? `<div class="muted" style="color:#b45309">Paused: ${esc(status.pause_reason)}</div>`
     : "";
-  // UX round (2026-10-16), item 5: surfaces the EXISTING backend
-  // POST /api/scheduler/run-once action (built in the prior QA-
-  // remediation round) -- never a new scheduling framework, this is
-  // purely frontend wiring against an already-tested endpoint. Says
-  // plainly what a one-time run will do using the CURRENTLY SELECTED
-  // mode (never implies this enables recurring scheduling), and shows
-  // the real configured top-N so it's never a guess. `runningNow`
-  // reflects the backend's own lease/lock (status.cycle_in_progress) --
-  // the button is disabled whenever a cycle (scheduled OR run-once) is
-  // already executing, so a duplicate click can't even be attempted,
-  // and the backend's 409 lease rejection is still handled cleanly by
-  // runSchedulerOnce() (app.live.js) for the rare race where a cycle
-  // starts between render and click.
+  // UX remediation item 4 (2026-10-16): the old "Run Once now" button
+  // (disabled whenever mode === "disabled") is REMOVED entirely here --
+  // it was a now-contradictory UI remnant left over from before the
+  // Run Once decoupling round: a user staring at a disabled "Run Once
+  // now" button right next to two perfectly enabled "Discover Once" /
+  // "Discover & Evaluate Once" buttons that do the equivalent job while
+  // Disabled looked like a bug, not a deliberate second control. The
+  // decoupled buttons (renderRunOnceDepthActions below) are now the
+  // ONLY one-time-run UI; `runningNow` is still needed so those buttons
+  // correctly disable while a cycle is in progress.
   const runningNow = !!status.cycle_in_progress;
   const topN = status.top_n_configured ?? status.top_n ?? "n/a";
-  const runOnceActionCopy = {
-    disabled: "Run Once will do nothing -- the scheduler is Disabled, so a one-time run has no action to perform. Switch to Dry Run or Enabled first.",
-    dry_run: `Run Once will discover candidates across the broader market right now, rank them, and stop -- no per-ticker evaluation, no AI, never enables recurring scheduling.`,
-    enabled: `Run Once will discover candidates right now and evaluate the top ${esc(String(topN))} ranked selections -- once, then stop. Never enables recurring scheduling, never triggers a paid AI investigation.`,
-  }[status.mode] || "";
   return `
     <div class="radar-mode-toggle" id="schedulerModeToggle">${buttons}</div>
     <div class="muted" style="margin-top:6px">${esc(SCHEDULER_MODE_LABELS[status.mode] || status.mode)}</div>
@@ -669,13 +695,6 @@ function renderSchedulerControls(status) {
       Top-N configured: ${esc(String(topN))}
     </div>
     ${pauseNote}
-    <div class="settings-row" style="margin-top:8px;align-items:flex-start">
-      <button class="btn" id="schedulerRunOnceBtn" ${runningNow || status.mode === "disabled" ? "disabled" : ""}>${
-        runningNow ? "Run in progress..." : "Run Once now"
-      }</button>
-      <span class="muted" style="font-size:12px;max-width:520px">${runOnceActionCopy}</span>
-    </div>
-    <div id="schedulerRunOnceStatus" class="muted" style="font-size:12px;margin-top:4px"></div>
     ${renderRunOnceDepthActions(status, runningNow, topN)}
   `;
 }
@@ -794,6 +813,18 @@ function renderMarketWideCandidateRow(candidate) {
   // wireInvestigateButtons below), so it opens Ticker Analysis through
   // the identical, already-tested URL-backed ticker-context mechanism --
   // never a second, parallel navigation path invented for this view.
+  //
+  // UX remediation item 4 (2026-10-16): a market-wide/index row (e.g.
+  // SPXW, the same real is_index field renderDiscoveryCandidateRow
+  // already checks -- never a second, independently-guessed detection)
+  // cannot be sent through the per-ticker Ticker Analysis pipeline at
+  // all, so "View Details" must not be offered for it -- matches the
+  // discovery table's existing "Evaluate not supported (index/
+  // derivative)" treatment rather than inventing a second convention.
+  const isIndexRow = !!(candidate.raw && candidate.raw.is_index);
+  const viewDetailsAction = isIndexRow
+    ? `<span class="muted" title="Index/derivative instruments are not supported by the per-ticker evaluation pipeline yet">Not supported (index/derivative)</span>`
+    : `<button class="btn-link btn-investigate" data-investigate-ticker="${esc(candidate.ticker)}" aria-label="View Details for ${esc(candidate.ticker)} in Ticker Analysis">View Details &rarr;</button>`;
   return `
     <div class="candidate-row market-wide-row" data-ticker="${esc(candidate.ticker)}">
       <div class="market-wide-row-main">
@@ -801,7 +832,7 @@ function renderMarketWideCandidateRow(candidate) {
         <span class="${badgeClass}">${esc(FRESHNESS_LABELS[candidate.freshness] || candidate.freshness)}</span>
         <span class="muted">${evalState}</span>
         <span class="muted" style="font-size:11px" title="${esc(typeof formatTimestampET === "function" ? formatTimestampET(retrievedAt) : "")}">${esc(ageNote)}</span>
-        <button class="btn-link btn-investigate" data-investigate-ticker="${esc(candidate.ticker)}" aria-label="View Details for ${esc(candidate.ticker)} in Ticker Analysis">View Details &rarr;</button>
+        ${viewDetailsAction}
       </div>
       ${renderWhySurfacedBlock(candidate)}
     </div>
@@ -1902,10 +1933,17 @@ const EVIDENCE_PAGE_SIZE = 20;
 
 // REAL BUG FIX (2026-10-15, Chad's live-mode item #11): negative amounts
 // previously rendered as "$-78.7M" (minus sign stuck inside the dollar
-// sign) instead of standard "-$78.7M" (ASCII minus, since this file
-// already uses plain ASCII elsewhere for copy/paste-ability, e.g. in the
-// evidence table) -- the sign now applies to the whole formatted string,
-// never inside the "$".
+// sign) instead of standard "-$78.7M" -- the sign now applies to the
+// whole formatted string, never inside the "$".
+//
+// UX remediation item 4 (2026-10-16): that ASCII hyphen-minus ("-") still
+// reads ambiguously next to a currency symbol (easily mistaken for a
+// hyphen/dash rather than a minus, and some terminals/fonts render it
+// shorter than a true minus glyph) -- switched to the proper Unicode
+// MINUS SIGN (U+2212, "\u2212") per Chad's explicit requirement
+// ("-$89.2M" -> "\u2212$89.2M"). Still plain-text/copy-paste-safe (a
+// normal Unicode codepoint, not an image/icon), just the typographically
+// correct minus glyph instead of a bare hyphen standing in for one.
 function fmtMoney(v) {
   if (v == null) return null;
   const neg = v < 0;
@@ -1914,7 +1952,7 @@ function fmtMoney(v) {
   if (abs >= 1e6) body = `$${(abs / 1e6).toFixed(1)}M`;
   else if (abs >= 1e3) body = `$${(abs / 1e3).toFixed(0)}K`;
   else body = `$${Math.round(abs)}`;
-  return neg ? `-${body}` : body;
+  return neg ? `\u2212${body}` : body;
 }
 
 // REAL BUG FIX (2026-10-15, Chad's live-mode item #12): display-only

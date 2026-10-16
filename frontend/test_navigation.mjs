@@ -214,6 +214,25 @@ async function main() {
     assert.equal(app.TIP_STATE.currentView, "settings");
   });
 
+  console.log(`\n=== UX remediation item 4: nav-item click back to Ticker Analysis preserves the ticker ===`);
+  // The real gap this item fixes: NOT Back/Forward (already proven
+  // above, since that replays the real stored history entry) -- clicking
+  // the "Ticker Analysis" NAV ITEM again after navigating away via OTHER
+  // nav-item clicks, which is a distinct code path (navigateToView with
+  // no explicit ticker argument).
+  app.navigateToView("radar");
+  await app.navigateToTicker("NADA", app.loadTickerDetail);
+  app.navigateToView("settings"); // away via nav-item click, not Back
+  check("navigating away via a nav-item click nulls currentTicker (view-scoped state, expected)", () => {
+    assert.equal(app.TIP_STATE.currentTicker, null);
+  });
+  app.navigateToView("radar"); // another unrelated view in between
+  app.navigateToView("ticker"); // nav-item click back to Ticker Analysis, no explicit ticker
+  check("clicking the Ticker Analysis nav item again restores the real last ticker (NADA), not a blank state", () => {
+    assert.equal(app.TIP_STATE.currentTicker, "NADA");
+    assert.ok(global.location.hash.includes("ticker=NADA"), global.location.hash);
+  });
+
   console.log(`\n=== Refresh preserves current view + ticker ===`);
   // "Refresh" = re-running applyNavState from the CURRENT location.hash,
   // exactly what bootstrap() does on a real page load -- it must NOT

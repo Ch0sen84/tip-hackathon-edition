@@ -184,6 +184,18 @@ def test_ticker_analysis_response_identical_whether_ingestion_succeeds_or_is_bro
     assert resp_broken.status_code == 200
     body_broken = resp_broken.json()
 
+    # UX remediation item 4 (2026-10-16): `last_evaluated_at` is now a
+    # genuine wall-clock timestamp captured fresh on every real live
+    # fetch (fixing the "Current" + "Not yet evaluated" contradiction
+    # bug -- see _ticker_analysis_impl's own comment) -- legitimately
+    # differs by a few microseconds between these two separate POST
+    # calls, same class of exclusion as `last_scan_at` elsewhere in this
+    # file. Deliberately NOT read back from the catalog (which would
+    # reintroduce exactly the write-failure-changes-the-response
+    # coupling this test exists to forbid) -- excluded here, not
+    # asserted equal, by design.
+    body_ok.pop("last_evaluated_at", None)
+    body_broken.pop("last_evaluated_at", None)
     assert body_ok == body_broken
 
 

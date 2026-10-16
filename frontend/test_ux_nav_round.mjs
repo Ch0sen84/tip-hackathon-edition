@@ -143,25 +143,26 @@ check("each mode's label is understandable without reading docs (no raw backend 
   const html = lib.renderSchedulerControls({ mode: "dry_run", top_n: 5, freshness_window_s: 1200 });
   assert.match(html, /automatically discovers candidates across the broader market on a schedule/);
 });
-check("Run Once button shows the REAL configured top-N for Enabled mode, never a guess", () => {
+check("Run Once (decoupled) button shows the REAL configured top-N for Discover & Evaluate Once, never a guess", () => {
   const html = lib.renderSchedulerControls({ mode: "enabled", top_n: 7, freshness_window_s: 1200 });
-  assert.match(html, /top 7 ranked selections/);
+  assert.match(html, /top <strong>7<\/strong>/);
   assert.match(html, /Top-N configured: 7/);
 });
-check("Run Once is disabled while a cycle is already in progress (surfaces the backend lease, never lets a duplicate click fire)", () => {
+check("the decoupled one-time action buttons are disabled while a cycle is already in progress (surfaces the backend lease, never lets a duplicate click fire)", () => {
   const html = lib.renderSchedulerControls({ mode: "enabled", top_n: 5, freshness_window_s: 1200, cycle_in_progress: true });
-  assert.match(html, /id="schedulerRunOnceBtn" disabled/);
-  assert.match(html, /Run in progress/);
+  assert.match(html, /id="discoverOnceBtn"[^>]*disabled/);
+  assert.match(html, /id="discoverEvaluateOnceBtn"[^>]*disabled/);
 });
-check("Run Once is disabled (with an honest reason) when the scheduler is Disabled", () => {
+check("UX remediation item 4: the old, now-contradictory 'Run Once now' legacy button/status is gone entirely", () => {
   const html = lib.renderSchedulerControls({ mode: "disabled", top_n: 5, freshness_window_s: 1200 });
-  assert.match(html, /id="schedulerRunOnceBtn" disabled/);
-  assert.match(html, /has no action to perform/);
-});
-check("Run Once is enabled and ready in dry_run/enabled modes with no cycle in progress", () => {
-  const html = lib.renderSchedulerControls({ mode: "dry_run", top_n: 5, freshness_window_s: 1200, cycle_in_progress: false });
-  assert.ok(!/id="schedulerRunOnceBtn" disabled/.test(html));
-  assert.match(html, /Run Once now/);
+  assert.doesNotMatch(html, /id="schedulerRunOnceBtn"/);
+  assert.doesNotMatch(html, /id="schedulerRunOnceStatus"/);
+  assert.doesNotMatch(html, /Run Once now/);
+  // The decoupled actions remain available (and enabled) even while
+  // the recurring mode is Disabled -- that's the whole point of the
+  // decoupling this item's fix preserves.
+  assert.doesNotMatch(html, /id="discoverOnceBtn"[^>]*disabled/);
+  assert.doesNotMatch(html, /id="discoverEvaluateOnceBtn"[^>]*disabled/);
 });
 check("copy explicitly distinguishes this scheduler (broader market) from the separate watchlist Refresh Data action", () => {
   const html = lib.renderSchedulerControls({ mode: "enabled", top_n: 5, freshness_window_s: 1200 });

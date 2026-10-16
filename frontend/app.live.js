@@ -1084,9 +1084,10 @@ async function loadMarketWideRadar() {
     if (controlsEl) {
       controlsEl.innerHTML = renderSchedulerControls(status);
       wireSchedulerModeToggle();
-      const runOnceBtn = document.getElementById("schedulerRunOnceBtn");
-      if (runOnceBtn) runOnceBtn.addEventListener("click", runSchedulerOnce);
-      // Final remediation round: the two decoupled one-time actions --
+      // UX remediation item 4 (2026-10-16): the legacy "Run Once now"
+      // button/wiring (schedulerRunOnceBtn/runSchedulerOnce) is removed
+      // -- renderSchedulerControls() no longer renders that element at
+      // all, see its docstring. The two decoupled one-time actions --
       // same wiring pattern as the legacy button above (fresh element
       // lookup every render, since controlsEl.innerHTML was just
       // replaced), each posting its own fixed `depth` value.
@@ -1129,41 +1130,14 @@ function wireSchedulerModeToggle() {
   });
 }
 
-// UX round (2026-10-16), item 5: wires the EXISTING, already-tested
-// POST /api/scheduler/run-once backend action to the "Run Once now"
-// button rendered by renderSchedulerControls() above -- real loading/
-// success/failure feedback, the backend's lease/lock 409 rejection
-// surfaced cleanly (never a silent failure or a generic error), and a
-// full reload of Market-wide Radar afterward so the new evaluations
-// (if any) show up immediately. Never triggers an AI investigation,
-// never flips the scheduler into a recurring mode, always goes through
-// the same require_auth path (apiPost) every other mutating action uses.
-async function runSchedulerOnce() {
-  const btn = document.getElementById("schedulerRunOnceBtn");
-  const statusEl = document.getElementById("schedulerRunOnceStatus");
-  if (!btn || btn.disabled) return; // disabled covers both "already running" and mode===disabled
-  btn.disabled = true;
-  const originalLabel = btn.textContent;
-  btn.textContent = "Running...";
-  if (statusEl) statusEl.textContent = "Running a one-time scan now...";
-  try {
-    const result = await apiPost("/api/scheduler/run-once", {});
-    const n = result.candidates_evaluated ?? result.candidates_discovered ?? result.discovered ?? null;
-    if (statusEl) {
-      statusEl.textContent = n != null
-        ? `Run complete -- ${n} candidate(s) processed. Reloading...`
-        : "Run complete. Reloading...";
-    }
-    await loadMarketWideRadar(); // re-renders schedulerControls fresh from /api/scheduler/status too
-  } catch (err) {
-    // The shared lease/lock rejection (409, "already in progress") and
-    // any other failure both land here with a real, specific message --
-    // never a silent no-op on a second click.
-    btn.disabled = false;
-    btn.textContent = originalLabel;
-    if (statusEl) statusEl.textContent = `Run Once failed: ${err.message}`;
-  }
-}
+// UX remediation item 4 (2026-10-16): the legacy runSchedulerOnce()
+// function (which wired the now-removed "Run Once now" button to
+// POST /api/scheduler/run-once with no explicit `depth`) is removed
+// entirely along with that button -- runOneTimeDepthAction() below is
+// now the ONLY one-time-run action, calling the SAME backend route
+// with an explicit depth. The backend route itself is unchanged (it
+// still accepts a request with no `depth` for any other caller) --
+// only this frontend's own now-orphaned legacy caller is removed.
 
 // Final remediation round (2026-10-16): client-side guard for the two
 // decoupled one-time actions -- belt-and-suspenders alongside the

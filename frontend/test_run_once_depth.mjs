@@ -44,18 +44,23 @@ console.log("\n=== renderSchedulerControls: the two decoupled one-time actions =
     assert.match(html, /id="discoverOnceBtn"[^>]*data-depth="discovery_only"/);
     assert.match(html, /id="discoverEvaluateOnceBtn"[^>]*data-depth="discovery_plus_evaluation"/);
     // Neither new button carries the `disabled` HTML attribute when no
-    // cycle is in progress -- unlike the legacy "Run Once now" button,
-    // which IS disabled while mode === "disabled" (unchanged, separate
-    // assertion below).
+    // cycle is in progress.
     assert.doesNotMatch(html, /id="discoverOnceBtn"[^>]*disabled/);
     assert.doesNotMatch(html, /id="discoverEvaluateOnceBtn"[^>]*disabled/);
   });
 
-  check("the legacy 'Run Once now' button is still disabled while mode is 'disabled' (unchanged behavior)", () => {
+  check("UX remediation item 4 (2026-10-16): the old, now-contradictory 'Run Once now' button is REMOVED", () => {
+    // It used to render disabled right next to two perfectly enabled
+    // Discover Once / Discover & Evaluate Once buttons doing the
+    // equivalent job while mode === "disabled" -- a confusing remnant,
+    // not a deliberate second control. Must no longer be rendered at
+    // all (not merely re-enabled or hidden via CSS).
     const html = renderSchedulerControls({
       mode: "disabled", freshness_window_s: 1200, top_n: 5, cycle_in_progress: false,
     });
-    assert.match(html, /id="schedulerRunOnceBtn"[^>]*disabled/);
+    assert.doesNotMatch(html, /id="schedulerRunOnceBtn"/);
+    assert.doesNotMatch(html, /id="schedulerRunOnceStatus"/);
+    assert.doesNotMatch(html, /Run Once now/);
   });
 
   check("both one-time action buttons are DISABLED while a cycle is already in progress", () => {
@@ -95,12 +100,14 @@ console.log("\n=== renderSchedulerControls: the two decoupled one-time actions =
     assert.match(cardHtml, /Enabled/); // the real short label for the current mode, not raw "enabled"
   });
 
-  check("a dedicated progress/completion status element exists for the one-time actions, separate from the legacy one", () => {
+  check("a dedicated progress/completion status element exists for the one-time actions", () => {
     const html = renderSchedulerControls({
       mode: "disabled", freshness_window_s: 1200, top_n: 5, cycle_in_progress: false,
     });
     assert.match(html, /id="runOnceDepthProgress"/);
-    assert.match(html, /id="schedulerRunOnceStatus"/); // legacy element still present, untouched
+    // UX remediation item 4: the legacy status element is gone along
+    // with the legacy button -- no longer "still present, untouched".
+    assert.doesNotMatch(html, /id="schedulerRunOnceStatus"/);
   });
 }
 

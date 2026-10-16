@@ -67,7 +67,7 @@ from .core import scheduler_freshness, single_process_guard, uw_concurrency
 from .core.scheduler_store import InvalidModeError, MODES as SCHEDULER_MODES, SchedulerStore, new_worker_id
 from . import scheduler as scheduler_module
 from .core.candles import build_markers
-from .ingestion import IngestionCatalog, StorageGuardPausedError as IngestionStorageGuardPausedError
+from .ingestion import IngestionCatalog, StorageGuardPausedError as IngestionStorageGuardPausedError, utcnow_iso as _ingestion_utcnow_iso
 from .settings_store import MAX_WATCHLIST_SIZE, SettingsStore, last4
 from .storage import QualifyingDaysStore, StorageGuardPausedError
 from . import update_check as _update_check
@@ -1749,9 +1749,26 @@ def _ticker_analysis_impl(ticker: str, refresh: bool) -> dict:
     live_fetch = refresh or not is_live
 
     if live_fetch:
+        # UX remediation item 4 (2026-10-16): REAL BUG FIX -- `last_
+        # evaluated_at` used to be hardcoded None here, so a response
+        # could say "Current" (the eval_freshness tag) while
+        # SIMULTANEOUSLY saying "Not yet evaluated" (the last_evaluated_
+        # at-driven text rendered right next to it) immediately after an
+        # explicit refresh -- a plainly contradictory pair of labels on
+        # the same response. Captured BEFORE the scan so it genuinely
+        # reflects when this fetch happened, and intentionally NOT read
+        # back from the catalog (that would make a best-effort,
+        # swallowed-on-failure persistence write observably change this
+        # route's response, breaking the existing, separately-tested
+        # "response is identical whether ingestion succeeds or is
+        # broken" contract -- see test_phase_b_compatibility.py). A live
+        # fetch is "current" by definition -- its own evaluation
+        # timestamp is simply "now", regardless of whether the
+        # best-effort catalog write underneath it happens to succeed.
+        fetched_at = _ingestion_utcnow_iso()
         scan = _run_scan(adapter, store, ticker)
         eval_freshness = "current"
-        last_evaluated_at = None
+        last_evaluated_at = fetched_at
         served_from_cache = False
     else:
         cached, freshness = _cached_scan_for_ticker(catalog, store, ticker)

@@ -131,6 +131,23 @@ console.log("\n=== renderMarketWideCandidateRow / renderMarketWideRadar ===");
     assert.match(html, /freshness-badge freshness-unevaluated/);
     assert.match(html, /no evaluation yet/);
   });
+  check("UX remediation item 4: an index/derivative row suppresses View Details", () => {
+    const html = renderMarketWideCandidateRow({
+      ticker: "SPXW", freshness: "unevaluated", evaluation: null, age_s: null,
+      raw: { is_index: true },
+    });
+    assert.doesNotMatch(html, /data-investigate-ticker="SPXW"/);
+    assert.doesNotMatch(html, /View Details/);
+    assert.match(html, /Not supported \(index\/derivative\)/);
+  });
+  check("UX remediation item 4: a non-index row still shows View Details as before", () => {
+    const html = renderMarketWideCandidateRow({
+      ticker: "NVDA", freshness: "unevaluated", evaluation: null, age_s: null,
+      raw: { is_index: false },
+    });
+    assert.match(html, /data-investigate-ticker="NVDA"/);
+    assert.match(html, /View Details/);
+  });
   check("empty candidate list renders an honest note, never fabricated rows", () => {
     const html = renderMarketWideRadar({ candidates: [], note: "No discovery snapshot cataloged yet." });
     assert.match(html, /No discovery snapshot cataloged yet/);
