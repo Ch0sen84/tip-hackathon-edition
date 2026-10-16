@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 from datetime import date, timedelta
 from typing import Optional
 
@@ -33,8 +34,9 @@ from pathlib import Path
 # stream uvicorn already writes to stdout.
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -49,19 +51,45 @@ from .ai.mcp_tool_client import MCPSubprocessError
 from .ai.schemas import MalformedAIResponse
 from .ai.simulated import get_simulated_transcript
 from .ai.validation import ValidationError as AiValidationError
+from .auth import TOKEN_HEADER, AuthTokenStore, default_token_path, is_loopback
 from .config import settings
 from .core import scan_service, tip_evidence
 from .core.candles import build_markers
 from .settings_store import MAX_WATCHLIST_SIZE, SettingsStore, last4
-from .storage import QualifyingDaysStore
+from .storage import QualifyingDaysStore, StorageGuardPausedError
 from . import update_check as _update_check
 from . import version as _version
 
 app = FastAPI(title="TIP Hackathon Edition", version="0.1.0")
 
+# --- Phase A: CORS / Host hardening -------------------------------------
+#
+# This is a same-origin SPA (see the StaticFiles mount at the bottom of
+# this file) -- the frontend is served BY this same backend, not from a
+# separate frontend origin, so there is no legitimate cross-origin caller
+# that ever needs allow_origins=["*"]. The allowed origin/host is derived
+# from BIND_HOST/BIND_PORT (the exact env vars docker-compose.yml already
+# uses to publish this app -- see .env.example), or an explicit
+# ALLOWED_ORIGIN/ALLOWED_HOST override for anyone fronting this with a
+# reverse proxy under a different hostname.
+_BIND_HOST = os.environ.get("BIND_HOST", "127.0.0.1")
+_BIND_PORT = os.environ.get("BIND_PORT", "8000")
+ALLOWED_ORIGIN = os.environ.get("ALLOWED_ORIGIN", f"http://{_BIND_HOST}:{_BIND_PORT}")
+ALLOWED_HOST = os.environ.get("ALLOWED_HOST", _BIND_HOST)
+
+_ALLOWED_HOSTS = [ALLOWED_HOST]
+# Test-only widening: fastapi.testclient.TestClient has no real network
+# interface, so its requests' Host header is whatever base_url the test
+# gave it. This can ONLY ever add hosts during an actual pytest run (same
+# guard pattern as app/storage.py's _running_under_pytest) -- it is a
+# no-op for the real deployed app (uvicorn/Docker).
+if os.environ.get("PYTEST_CURRENT_TEST") or "pytest" in sys.modules:
+    _ALLOWED_HOSTS += ["testserver", "testclient"]
+
+app.add_middleware(TrustedHostMiddleware, allowed_hosts=_ALLOWED_HOSTS)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[ALLOWED_ORIGIN],
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -71,6 +99,36 @@ _adapter_sig: Optional[tuple] = None
 _store: Optional[QualifyingDaysStore] = None
 _settings_store = SettingsStore(os.environ.get("TIP_SETTINGS_PATH", "./data/settings.json"))
 _last_uw_test_result: Optional[str] = None  # in-memory only, informational; never persisted
+
+# --- Phase A: real browser-usable auth for every mutating route --------
+#
+# See auth.py's module docstring for the full design. One AuthTokenStore
+# lives on this module for the process lifetime; tests replace it with
+# their own instance pointed at an isolated tmp_path (see conftest.py's
+# `app_main` fixture), exactly like _settings_store above.
+_auth_store = AuthTokenStore(
+    os.environ.get(
+        "TIP_AUTH_TOKEN_PATH",
+        default_token_path(os.environ.get("TIP_SETTINGS_PATH", "./data/settings.json")),
+    )
+)
+
+
+def require_auth(request: Request) -> None:
+    """FastAPI dependency applied to every mutating (POST/PUT/DELETE)
+    route under /api/ except /api/auth/bootstrap itself. Compares the
+    X-TIP-Auth header against the real stored token with
+    hmac.compare_digest (constant-time) -- see AuthTokenStore.matches()."""
+    candidate = request.headers.get(TOKEN_HEADER)
+    if not _auth_store.matches(candidate):
+        raise HTTPException(
+            status_code=401,
+            detail=(
+                f"Missing or invalid {TOKEN_HEADER} header. Use GET /api/auth/bootstrap "
+                "from the same machine (localhost), or see README/INSTALL_AGENT.md for "
+                "LAN/remote setup instructions."
+            ),
+        )
 
 
 def _effective_uw_key(store_data: dict) -> tuple[Optional[str], str]:
@@ -160,7 +218,15 @@ def _run_scan(adapter: UWDataAdapter, store: QualifyingDaysStore, ticker: str) -
         catalyst_identified=adapter.get_catalyst_identified(ticker),
     )
     any_gate_passed = len(result["gates_passed"]) > 0
-    store.record_scan(ticker, any_gate_passed, result["state"])
+    try:
+        store.record_scan(ticker, any_gate_passed, result["state"])
+    except StorageGuardPausedError as e:
+        # Phase A storage guard: never a crash/500 -- a clear, structured
+        # 507 ("Insufficient Storage") disclosing exactly why new writes
+        # are paused. Nothing is deleted; this scan's evidence is still
+        # returned to the caller below, just not persisted to the
+        # qualifying-days history until free space recovers.
+        raise HTTPException(status_code=507, detail=str(e)) from e
     result["stock_state"] = stock_state
     result["raw"] = {"flow_alerts": flow_alerts, "darkpool_trades": darkpool_trades}
     return result
@@ -210,6 +276,29 @@ def health():
 @app.get("/api/mode")
 def mode():
     return {"mode": _settings_store.get_mode()}
+
+
+@app.get("/api/auth/bootstrap")
+def auth_bootstrap(request: Request):
+    """Self-serves the auth token to a genuine browser running ON the same
+    machine as this backend (loopback peer IP) -- no shell/docker exec
+    needed. Anyone else (LAN/remote) gets a clear 403 pointing at the
+    documented `docker exec <container> cat /srv/data/.auth_token`
+    fallback (see README/INSTALL_AGENT.md). This is the ONLY unauthenticated
+    route that ever hands out the token, and it is itself exempt from
+    require_auth (a brand-new install has no token to send yet)."""
+    client_host = request.client.host if request.client else None
+    if not is_loopback(client_host):
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Token bootstrap is only available from the same machine (localhost). "
+                "For a LAN or remote deployment, retrieve the token yourself: "
+                "`docker exec <container> cat /srv/data/.auth_token` -- see README.md / "
+                "INSTALL_AGENT.md 'Authentication' section."
+            ),
+        )
+    return {"token": _auth_store.get_or_create()}
 
 
 # --- Settings / credentials -------------------------------------------
@@ -317,7 +406,7 @@ def get_watchlist():
     return {"watchlist": wl, "max_size": MAX_WATCHLIST_SIZE, "default": settings.live_watchlist}
 
 
-@app.put("/api/settings/watchlist")
+@app.put("/api/settings/watchlist", dependencies=[Depends(require_auth)])
 def set_watchlist(body: WatchlistBody):
     """Whole-list replace (not incremental add/remove) -- simpler and
     atomic; the frontend maintains the current list client-side and PUTs
@@ -331,7 +420,7 @@ def set_watchlist(body: WatchlistBody):
     return {"watchlist": data["watchlist"], "max_size": MAX_WATCHLIST_SIZE}
 
 
-@app.post("/api/settings/mode")
+@app.post("/api/settings/mode", dependencies=[Depends(require_auth)])
 def set_mode(body: ModeBody):
     requested = body.mode.strip().lower()
     if requested not in ("demo", "live"):
@@ -366,7 +455,7 @@ def set_mode(body: ModeBody):
     return {"mode": data["mode"]}
 
 
-@app.post("/api/settings/uw-key")
+@app.post("/api/settings/uw-key", dependencies=[Depends(require_auth)])
 def save_uw_key(body: UwKeyBody):
     if settings.public_demo:
         raise HTTPException(status_code=403, detail="Credential entry is not available in the public demo build.")
@@ -380,7 +469,7 @@ def save_uw_key(body: UwKeyBody):
     return {"configured": True, "last4": last4(key)}
 
 
-@app.post("/api/settings/uw-key/test")
+@app.post("/api/settings/uw-key/test", dependencies=[Depends(require_auth)])
 def test_uw_key():
     """Real live test against the UW API using whichever key is currently
     effective (UI-saved, else .env fallback) -- not a stub. Never raises on
@@ -417,7 +506,7 @@ def test_uw_key():
     return {"result": result, "message": message, "source": source}
 
 
-@app.delete("/api/settings/uw-key")
+@app.delete("/api/settings/uw-key", dependencies=[Depends(require_auth)])
 def delete_uw_key():
     data = _settings_store.clear_uw_key()
     _reset_adapter_cache()
@@ -426,7 +515,7 @@ def delete_uw_key():
     return {"configured": False, "mode": data["mode"]}
 
 
-@app.post("/api/settings/ai-key")
+@app.post("/api/settings/ai-key", dependencies=[Depends(require_auth)])
 def save_ai_key(body: AiKeyBody):
     if settings.public_demo:
         raise HTTPException(status_code=403, detail="Credential entry is not available in the public demo build.")
@@ -440,13 +529,13 @@ def save_ai_key(body: AiKeyBody):
     return {"configured": True, "provider": provider, "last4": last4(key)}
 
 
-@app.delete("/api/settings/ai-key")
+@app.delete("/api/settings/ai-key", dependencies=[Depends(require_auth)])
 def delete_ai_key():
     _settings_store.clear_ai_key()
     return {"configured": False}
 
 
-@app.post("/api/settings/ai-key/test")
+@app.post("/api/settings/ai-key/test", dependencies=[Depends(require_auth)])
 def test_ai_key(body: ConfirmBody):
     """Phase 4B: minimal, bounded connectivity test for the SAVED AI
     provider key -- one short request, tiny token cap, no tool-selection
@@ -474,7 +563,7 @@ def test_ai_key(body: ConfirmBody):
     return {**result, "provider": provider, "proves_mcp_works": False}
 
 
-@app.post("/api/settings/mcp/test")
+@app.post("/api/settings/mcp/test", dependencies=[Depends(require_auth)])
 def test_mcp():
     """Phase 4B: standalone genuine MCP-protocol connectivity test
     (connect, authenticate, tool discovery, ONE bounded read-only tool
@@ -661,7 +750,7 @@ def _rank_discovery_candidates(candidates: list) -> list:
     return sorted(candidates, key=_key, reverse=True)
 
 
-@app.post("/api/radar/discover")
+@app.post("/api/radar/discover", dependencies=[Depends(require_auth)])
 def radar_discover(body: DiscoverFiltersBody):
     """Market Discovery (C2b/C2c): EXACTLY ONE bounded call to the
     adapter's discover_candidates per invocation -- no automatic
@@ -930,7 +1019,7 @@ def investigate_availability():
     return {"available": True, "simulated": False, "reason": None, "transport": settings.investigate_transport}
 
 
-@app.post("/api/investigate/{ticker}")
+@app.post("/api/investigate/{ticker}", dependencies=[Depends(require_auth)])
 def investigate_ticker(ticker: str):
     """Bounded 'Investigate with AI' for one ticker. Demo mode / PUBLIC_DEMO
     always returns a pre-written, clearly-labeled simulated transcript and

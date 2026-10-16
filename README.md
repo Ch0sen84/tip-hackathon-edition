@@ -189,6 +189,46 @@ and `POST /api/settings/ai-key` server-side with 403 -- defense in depth
 for the later public static-demo build, implemented now so that code path
 never needs revisiting.
 
+## Authentication (Phase A)
+
+Every state-changing or paid API call (settings/credential writes, the
+watchlist editor, `POST /api/radar/discover`, and `POST
+/api/investigate/{ticker}`) requires a matching `X-TIP-Auth` header. A
+single random token (`secrets.token_hex(32)`) is generated on first run
+and persisted to `.auth_token` inside the SAME persistent volume
+`TIP_SETTINGS_PATH`/`TIP_DB_PATH` already use (`/srv/data` in the real
+Docker deployment -- the existing `tip-data` named volume, never a new
+one), file mode `0600`.
+
+**Localhost / Docker Desktop (the default, and the common case):** nothing
+to do. The frontend automatically calls `GET /api/auth/bootstrap` on
+first load, which hands out the token to a browser running ON the same
+machine as the backend (checked server-side via the request's real peer
+IP, not anything the browser claims) and caches it in `localStorage`. A
+one-time "Set up access" banner only ever appears if that automatic step
+fails (e.g. a LAN/remote deployment); a mutating call that ever gets a
+real 401 (stale/missing token) clears the cached token and re-shows the
+same banner with a specific "authentication required" message, not a
+generic error.
+
+**LAN or remote deployment (`BIND_HOST` set to something other than
+`127.0.0.1`, or any reverse proxy):** `GET /api/auth/bootstrap` refuses
+with 403 for any non-loopback caller, by design -- there is no way to
+self-serve the token over the network. Retrieve it yourself and paste it
+into the banner's fallback box:
+
+```bash
+docker exec <container> cat /srv/data/.auth_token
+```
+
+**This app provides no transport encryption of its own.** Opening it
+beyond localhost (`BIND_HOST=0.0.0.0`/a LAN IP, or any reverse proxy) means
+the access token and every request travel in plaintext unless YOU put a
+real TLS-terminating reverse proxy in front of it (e.g. Caddy/nginx/
+Cloudflare Tunnel) -- do this before exposing the app beyond your own
+machine. See `tools/check_deployment_binding.sh` for a sanity check on
+the actual published binding.
+
 ## Running locally (no Docker)
 
 ```bash

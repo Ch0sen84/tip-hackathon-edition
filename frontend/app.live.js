@@ -5,6 +5,123 @@
 // same-origin default for local dev when frontend is served separately.
 const API_BASE = new URLSearchParams(location.search).get("api") || "";
 
+// --- Phase A: real browser-usable auth token handling -----------------
+//
+// The backend requires a matching X-TIP-Auth header on every mutating
+// (POST/PUT/DELETE) /api/ route (see backend/app/main.py's require_auth
+// dependency) -- this is the ONE choke point (apiPost/apiPut/apiDelete
+// below) that attaches it, rather than patching every individual call
+// site. The token itself is never embedded in this source; it is
+// fetched once (GET /api/auth/bootstrap, which only succeeds for a
+// same-machine/localhost caller) or pasted in manually by the user for a
+// LAN/remote deployment, then cached in localStorage -- see
+// ensureAuthToken()/wireAuthSetupBanner() below.
+const AUTH_TOKEN_KEY = "tip_auth_token";
+
+function getAuthToken() {
+  try {
+    return localStorage.getItem(AUTH_TOKEN_KEY);
+  } catch (e) {
+    return null; // localStorage unavailable (e.g. private-mode edge case) -- degrade, don't crash
+  }
+}
+
+function setAuthToken(token) {
+  try {
+    localStorage.setItem(AUTH_TOKEN_KEY, token);
+  } catch (e) {
+    /* best-effort only */
+  }
+}
+
+function clearAuthToken() {
+  try {
+    localStorage.removeItem(AUTH_TOKEN_KEY);
+  } catch (e) {
+    /* best-effort only */
+  }
+}
+
+function _authHeaders(extra) {
+  const token = getAuthToken();
+  return token ? { ...extra, "X-TIP-Auth": token } : { ...extra };
+}
+
+// Shows the Phase A setup/re-auth banner (app.core.js's
+// renderAuthSetupBanner) and wires its button/fallback-paste controls.
+// Safe to call repeatedly (e.g. once on load, again on every 401) --
+// always re-renders from scratch, never stacks duplicate banners.
+function showAuthSetupBanner(variant) {
+  const el = document.getElementById("authSetupBanner");
+  if (!el) return;
+  el.style.display = "";
+  el.innerHTML = renderAuthSetupBanner(variant);
+  const bootstrapBtn = document.getElementById("authBootstrapBtn");
+  const statusEl = document.getElementById("authBootstrapStatus");
+  if (bootstrapBtn) {
+    bootstrapBtn.addEventListener("click", async () => {
+      statusEl.textContent = "Requesting token...";
+      const ok = await tryAutoBootstrapToken();
+      if (ok) {
+        statusEl.textContent = "";
+        hideAuthSetupBanner();
+      } else {
+        statusEl.textContent =
+          "Could not auto-fetch a token from this browser -- see the fallback instructions below.";
+      }
+    });
+  }
+  const manualInput = document.getElementById("authManualTokenInput");
+  const manualSaveBtn = document.getElementById("authManualTokenSaveBtn");
+  if (manualSaveBtn && manualInput) {
+    manualSaveBtn.addEventListener("click", () => {
+      const pasted = (manualInput.value || "").trim();
+      if (!pasted) return;
+      setAuthToken(pasted);
+      hideAuthSetupBanner();
+    });
+  }
+}
+
+function hideAuthSetupBanner() {
+  const el = document.getElementById("authSetupBanner");
+  if (el) {
+    el.style.display = "none";
+    el.innerHTML = "";
+  }
+}
+
+// Only ever succeeds for a browser running on the SAME machine as the
+// backend (the server checks request.client.host, not anything this
+// function sends) -- works automatically for the common localhost/
+// Docker-Desktop case with zero manual steps. Returns false (never
+// throws) for a LAN/remote deployment, where the fallback paste-box is
+// the documented path instead.
+async function tryAutoBootstrapToken() {
+  try {
+    const res = await fetch(`${API_BASE}/api/auth/bootstrap`);
+    if (!res.ok) return false;
+    const data = await res.json();
+    if (!data.token) return false;
+    setAuthToken(data.token);
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
+// Called once on page load (see bootstrap() at the bottom of this file).
+// If a token is already cached, this is a silent no-op. Otherwise it
+// tries the automatic same-machine bootstrap; if that fails (non-
+// localhost deployment), it shows the one-time setup banner instead of
+// silently leaving every mutating action broken.
+async function ensureAuthToken() {
+  if (getAuthToken()) return true;
+  const ok = await tryAutoBootstrapToken();
+  if (!ok) showAuthSetupBanner("missing");
+  return ok;
+}
+
 async function apiGet(path) {
   const res = await fetch(`${API_BASE}${path}`);
   if (!res.ok) throw new Error(`${path} -> HTTP ${res.status}`);
@@ -14,14 +131,33 @@ async function apiGet(path) {
 // NOTE on credential handling: these helpers submit a key ONCE to the
 // backend to save it. The backend never echoes the real value back --
 // only a `configured` boolean and the key's last 4 characters. Nothing
-// here (or anywhere in this file) writes a key to localStorage,
-// sessionStorage, or a cookie.
+// here (or anywhere in this file) writes a UW/AI key to localStorage,
+// sessionStorage, or a cookie -- ONLY the app's own X-TIP-Auth access
+// token (see AUTH_TOKEN_KEY above) is ever cached client-side, and it
+// carries no UW/AI credential of any kind.
+//
+// Phase A 401 handling: a 401 here means the saved X-TIP-Auth token is
+// missing or no longer valid server-side (e.g. a container recreation
+// regenerated the token file) -- NOT a generic HTTP-status message. The
+// stale token is cleared and the setup banner is re-shown so the user has
+// an immediate, obvious way to re-authenticate, and the thrown error says
+// so explicitly rather than just "HTTP 401".
+function _throwAuthError(path) {
+  clearAuthToken();
+  showAuthSetupBanner("error");
+  throw new Error(
+    `Authentication required for ${path}: your access token is missing or no longer valid. ` +
+      `Use the "Set up access" banner above to re-authenticate.`
+  );
+}
+
 async function apiPost(path, body) {
   const res = await fetch(`${API_BASE}${path}`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: _authHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify(body || {}),
   });
+  if (res.status === 401) _throwAuthError(path);
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.detail || `${path} -> HTTP ${res.status}`);
   return data;
@@ -30,16 +166,18 @@ async function apiPost(path, body) {
 async function apiPut(path, body) {
   const res = await fetch(`${API_BASE}${path}`, {
     method: "PUT",
-    headers: { "Content-Type": "application/json" },
+    headers: _authHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify(body || {}),
   });
+  if (res.status === 401) _throwAuthError(path);
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.detail || `${path} -> HTTP ${res.status}`);
   return data;
 }
 
 async function apiDelete(path) {
-  const res = await fetch(`${API_BASE}${path}`, { method: "DELETE" });
+  const res = await fetch(`${API_BASE}${path}`, { method: "DELETE", headers: _authHeaders({}) });
+  if (res.status === 401) _throwAuthError(path);
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.detail || `${path} -> HTTP ${res.status}`);
   return data;
@@ -265,9 +403,11 @@ async function runInvestigate(ticker, navSeq, modeLabel) {
   // take real seconds), not a staged show.
   body.innerHTML = `<div class="empty">Investigating ${esc(ticker)}... this makes a few bounded read-only calls and can take several seconds.</div>`;
   try {
-    const res = await fetch(`${API_BASE}/api/investigate/${encodeURIComponent(ticker)}`, { method: "POST" });
-    const d = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(d.detail || `HTTP ${res.status}`);
+    // Phase A: routed through the shared apiPost() choke point (not a
+    // standalone fetch) so this paid, state-changing call gets the same
+    // X-TIP-Auth header + 401 handling as every other mutating call --
+    // see apiPost's docstring above.
+    const d = await apiPost(`/api/investigate/${encodeURIComponent(ticker)}`, {});
     if (mySeq !== _navSeq) return; // user moved on before this resolved -- never render a stale ticker's result
     body.innerHTML = renderInvestigateResult(d, ticker, modeLabel || modeLabelFor(d.simulated, d.transport));
   } catch (err) {
@@ -803,6 +943,12 @@ window.TIP_NAV_HANDLERS = {
 };
 wireHistoryHandling();
 (async function bootstrap() {
+  // Phase A: establish the X-TIP-Auth token before anything else runs.
+  // loadSettings()/loadRadar() below are GET-only and work regardless,
+  // but doing this first means the one-time setup banner (if needed)
+  // appears immediately on load rather than only after the user's first
+  // click on a mutating action.
+  await ensureAuthToken();
   await loadSettings();
   await loadRadar();
   const initialState = parseNavHash(location.hash);

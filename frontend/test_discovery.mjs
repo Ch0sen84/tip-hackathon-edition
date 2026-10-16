@@ -113,7 +113,24 @@ globalThis.__exports = {
   return globalThis.__exports;
 }
 
+// Phase A: seed a real X-TIP-Auth token (fetched over genuine loopback
+// HTTP from this same machine) before any mutating call -- see
+// test_navigation.mjs's seedAuthToken() for the full rationale; this
+// harness's loadReal() strips the real bootstrap() IIFE the same way.
+async function seedAuthToken() {
+  const res = await fetch(`${BASE}/api/auth/bootstrap`);
+  if (!res.ok) throw new Error(`GET /api/auth/bootstrap -> HTTP ${res.status}`);
+  const { token } = await res.json();
+  const store = { tip_auth_token: token };
+  global.localStorage = {
+    getItem: (k) => (k in store ? store[k] : null),
+    setItem: (k, v) => { store[k] = String(v); },
+    removeItem: (k) => { delete store[k]; },
+  };
+}
+
 async function main() {
+  await seedAuthToken();
   const core = loadCoreOnly();
 
   console.log("=== renderDiscoveryFilterForm / readDiscoveryFilterForm ===");
@@ -194,8 +211,13 @@ async function main() {
   });
 
   console.log("\n=== End-to-end over the REAL /api/radar/discover endpoint ===");
+  // Phase A: this is a direct harness-level fetch (not routed through
+  // app.live.js's apiPost), so the X-TIP-Auth header from seedAuthToken()
+  // must be attached explicitly here too.
   const res = await fetch(`${BASE}/api/radar/discover`, {
-    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({}),
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-TIP-Auth": global.localStorage.getItem("tip_auth_token") },
+    body: JSON.stringify({}),
   });
   check("POST /api/radar/discover returns 200 with the real disclosure fields", () => {
     assert.equal(res.status, 200);

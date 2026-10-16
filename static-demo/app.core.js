@@ -16,6 +16,49 @@
 // ticker they already clicked on.
 const TIP_STATE = { currentTicker: null, currentView: "radar" };
 
+// --- Phase A: auth setup banner (pure render, no fetch) --------------------
+//
+// app.live.js owns the actual localStorage/fetch/bootstrap logic (see its
+// ensureAuthToken()/wireAuthSetupBanner()); this is just the markup for
+// the one-time "Setup" prompt it shows, consistent with this file's
+// "no fetch() here" rule. Two variants:
+//   "missing" -- first run / no token yet, shown before any mutating
+//                action has been attempted.
+//   "error"   -- a mutating call just got a real 401 (token missing or no
+//                longer valid server-side, e.g. after a container
+//                recreation regenerated it) -- same controls, with an
+//                explicit "authentication failed" message up top instead
+//                of a generic exception.
+function renderAuthSetupBanner(variant) {
+  const heading =
+    variant === "error"
+      ? "Authentication required"
+      : "One-time setup required before you can change settings or run Investigate with AI";
+  const subMessage =
+    variant === "error"
+      ? "Your saved access token is missing or no longer valid (the server rejected it with 401)."
+      : "This app requires a one-time access token before any setting, watchlist change, or Investigate with AI call will work.";
+  return `
+    <div class="auth-setup-card">
+      <strong>${esc(heading)}</strong>
+      <p>${esc(subMessage)}</p>
+      <button class="btn" id="authBootstrapBtn">Set up access (same machine only)</button>
+      <span id="authBootstrapStatus" class="auth-setup-status"></span>
+      <details class="auth-setup-fallback">
+        <summary>On a different machine, or the button above didn't work?</summary>
+        <p>
+          Token bootstrap only works for a browser running on the SAME machine as the
+          Docker host (it is refused for any other IP, by design -- see README.md
+          "Authentication"). For a LAN or remote setup, retrieve the token yourself and
+          paste it below:
+        </p>
+        <pre>docker exec &lt;container&gt; cat /srv/data/.auth_token</pre>
+        <input type="text" id="authManualTokenInput" placeholder="Paste token here" autocomplete="off" />
+        <button class="btn-link" id="authManualTokenSaveBtn">Save token</button>
+      </details>
+    </div>`;
+}
+
 // --- URL/history scheme (P0 navigation fix) --------------------------------
 //
 // Format: a hash of the form `#view=<radar|ticker|settings|about>&ticker=<T>`

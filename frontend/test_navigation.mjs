@@ -122,7 +122,28 @@ function check(name, fn) {
   }
 }
 
+// Phase A: app.live.js now requires a valid X-TIP-Auth header on every
+// mutating call (setMode -> POST /api/settings/mode). This harness's
+// `loadReal()` strips out the real bootstrap() IIFE (see its regex
+// replace above), so nothing else here would ever populate the token --
+// fetch it directly from the REAL running backend (a genuine loopback
+// HTTP call, since this Node process and the backend are on the same
+// machine) and seed a minimal localStorage stub with it before any
+// mutating call runs.
+async function seedAuthToken() {
+  const res = await fetch(`${BASE}/api/auth/bootstrap`);
+  if (!res.ok) throw new Error(`GET /api/auth/bootstrap -> HTTP ${res.status}`);
+  const { token } = await res.json();
+  const store = { tip_auth_token: token };
+  global.localStorage = {
+    getItem: (k) => (k in store ? store[k] : null),
+    setItem: (k, v) => { store[k] = String(v); },
+    removeItem: (k) => { delete store[k]; },
+  };
+}
+
 async function main() {
+  await seedAuthToken();
   global.location.search = `?api=${BASE}`;
   const app = loadReal(
     [
