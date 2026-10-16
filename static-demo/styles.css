@@ -295,6 +295,21 @@ nav#nav .ic { font-size: 13px; width: 16px; text-align: center; opacity: .7; }
    unevaluated is scannable at a glance across a long candidate list. */
 .candidate-row { display: grid; grid-template-columns: 90px 110px 1fr 90px; align-items: center; gap: 10px; padding: 8px 6px; border-bottom: 1px solid var(--border); font-size: 13px; }
 .candidate-row .ticker { font-weight: 600; }
+/* UX round (2026-10-16 round 5), item 1: Market Intelligence's row
+   (.market-wide-row, also carries the plain .candidate-row class for
+   its existing border/padding/font-size) now has exactly TWO direct
+   children (.market-wide-row-main + the new .why-surfaced block) --
+   .candidate-row's 4-column grid above would otherwise silently
+   squeeze those two children into its first two fixed-width columns
+   (90px/110px), found via a real CDP measurement at 390px (the "Why
+   TIP surfaced this" block measured 110px wide, clipped to a sliver,
+   not an overflow). Overriding BOTH the parent's display (plain
+   stacked flex, not grid) and giving the real field row its own
+   flex-wrap layout fixes this without touching .candidate-row itself,
+   so Market Radar's own freshness rows (still plain .candidate-row,
+   4 real columns) are completely unaffected. */
+.market-wide-row { display: flex; flex-direction: column; gap: 4px; }
+.market-wide-row-main { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
 .freshness-badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; text-align: center; }
 .freshness-badge.freshness-current { background: #dcfce7; color: #166534; }
 .freshness-badge.freshness-stale { background: #fef3c7; color: #92400e; }
@@ -473,6 +488,11 @@ pre.raw { background: var(--panel3); padding: 12px; border-radius: 8px; overflow
    buttons, no footer note -- while leaving the >=980px desktop sidebar
    layout (and the existing 980px tablet breakpoint above) completely
    unchanged. */
+/* UX round (2026-10-16 round 5), item 4: the hidden-by-default short nav
+   label (see frontend/index.html's About button) -- only ever shown at
+   the same narrow breakpoint below, never on desktop/tablet. */
+.nav-label-short { display: none; }
+
 @media (max-width: 480px) {
   .brand-block { padding: 8px 12px; }
   .brand-block .brand-product,
@@ -483,6 +503,41 @@ pre.raw { background: var(--panel3); padding: 12px; border-radius: 8px; overflow
   nav#nav .nav-group-label { display: none; }
   nav#nav button { padding: 6px 8px; font-size: 11.5px; }
   .sidebar-foot { display: none; }
+  /* UX round (2026-10-16 round 5), item 4 real-browser finding: at
+     exactly 390px, the long "About / Beyond the Hackathon" label alone
+     forced the whole nav onto a 3rd wrapped row (measured via CDP:
+     nav height went from ~70px with the short label to ~106px with the
+     full one), pushing all real content down ~20% of an 844px mobile
+     viewport before anything else was visible. Swapping to the short
+     label here (full label hidden) lets it share a row with another
+     nav button instead -- the ONLY mobile-nav change beyond the
+     existing, untouched QA-D7 rules just above. */
+  .nav-label-full { display: none; }
+  .nav-label-short { display: inline; }
+
+  /* UX round (2026-10-16 round 5), item 4 real-browser finding: Market
+     Discovery's "Evaluate" action is the LAST column of a table with
+     min-width:640px (.discovery-table) inside an overflow-x:auto
+     wrapper -- at 390px that pushes the Evaluate button to roughly
+     x=690-845 (measured via CDP getBoundingClientRect), entirely off
+     an 844px-tall/390px-wide viewport's visible area unless the user
+     discovers and performs a horizontal scroll most mobile traders
+     never would -- genuinely clipped/inaccessible, not just visually
+     cramped. Fix: swap to the pre-existing, already-styled flex-wrap
+     card-row presentation (.discovery-candidate-list/-row) that this
+     exact same data already renders into (kept in the DOM for test-
+     harness compat, see renderDiscoveryCandidateList's own comment) --
+     it has no fixed min-width, wraps every field including Evaluate
+     onto its own line as needed, so nothing is ever off-screen. Table
+     stays the unchanged, real presentation at every wider width (and in
+     static-demo, which has no Market Discovery view to begin with). */
+  .discovery-table-wrap { display: none; }
+  /* .discovery-candidate-list's real display:flex override lives in its
+     own @media block further down this file, AFTER the unconditional
+     `.discovery-candidate-list { display: none; }` rule (same selector
+     specificity -- source order decides the winner, and that
+     unconditional rule is physically later in this file than this
+     block, so it would otherwise win even inside this narrower query). */
 }
 
 /* --- Investigate with AI -------------------------------------------- */
@@ -594,6 +649,19 @@ pre.raw { background: var(--panel3); padding: 12px; border-radius: 8px; overflow
 .discovery-table tr:hover td { background: var(--panel2); }
 
 .discovery-candidate-list { display: none; }
+/* UX round (2026-10-16 round 5), item 4: at the same ~390px breakpoint
+   as the rest of this file's mobile rules, swap FROM the table (whose
+   fixed min-width pushes the Evaluate action off-screen -- see the
+   .discovery-table-wrap rule in the max-width:480px block above) TO
+   this already-existing flex-wrap row presentation, which has no fixed
+   min-width and wraps every field (Evaluate included) onto its own
+   line as needed so nothing is ever clipped/inaccessible. Placed here,
+   AFTER the unconditional `display: none` above, so it actually wins
+   the cascade at this width (same selector specificity -- source order
+   decides the tie). */
+@media (max-width: 480px) {
+  .discovery-candidate-list { display: flex; flex-direction: column; gap: 10px; }
+}
 .discovery-candidate-row {
   display: flex; flex-wrap: wrap; align-items: center; gap: 14px;
   border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--panel); padding: 10px 14px;

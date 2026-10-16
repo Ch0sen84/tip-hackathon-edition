@@ -52,7 +52,14 @@
       <button class="nav-item" data-view="marketwide"><span class="ic">&#127760;</span>Market Intelligence</button>
       <div class="nav-group-label">App</div>
       <button class="nav-item" data-view="settings"><span class="ic">&#9881;</span>Settings</button>
-      <button class="nav-item" data-view="about"><span class="ic">&#8505;</span>About / Beyond the Hackathon</button>
+      <!-- UX round (2026-10-16 round 5), item 4: this label's full length
+           was, by itself, what forced the nav onto a 3rd wrapped row at
+           ~390px mobile width (one of Chad's named mobile-overflow
+           items) -- wrapping the long/short text in their own spans lets
+           the CSS media query below swap to the short form at narrow
+           widths with zero JS, same compact-nav intent as the existing
+           QA-D7 mobile rules just above this file's media query. -->
+      <button class="nav-item" data-view="about"><span class="ic">&#8505;</span><span class="nav-label-full">About / Beyond the Hackathon</span><span class="nav-label-short">About</span></button>
     </nav>
     <div class="sidebar-foot">Standalone hackathon build.<br>Demo mode: synthetic data.<br>Live mode: your own UW key.</div>
   </aside>

@@ -29,7 +29,11 @@
       <button class="nav-item" data-view="ticker"><span class="ic">&#128269;</span>Ticker Analysis</button>
       <div class="nav-group-label">App</div>
       <button class="nav-item" data-view="settings"><span class="ic">&#9881;</span>Settings</button>
-      <button class="nav-item" data-view="about"><span class="ic">&#8505;</span>About / Beyond the Hackathon</button>
+      <!-- UX round (2026-10-16 round 5), item 4: same compact-label fix
+           as frontend/index.html's nav (byte-identical styles.css is
+           shared via tools/build_static_demo.sh, so the matching CSS
+           rule below applies here too). -->
+      <button class="nav-item" data-view="about"><span class="ic">&#8505;</span><span class="nav-label-full">About / Beyond the Hackathon</span><span class="nav-label-short">About</span></button>
     </nav>
     <div class="sidebar-foot">Public demo &middot; simulated data only.<br>No backend, no credentials, no live calls.</div>
   </aside>
