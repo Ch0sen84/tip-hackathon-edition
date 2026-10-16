@@ -1803,21 +1803,55 @@ INTRADAY_RANGES = {"1D": {"candle_size": "5m", "limit": 200}}
 
 @app.get("/api/ticker/{ticker}/ohlc")
 def ticker_ohlc(ticker: str, timeframe: str = "1d", limit: int = 180, range: Optional[str] = None):
-    """Candlestick bars + evidence markers for the Ticker Analysis chart.
-    Markers come from the SAME flow_alerts/darkpool_trades the detection
-    engine already uses -- never a new data source, never an invented
-    price (see backend/app/core/candles.py::build_markers). `unavailable`
-    is a structured, non-crashing result (e.g. an unentitled live key, or
-    a demo scenario with no captured OHLC fixture) -- the frontend must
-    show an explicit "chart data unavailable" state, not silently render
-    nothing.
+    """S1-b SECURITY FIX (2026-10-16): same structural pattern as S1/W2-b
+    -- this GET route is now strictly cache-first/read-only for a real
+    LiveUWAdapter. Before this fix it made 3 real, unauthenticated,
+    cross-site-triggerable UW calls (get_ohlc, get_flow_alerts,
+    get_darkpool_trades) and wrote 3 kinds of observations on EVERY plain
+    GET (page open, F5, every range-button click). See _ticker_ohlc_impl
+    below for the shared cache-first/live-fetch implementation; `refresh`
+    is a plain internal Python argument never bound to this route's
+    signature at all (not "ignored" -- FastAPI has no parameter here to
+    bind a `?refresh=` query string to), exactly like _radar_impl /
+    _ticker_analysis_impl. The only way to trigger a real OHLC fetch is
+    POST /api/ticker/{ticker}/ohlc/refresh below (authenticated,
+    concurrency-locked)."""
+    return _ticker_ohlc_impl(ticker, timeframe=timeframe, limit=limit, range=range, refresh=False)
+
+
+def _ticker_ohlc_impl(ticker: str, timeframe: str, limit: int, range: Optional[str], refresh: bool) -> dict:
+    """Shared implementation for the cache-only GET above and the
+    authenticated POST /api/ticker/{ticker}/ohlc/refresh below. Candlestick
+    bars + evidence markers for the Ticker Analysis chart. Markers come
+    from the SAME flow_alerts/darkpool_trades the detection engine already
+    uses -- never a new data source, never an invented price (see
+    backend/app/core/candles.py::build_markers). `unavailable` is a
+    structured, non-crashing result (e.g. an unentitled live key, a demo
+    scenario with no captured OHLC fixture, OR -- new in this fix -- a
+    cache-only GET for a ticker/timeframe nothing has ever been cataloged
+    for yet) -- the frontend must show an explicit "chart data
+    unavailable" state, not silently render nothing, and this route must
+    never fabricate a candle that was never actually cataloged.
 
     Phase B (2026-10-14): optional `range` (1M/3M/6M/1Y) is a convenience
     that maps to `limit` via RANGE_TO_TRADING_DAYS and forces daily bars
     -- this is a REAL re-fetch requesting a different bar count, not a
-    client-side zoom of a fixed dataset. `timeframe`/`limit` remain
-    directly usable for any other caller (e.g. the marker-building logic
-    elsewhere in this route already relies on the existing defaults)."""
+    client-side zoom of a fixed dataset, WHEN `refresh` is True. On a
+    cache-only read, `range`/`limit` instead bound how much of whatever
+    is ALREADY cataloged gets returned -- never trigger a live call to
+    satisfy a requested range (see `range_fully_satisfied` below, which
+    still honestly reflects whatever was actually returned either way).
+
+    S1-b fix (2026-10-16): for a real LiveUWAdapter, an ordinary GET
+    (refresh=False) now reads whatever price_bars/options_flow_
+    observations/darkpool_observations rows are already cataloged for
+    this ticker (the SAME IngestionCatalog tables Phase B's live-fetch
+    path already wrote to -- never a second store) and makes ZERO live
+    UW calls. A real fetch only happens when `refresh` is True (the POST
+    route) or the adapter isn't live at all (Demo Mode keeps its
+    existing always-fresh behavior -- there is no real HTTP cost to a
+    demo scenario fixture read, same rationale as _radar_impl/
+    _ticker_analysis_impl)."""
     if range is not None:
         range = range.strip().upper()
         all_ranges = set(RANGE_TO_TRADING_DAYS) | set(INTRADAY_RANGES)
@@ -1844,34 +1878,77 @@ def ticker_ohlc(ticker: str, timeframe: str = "1d", limit: int = 180, range: Opt
             ticker = _validate_ticker_for_route(ticker)
         except AiValidationError as e:
             raise HTTPException(status_code=400, detail=str(e))
-    # `window` (Phase B final fix, 2026-10-14): UW's REAL date-window
-    # selector -- our `range` strings ("1M"/"3M"/"6M"/"1Y") are already in
-    # UW's own vocabulary for this parameter, so pass it straight through.
-    # `limit` stays as a sane safety cap (RANGE_TO_TRADING_DAYS), not the
-    # primary selector -- see live_uw_adapter.stock_ohlc()'s docstring for
-    # the full bug writeup.
-    ohlc = adapter.get_ohlc(ticker, timeframe=timeframe, limit=limit, window=range)
-    flow_alerts = adapter.get_flow_alerts(ticker)
-    darkpool_trades = adapter.get_darkpool_trades(ticker)
+    is_live = isinstance(adapter, LiveUWAdapter)
+    live_fetch = refresh or not is_live
+    cached_at = None
+    source_label = None
+
+    if live_fetch:
+        # `window` (Phase B final fix, 2026-10-14): UW's REAL date-window
+        # selector -- our `range` strings ("1M"/"3M"/"6M"/"1Y") are
+        # already in UW's own vocabulary for this parameter, so pass it
+        # straight through. `limit` stays as a sane safety cap
+        # (RANGE_TO_TRADING_DAYS), not the primary selector -- see
+        # live_uw_adapter.stock_ohlc()'s docstring for the full bug
+        # writeup.
+        ohlc = adapter.get_ohlc(ticker, timeframe=timeframe, limit=limit, window=range)
+        flow_alerts = adapter.get_flow_alerts(ticker)
+        darkpool_trades = adapter.get_darkpool_trades(ticker)
+        candles = ohlc.get("candles", [])
+        unavailable = ohlc.get("unavailable", False)
+        reason = ohlc.get("reason")
+        negative_volume_bars_clamped = ohlc.get("negative_volume_bars_clamped", 0)
+        raw_records_requested = ohlc.get("raw_records_requested")
+        raw_records_returned = ohlc.get("raw_records_returned")
+        regular_session_records_retained = ohlc.get("regular_session_records_retained")
+        source_label = ohlc.get("source")
+        # Phase B: added persistence layer only -- catalogs the SAME
+        # already-session-classified/delta-corrected candles this route
+        # is about to return, plus this call's flow/dark-pool inputs.
+        # Never changes `candles`/`markers`/anything else returned below
+        # (see _catalog_scan_best_effort's docstring for the invariant
+        # this mirrors; failures here are swallowed, never surfaced to
+        # the caller).
+        if is_live:
+            try:
+                catalog = get_catalog()
+                catalog.catalog_price_bars(ticker, timeframe, candles)
+                catalog.catalog_options_flow_observations(ticker, flow_alerts)
+                catalog.catalog_darkpool_observations(ticker, darkpool_trades)
+            except Exception:  # noqa: BLE001 -- never propagate, see module docstring
+                logging.getLogger(__name__).info(
+                    "Phase B ingestion catalog write skipped for %s OHLC (non-fatal, response unaffected)", ticker
+                )
+    else:
+        # S1-b fix: cache-only read. Never calls adapter.get_ohlc/
+        # get_flow_alerts/get_darkpool_trades, never writes anything --
+        # reads the SAME IngestionCatalog tables a prior live fetch (via
+        # the POST refresh route below) already wrote into. `limit`
+        # bounds how many of the already-cataloged bars come back
+        # (most-recent-N, same semantics as a live fetch's own `limit`);
+        # it can never cause a live call to "fill in" a longer range.
+        catalog = get_catalog()
+        candles = catalog.get_cached_price_bars(ticker, timeframe, limit=limit)
+        flow_alerts = catalog.get_cached_flow_observations(ticker)
+        darkpool_trades = catalog.get_cached_darkpool_observations(ticker)
+        cached_at = catalog.get_price_bars_cached_at(ticker, timeframe)
+        # Honest: an empty cache is reported as genuinely unavailable
+        # (never fabricated/padded), with a reason that makes clear this
+        # is a "nothing cataloged yet" state, not a real UW-side failure
+        # -- the frontend must offer the explicit Refresh action from
+        # here, never silently/automatically fetch on the user's behalf.
+        unavailable = len(candles) == 0
+        reason = (
+            None if candles else
+            "No chart data cached yet for this ticker/timeframe -- use Refresh Data to fetch real bars."
+        )
+        negative_volume_bars_clamped = 0
+        raw_records_requested = None
+        raw_records_returned = None
+        regular_session_records_retained = None
+        source_label = "cache" if candles else None
+
     markers = build_markers(flow_alerts, darkpool_trades)
-    candles = ohlc.get("candles", [])
-    # Phase B: added persistence layer only -- catalogs the SAME
-    # already-session-classified/delta-corrected candles this route is
-    # about to return, plus this call's flow/dark-pool inputs. Never
-    # changes `candles`/`markers`/anything else returned below (see
-    # _catalog_scan_best_effort's docstring for the invariant this
-    # mirrors; failures here are swallowed, never surfaced to the
-    # caller).
-    if isinstance(adapter, LiveUWAdapter):
-        try:
-            catalog = get_catalog()
-            catalog.catalog_price_bars(ticker, timeframe, candles)
-            catalog.catalog_options_flow_observations(ticker, flow_alerts)
-            catalog.catalog_darkpool_observations(ticker, darkpool_trades)
-        except Exception:  # noqa: BLE001 -- never propagate, see module docstring
-            logging.getLogger(__name__).info(
-                "Phase B ingestion catalog write skipped for %s OHLC (non-fatal, response unaffected)", ticker
-            )
     # Phase B (2026-10-14) honest coverage disclosure -- production-
     # inspired (its own range_fully_satisfied/available_span_days
     # pattern): never claim a range is fully covered when UW simply
@@ -1909,10 +1986,10 @@ def ticker_ohlc(ticker: str, timeframe: str = "1d", limit: int = 180, range: Opt
         "timeframe": timeframe,
         "range": range,
         "candles": candles,
-        "source": ohlc.get("source"),
-        "negative_volume_bars_clamped": ohlc.get("negative_volume_bars_clamped", 0),
-        "unavailable": ohlc.get("unavailable", False),
-        "reason": ohlc.get("reason"),
+        "source": source_label,
+        "negative_volume_bars_clamped": negative_volume_bars_clamped,
+        "unavailable": unavailable,
+        "reason": reason,
         "markers": markers,
         "candle_count": len(candles),
         "earliest_candle": earliest_candle,
@@ -1923,10 +2000,51 @@ def ticker_ohlc(ticker: str, timeframe: str = "1d", limit: int = 180, range: Opt
         # just the final candle count -- lets a caller verify (not just
         # trust) that the raw-record-to-unique-trading-day math actually
         # worked, per Chad's requirement to show this explicitly.
-        "raw_records_requested": ohlc.get("raw_records_requested"),
-        "raw_records_returned": ohlc.get("raw_records_returned"),
-        "regular_session_records_retained": ohlc.get("regular_session_records_retained"),
+        "raw_records_requested": raw_records_requested,
+        "raw_records_returned": raw_records_returned,
+        "regular_session_records_retained": regular_session_records_retained,
+        # S1-b fix (2026-10-16): explicit cache-vs-live disclosure, same
+        # convention as _radar_impl/_ticker_analysis_impl's
+        # served_from_cache -- never let a cache-only read imply it just
+        # refreshed anything. `cached_at` is the real most-recent
+        # retrieved_at already cataloged for this ticker/timeframe (None
+        # when nothing has ever been cataloged, or when this response IS
+        # a live fetch -- live_fetch's own freshness is "now" by
+        # definition and doesn't need a second timestamp).
+        "served_from_cache": not live_fetch,
+        "cached_at": cached_at,
     }
+
+
+_ticker_ohlc_refresh_lock = threading.Lock()
+
+
+@app.post("/api/ticker/{ticker}/ohlc/refresh", dependencies=[Depends(require_auth)])
+def ticker_ohlc_refresh(ticker: str, timeframe: str = "1d", limit: int = 180, range: Optional[str] = None):
+    """S1-b fix (2026-10-16): the ONE authenticated, explicit action that
+    may trigger a real live OHLC fetch -- the only route the removed
+    GET-side capability moved to. Narrowly scoped and newly added rather
+    than reusing POST /api/ticker/{ticker}/refresh: that route's
+    _ticker_analysis_impl was read carefully first (per this round's
+    brief) and confirmed to fetch flow_alerts/darkpool_trades/
+    stock_state for SIGNAL-GATE evaluation only -- it has never called
+    adapter.get_ohlc and never cataloged price_bars at all, a genuinely
+    different data shape/purpose (gate evidence vs. chart candles) from
+    this route. Reusing it would either silently skip a real OHLC
+    refresh (if left as-is) or bolt an unrelated side effect onto a
+    route whose name/contract promises only a signal re-evaluation --
+    both worse than one small, honestly-named sibling route. Shares the
+    EXACT same auth dependency, concurrency-lock pattern, and UW
+    adapter/concurrency gate as every other explicit refresh action in
+    this file (_radar_refresh_lock / _ticker_refresh_lock) -- no new
+    collection pipeline, no new UW client, just _ticker_ohlc_impl called
+    with refresh=True instead of False."""
+    if not _ticker_ohlc_refresh_lock.acquire(blocking=False):
+        raise HTTPException(status_code=409, detail="A chart refresh for this ticker is already in progress. Try again shortly.")
+    try:
+        return _ticker_ohlc_impl(ticker, timeframe=timeframe, limit=limit, range=range, refresh=True)
+    finally:
+        _ticker_ohlc_refresh_lock.release()
 
 
 @app.get("/api/investigate/availability")
