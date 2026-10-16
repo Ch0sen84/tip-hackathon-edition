@@ -113,24 +113,38 @@ const NAV_VIEWS = ["radar", "ticker", "settings", "about", "marketwide"];
 
 function parseNavHash(hash) {
   const raw = String(hash || "").replace(/^#/, "");
-  if (!raw) return { view: null, ticker: null };
+  if (!raw) return { view: null, ticker: null, mode: null };
   const params = new URLSearchParams(raw);
   // Legacy format from the prior session: a bare `#ticker=XXX` with no
   // `view=` key at all.
   if (!params.has("view") && params.has("ticker")) {
     const t = params.get("ticker");
-    return { view: "ticker", ticker: t ? t.toUpperCase() : null };
+    return { view: "ticker", ticker: t ? t.toUpperCase() : null, mode: null };
   }
   let view = params.get("view");
   if (!NAV_VIEWS.includes(view)) view = null;
   const ticker = params.get("ticker");
-  return { view, ticker: ticker ? ticker.toUpperCase() : null };
+  // UX round (2026-10-16 round 5), item 2: `mode` only ever means
+  // something on the "radar" view (My Watchlist vs Market Discovery
+  // sub-panel) -- see setRadarMode/applyNavState's "radar" branch.
+  const mode = params.get("mode") === "discovery" ? "discovery" : null;
+  return { view, ticker: ticker ? ticker.toUpperCase() : null, mode };
 }
 
 function buildNavHash(view, ticker) {
   const params = new URLSearchParams();
   params.set("view", view);
   if (view === "ticker" && ticker) params.set("ticker", ticker);
+  // UX round (2026-10-16 round 5), item 2: reads the CURRENT _radarMode
+  // directly (module-level state in this same file, already set by the
+  // time any real navigation runs) rather than threading a new
+  // parameter through every pushNav/replaceNav call site -- so Radar's
+  // own hash always reflects whichever sub-panel is actually showing,
+  // the same way every other view's hash already reflects its own
+  // current state.
+  if (view === "radar" && typeof _radarMode !== "undefined" && _radarMode === "discovery") {
+    params.set("mode", "discovery");
+  }
   return `#${params.toString()}`;
 }
 
@@ -206,6 +220,15 @@ function applyNavState(state, handlers, opts = {}) {
   const setHistory = (view, ticker) => { if (push) pushNav(view, ticker); else replaceNav(view, ticker); };
 
   if (!state || !state.view || state.view === "radar") {
+    // UX round (2026-10-16 round 5), item 2: restore the Market
+    // Discovery/My Watchlist sub-panel from the URL FIRST (persist:
+    // false -- setHistory right below writes the one real history
+    // entry, reading this now-current _radarMode via buildNavHash), so
+    // an F5 refresh/deep-link/Back-Forward onto "radar" lands on
+    // whichever sub-panel was actually showing, not always back to the
+    // My Watchlist default -- same restore-from-URL pattern Market
+    // Intelligence's own "marketwide" branch below already established.
+    setRadarMode((state && state.mode) || "watchlist", { persist: false });
     setHistory("radar", null);
     switchView("radar");
     return;
@@ -521,25 +544,52 @@ function navigateToTicker(ticker, loadTickerDetailFn, opts = {}) {
 // two sibling panels is visible. "watchlist" is the default/unchanged
 // panel; "discovery" is lazily loaded (onDiscoverySelected callback)
 // only the first time it's selected, never pre-fetched on page load.
+//
+// UX round (2026-10-16 round 5), item 2: this sub-view selection used to
+// live ONLY in the module-level _radarMode variable -- invisible to the
+// URL, so an F5 refresh (or a deep link) always bounced back to
+// "watchlist" even if the user had explicitly switched to "Market
+// Discovery". Fixed the EXACT SAME way Market Intelligence's own view
+// was already fixed (see NAV_VIEWS/buildNavHash/parseNavHash/
+// applyNavState's "marketwide" branch, plus that section's own comment
+// explaining the original bug): the sub-mode now rides along in the
+// `#view=radar&mode=discovery` hash, restored on bootstrap/F5/Back-
+// Forward via applyNavState's "radar" branch below, through this one
+// shared setRadarMode() function (never a second, parallel switch-panel
+// implementation for the restore path vs the click path).
 let _radarMode = "watchlist";
+let _radarModeDiscoveryLoaded = false;
+let _onDiscoverySelectedCallback = null;
+
+function setRadarMode(mode, opts = {}) {
+  const { persist = true } = opts;
+  mode = mode === "discovery" ? "discovery" : "watchlist";
+  _radarMode = mode;
+  const toggle = document.getElementById("radarModeToggle");
+  if (toggle) {
+    toggle.querySelectorAll("[data-radar-mode]").forEach((b) => b.classList.toggle("active", b.dataset.radarMode === mode));
+  }
+  const wl = document.getElementById("watchlistRadarSection");
+  const disc = document.getElementById("discoveryRadarSection");
+  if (wl) wl.style.display = mode === "watchlist" ? "" : "none";
+  if (disc) disc.style.display = mode === "discovery" ? "" : "none";
+  if (mode === "discovery" && !_radarModeDiscoveryLoaded) {
+    _radarModeDiscoveryLoaded = true;
+    if (typeof _onDiscoverySelectedCallback === "function") _onDiscoverySelectedCallback();
+  }
+  // A plain sub-view toggle updates the CURRENT history entry in place
+  // (same "replace, never push" convention applyNavState/bootstrap/
+  // popstate restores already use) -- never adds a Back stop just for
+  // flipping between the two Radar panels.
+  if (persist) replaceNav("radar", null);
+}
+
 function wireRadarModeToggle(onDiscoverySelected) {
+  _onDiscoverySelectedCallback = onDiscoverySelected;
   const toggle = document.getElementById("radarModeToggle");
   if (!toggle) return;
-  let discoveryLoaded = false;
   toggle.querySelectorAll("[data-radar-mode]").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      const mode = btn.dataset.radarMode;
-      _radarMode = mode;
-      toggle.querySelectorAll("[data-radar-mode]").forEach((b) => b.classList.toggle("active", b === btn));
-      const wl = document.getElementById("watchlistRadarSection");
-      const disc = document.getElementById("discoveryRadarSection");
-      if (wl) wl.style.display = mode === "watchlist" ? "" : "none";
-      if (disc) disc.style.display = mode === "discovery" ? "" : "none";
-      if (mode === "discovery" && !discoveryLoaded) {
-        discoveryLoaded = true;
-        if (typeof onDiscoverySelected === "function") onDiscoverySelected();
-      }
-    });
+    btn.addEventListener("click", () => setRadarMode(btn.dataset.radarMode));
   });
 }
 
@@ -612,8 +662,8 @@ function renderSchedulerControls(status) {
       separate, manual-only <strong>Refresh Data</strong> action on My Watchlist, never this scheduler.
     </div>
     <div class="muted" style="font-size:12px;margin-top:4px">
-      Last run: ${esc(status.last_run_finished_at || "never")} &middot;
-      Next run: ${esc(status.next_run_at || "n/a")} &middot;
+      Last run: ${esc(status.last_run_finished_at && typeof formatTimestampFull === "function" ? formatTimestampFull(status.last_run_finished_at) : (status.last_run_finished_at || "never"))} &middot;
+      Next run: ${esc(status.next_run_at && typeof formatTimestampFull === "function" ? formatTimestampFull(status.next_run_at) : (status.next_run_at || "n/a"))} &middot;
       Candidates evaluated last cycle: ${status.last_cycle_candidates_evaluated ?? "n/a"} &middot;
       Freshness window: ${Math.round((status.freshness_window_s || 0) / 60)}m &middot;
       Top-N configured: ${esc(String(topN))}
@@ -635,6 +685,55 @@ const FRESHNESS_LABELS = {
   unevaluated: "Unevaluated",
 };
 
+// UX round (2026-10-16 round 5), item 1: "Why TIP surfaced this" --
+// REAL discovery-pipeline fields only (see backend/app/core/discovery.py's
+// normalize_discovery_candidate, the ONLY place this raw_json shape is
+// produced), never a fabricated number or evidence string. Each field is
+// rendered in one of exactly two visually/textually distinct states:
+//   * missing/None ("not captured by the screener for this snapshot") --
+//     the field genuinely was never reported -- styled with the SAME
+//     .px-unavailable convention fmtPriceLine() already established
+//     (italic, muted) so "unavailable" means the same thing everywhere
+//     in this app, never a second invented look.
+//   * present, including a real 0 ("checked and found nothing", e.g.
+//     put_volume: 0) -- rendered as a normal, non-italic value, exactly
+//     like any other real number -- a genuine zero must never look the
+//     same as "we don't know".
+const WHY_SURFACED_FIELDS = [
+  { key: "net_premium", label: "Net premium", fmt: (v) => `$${Math.round(Number(v)).toLocaleString()}` },
+  { key: "call_volume", label: "Call volume", fmt: (v) => Number(v).toLocaleString() },
+  { key: "put_volume", label: "Put volume", fmt: (v) => Number(v).toLocaleString() },
+  { key: "iv_rank", label: "IV rank", fmt: (v) => Number(v).toFixed(1) },
+  { key: "change_percent", label: "1D change", fmt: (v) => fmtPct(v) },
+];
+
+function renderWhySurfacedBlock(candidate) {
+  const raw = candidate.raw;
+  if (raw == null) {
+    // The whole raw_json is missing (no discovery record cataloged at
+    // all for this candidate) -- distinct from any one field being
+    // missing; say so plainly rather than rendering five empty fields.
+    return `<div class="why-surfaced muted" style="font-size:11.5px;margin-top:4px">
+      <strong>Why TIP surfaced this:</strong>
+      <span class="px-unavailable">no discovery details were captured for this snapshot</span>
+    </div>`;
+  }
+  const parts = WHY_SURFACED_FIELDS.map((f) => {
+    const v = raw[f.key];
+    if (v === null || v === undefined) {
+      return `<span title="Not captured by the screener for this snapshot">${esc(f.label)}: `
+        + `<span class="px-unavailable">not captured</span></span>`;
+    }
+    return `<span>${esc(f.label)}: <strong>${esc(f.fmt(v))}</strong></span>`;
+  }).join(" &middot; ");
+  const sourceDateNote = raw.source_date
+    ? ` <span class="muted" style="font-size:11px">(screener date: ${esc(raw.source_date)})</span>`
+    : "";
+  return `<div class="why-surfaced" style="font-size:11.5px;margin-top:4px">
+    <strong>Why TIP surfaced this:</strong> ${parts}${sourceDateNote}
+  </div>`;
+}
+
 function renderMarketWideCandidateRow(candidate) {
   const badgeClass = `freshness-badge freshness-${candidate.freshness}`;
   const evalState = candidate.evaluation
@@ -646,12 +745,22 @@ function renderMarketWideCandidateRow(candidate) {
   // no cataloged evaluation at all (never a fabricated "0m old").
   const retrievedAt = candidate.evaluation ? candidate.evaluation.retrieved_at : null;
   const ageNote = typeof formatRelative === "function" ? formatRelative(retrievedAt) : (candidate.age_s != null ? `${Math.round(candidate.age_s / 60)}m old` : "never evaluated");
+  // UX round (2026-10-16 round 5), item 1: "View Details" -- reuses the
+  // EXACT SAME data-investigate-ticker attribute + wireInvestigateButtons
+  // wiring Market Radar's own Investigate buttons already use (see
+  // wireInvestigateButtons below), so it opens Ticker Analysis through
+  // the identical, already-tested URL-backed ticker-context mechanism --
+  // never a second, parallel navigation path invented for this view.
   return `
-    <div class="candidate-row" data-ticker="${esc(candidate.ticker)}">
-      <span class="ticker">${esc(candidate.ticker)}</span>
-      <span class="${badgeClass}">${esc(FRESHNESS_LABELS[candidate.freshness] || candidate.freshness)}</span>
-      <span class="muted">${evalState}</span>
-      <span class="muted" style="font-size:11px" title="${esc(typeof formatTimestampET === "function" ? formatTimestampET(retrievedAt) : "")}">${esc(ageNote)}</span>
+    <div class="candidate-row market-wide-row" data-ticker="${esc(candidate.ticker)}">
+      <div class="market-wide-row-main">
+        <span class="ticker">${esc(candidate.ticker)}</span>
+        <span class="${badgeClass}">${esc(FRESHNESS_LABELS[candidate.freshness] || candidate.freshness)}</span>
+        <span class="muted">${evalState}</span>
+        <span class="muted" style="font-size:11px" title="${esc(typeof formatTimestampET === "function" ? formatTimestampET(retrievedAt) : "")}">${esc(ageNote)}</span>
+        <button class="btn-link btn-investigate" data-investigate-ticker="${esc(candidate.ticker)}" aria-label="View Details for ${esc(candidate.ticker)} in Ticker Analysis">View Details &rarr;</button>
+      </div>
+      ${renderWhySurfacedBlock(candidate)}
     </div>
   `;
 }
@@ -672,7 +781,16 @@ function renderMarketWideSummary(data, status) {
   const shown = (data.candidates || []).length;
   const evaluated = (data.candidates || []).filter((c) => c.freshness === "current" || c.freshness === "stale").length;
   const awaiting = Math.max(0, shown - evaluated);
-  const asOf = data.snapshot_at ? `as of ${esc(data.snapshot_at)}` : "no scan yet";
+  // UX round (2026-10-16 round 5), item 3: was a raw ISO-with-microseconds
+  // string shown straight from the API response -- the one shared
+  // frontend/timefmt.js formatter now renders it the same human-readable
+  // way every other trader-facing timestamp in this app already is.
+  const asOf = data.snapshot_at
+    ? `as of ${esc(typeof formatTimestampFull === "function" ? formatTimestampFull(data.snapshot_at) : data.snapshot_at)}`
+    : "no scan yet";
+  const truncationNote = data.rows_truncated_note
+    ? `<div class="muted" style="font-size:12px;margin-top:3px">${esc(data.rows_truncated_note)}</div>`
+    : "";
   const modeNote = !status
     ? ""
     : status.mode === "disabled"
@@ -688,6 +806,7 @@ function renderMarketWideSummary(data, status) {
       <span class="muted">${esc(asOf)}</span>
     </div>
     <div class="muted" style="font-size:12px;margin-top:3px">${esc(modeNote)}</div>
+    ${truncationNote}
   `;
 }
 
@@ -1287,7 +1406,12 @@ function renderDiscoveryCandidateList(candidates, meta) {
   // "data as of" (UW's source date, rendered per-row above) are
   // deliberately two distinct, separately-labeled values -- see Chad's
   // item #8; this line is never implied to be the market-data date.
-  const snapshotTxt = meta && meta.snapshot_at ? `Fetched at: ${esc(meta.snapshot_at)}` : "";
+  // UX round (2026-10-16 round 5), item 3: same timefmt.js formatter as
+  // every other trader-facing timestamp -- this used to render the raw
+  // ISO-with-microseconds string straight from the API.
+  const snapshotTxt = meta && meta.snapshot_at
+    ? `Fetched at: ${esc(typeof formatTimestampFull === "function" ? formatTimestampFull(meta.snapshot_at) : meta.snapshot_at)}`
+    : "";
   const countTxt = meta ? `${esc(meta.count)} candidate(s) &middot; ranked by net premium magnitude` : "";
   // Priority 5 fix (2026-10-15 round 3): this used to say "used N screener
   // request(s)" unconditionally -- in Demo Mode (meta.source ===

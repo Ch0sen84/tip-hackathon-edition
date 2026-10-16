@@ -693,11 +693,15 @@ async function runDiscoveryScan() {
     // matching fix in renderDiscoveryCandidateList() for the same bug in
     // the per-scan summary line below the table.
     const isSyntheticSource = data.source === "synthetic_discovery_fixture";
+    // UX round (2026-10-16 round 5), item 3: same shared timefmt.js
+    // formatter as every other trader-facing timestamp -- this used to
+    // interpolate the raw ISO-with-microseconds snapshot_at string.
+    const snapshotNote = typeof formatTimestampFull === "function" ? formatTimestampFull(data.snapshot_at) : (data.snapshot_at || "n/a");
     statusEl.textContent = data.unavailable
       ? `Screener unavailable: ${(data.reason && data.reason.message) || "see Settings/UW key"}`
       : isSyntheticSource
-        ? `Scan complete (synthetic demo data, no real UW API call) \u00b7 snapshot ${data.snapshot_at || "n/a"}`
-        : `Scan complete \u2014 used ${data.screener_requests_used} screener request(s) \u00b7 snapshot ${data.snapshot_at || "n/a"}`;
+        ? `Scan complete (synthetic demo data, no real UW API call) \u00b7 snapshot ${snapshotNote}`
+        : `Scan complete \u2014 used ${data.screener_requests_used} screener request(s) \u00b7 snapshot ${snapshotNote}`;
     listEl.innerHTML = renderDiscoveryCandidateList(data.candidates, data);
     wireDiscoveryEvaluateButtons();
   } catch (err) {
@@ -1085,6 +1089,11 @@ async function loadMarketWideRadar() {
     }
     const data = await apiGetAuthed("/api/radar/market-wide");
     if (listEl) listEl.innerHTML = renderMarketWideRadar(data);
+    // UX round (2026-10-16 round 5), item 1: wires each row's new "View
+    // Details" button through the EXACT SAME wireInvestigateButtons/
+    // navigateToTicker path Market Radar's own Investigate buttons use
+    // (see app.core.js) -- never a second, parallel click handler.
+    wireInvestigateButtons(loadTickerDetail);
     const summaryEl = document.getElementById("marketWideSummary");
     if (summaryEl) summaryEl.innerHTML = renderMarketWideSummary(data, status);
     if (statusEl) statusEl.textContent = "";
