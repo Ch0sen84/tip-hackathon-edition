@@ -109,11 +109,27 @@ def build_gate_inputs(ticker: str, flow_alerts: list, darkpool_trades: list,
                        price_move_pct: Optional[float] = None,
                        is_new_qualifying_day: bool = False,
                        api_errors: int = 0,
-                       catalyst_identified: bool = False) -> dict:
+                       catalyst_identified: bool = False,
+                       catalog_dark_pool_baseline: Optional[dict] = None) -> dict:
     """Pure transform: raw UW-shaped lists -> the keyword arguments
     signal_engine.evaluate_gates expects. Exposed separately from
-    evaluate_ticker_scan so tests can assert on the intermediate shape."""
-    dp = _darkpool_metrics(darkpool_trades or [])
+    evaluate_ticker_scan so tests can assert on the intermediate shape.
+
+    Phase C, ADDITIVE ONLY: `catalog_dark_pool_baseline`, when supplied,
+    is a dict already shaped exactly like `_darkpool_metrics`'s return
+    value (tier1_hit/tier1_bootstrap/tier1_ratio/tier1_z/total_premium) --
+    see app/core/dark_pool_baseline.BaselineResult.as_gate_inputs(), which
+    produces precisely that shape from a real historical-baseline
+    computation over the Phase B catalog tables. When it is None (every
+    existing caller, and still the only path for the synthetic/demo
+    adapter, which is never cataloged), behavior is BYTE-FOR-BYTE
+    unchanged from before this phase: the old `_darkpool_metrics` heuristic
+    over `darkpool_trades`' own `avg_premium_baseline` field runs exactly
+    as it always has. This is the one new input Live Mode scans can now
+    supply for the dark_pool_anomaly gate -- signal_engine.evaluate_gates
+    itself is untouched; this only changes what gets passed INTO its
+    existing tier1_* keyword arguments."""
+    dp = catalog_dark_pool_baseline if catalog_dark_pool_baseline is not None else _darkpool_metrics(darkpool_trades or [])
     of = _options_flow_metrics(flow_alerts or [])
     direction = _direction_heuristic(of, dp)
     today_premium = dp["total_premium"] + of["today_premium_from_alerts"]
@@ -136,15 +152,21 @@ def evaluate_ticker_scan(ticker: str, flow_alerts: list, darkpool_trades: list,
                           is_new_qualifying_day: bool = False,
                           api_errors: int = 0,
                           catalyst_identified: bool = False,
-                          percentile_gate_fn=None) -> dict:
+                          percentile_gate_fn=None,
+                          catalog_dark_pool_baseline: Optional[dict] = None) -> dict:
     """End-to-end: raw adapter data -> gates -> confidence -> state
     transition. Returns everything the API layer needs to render both
-    Market Radar and Ticker Analysis for one ticker."""
+    Market Radar and Ticker Analysis for one ticker.
+
+    `catalog_dark_pool_baseline` is passed straight through to
+    `build_gate_inputs` -- see its docstring; omitting it (the default)
+    reproduces pre-Phase-C behavior exactly."""
     inputs = build_gate_inputs(ticker, flow_alerts, darkpool_trades,
                                 price_move_pct=price_move_pct,
                                 is_new_qualifying_day=is_new_qualifying_day,
                                 api_errors=api_errors,
-                                catalyst_identified=catalyst_identified)
+                                catalyst_identified=catalyst_identified,
+                                catalog_dark_pool_baseline=catalog_dark_pool_baseline)
     direction = inputs["direction_heuristic"]
     gates = se.evaluate_gates(percentile_gate_fn=percentile_gate_fn, **inputs)
     confidence, signal_type, reason, qualifies = se.classify_confidence(gates)

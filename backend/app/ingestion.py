@@ -465,6 +465,58 @@ class IngestionCatalog:
             return {"status": row[0], "pages_walked": row[1],
                     "session_start_verified": bool(row[2]), "retrieved_at": row[3]}
 
+    # --- Phase C: read-only accessors for the baseline methodology module
+    # (app/core/dark_pool_baseline.py). Both are pure reads of whatever
+    # Phase B already cataloged -- neither triggers a fetch, a backfill,
+    # or any live call of any kind.
+
+    def list_coverage_status(self, ticker: str) -> list:
+        """Every darkpool_coverage_status row cataloged for `ticker`,
+        oldest first -- includes 'complete'/'incomplete'/'unknown' rows
+        alike; filtering those down to the eligible ('complete'-only) set
+        is deliberately NOT done here (see
+        dark_pool_baseline.eligible_sessions, the one place that happens)."""
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT coverage_date, status, pages_walked, session_start_verified, retrieved_at "
+                "FROM darkpool_coverage_status WHERE ticker = ? ORDER BY coverage_date",
+                (ticker,),
+            ).fetchall()
+        return [
+            {
+                "coverage_date": row[0], "status": row[1], "pages_walked": row[2],
+                "session_start_verified": bool(row[3]), "retrieved_at": row[4],
+            }
+            for row in rows
+        ]
+
+    def list_darkpool_observations_by_date(self, ticker: str) -> dict:
+        """Every cataloged darkpool_observations row for `ticker`, grouped
+        by the calendar date (the first 10 chars of its ISO `event_time`)
+        it falls on, each shaped as {"event_time": ..., "premium": float}
+        -- the minimal shape dark_pool_baseline.cumulative_through_elapsed
+        needs. `premium` is read out of the stored `raw_json` (the exact
+        upstream UW field `catalog_darkpool_observations` stored verbatim,
+        never re-derived)."""
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT event_time, raw_json FROM darkpool_observations "
+                "WHERE ticker = ? ORDER BY event_time",
+                (ticker,),
+            ).fetchall()
+        grouped: dict = {}
+        for event_time, raw_json in rows:
+            date_key = (event_time or "")[:10]
+            premium = 0.0
+            if raw_json:
+                try:
+                    data = json.loads(raw_json)
+                    premium = float(data.get("premium") or 0)
+                except (json.JSONDecodeError, TypeError, ValueError):
+                    premium = 0.0
+            grouped.setdefault(date_key, []).append({"event_time": event_time, "premium": premium})
+        return grouped
+
     # --- freshness decision (used by backfill/pagination jobs ONLY --
     # never by the on-demand Radar/Ticker-Analysis/Discovery routes,
     # which must always reflect a fresh live fetch; see module docstring) --
