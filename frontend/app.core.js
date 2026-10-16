@@ -676,6 +676,49 @@ function renderSchedulerControls(status) {
       <span class="muted" style="font-size:12px;max-width:520px">${runOnceActionCopy}</span>
     </div>
     <div id="schedulerRunOnceStatus" class="muted" style="font-size:12px;margin-top:4px"></div>
+    ${renderRunOnceDepthActions(status, runningNow, topN)}
+  `;
+}
+
+// Final remediation round (2026-10-16): the actual fix for "Run Once
+// currently requires arming Dry Run/Enabled first". These two buttons
+// call the NEW backend depth-based one-time path
+// (POST /api/scheduler/run-once with an explicit `depth`), which is
+// fully decoupled from the mode toggle above -- they work (and are the
+// ONLY way to run a one-time scan) while mode stays Disabled, and work
+// identically regardless of whatever mode is currently selected.
+// Deliberately rendered as its OWN bordered card with a "ONE-TIME"
+// .tag badge, visually and structurally separate from
+// .radar-mode-toggle above it, so a user cannot mistake clicking one
+// of these for turning on recurring scheduling -- that mode toggle is
+// untouched, unmodified, and still the only thing that writes a
+// recurring mode.
+function renderRunOnceDepthActions(status, runningNow, topN) {
+  const modeShort = esc(schedulerModeShortLabel(status.mode));
+  return `
+    <div class="card" id="runOnceActionsCard" style="margin-top:14px;padding:12px 14px;gap:8px;border-color:var(--accent2)">
+      <div class="card-head" style="margin-bottom:0">
+        <span class="tag" style="color:var(--accent)">ONE-TIME SCAN</span>
+        <span class="muted" style="font-size:11.5px">Independent of the recurring mode above -- works even while it's <strong>${modeShort}</strong>, and never changes it</span>
+      </div>
+      <div class="muted" style="font-size:12px">
+        Run a single market-wide scan right now without enabling recurring background collection. The recurring
+        mode stays exactly as set (currently <strong>${modeShort}</strong>) before, during, and after either action below.
+      </div>
+      <div class="settings-row" style="gap:10px;align-items:flex-start">
+        <button class="btn run-once-depth-btn" id="discoverOnceBtn" data-depth="discovery_only" ${runningNow ? "disabled" : ""}>
+          Discover Once
+        </button>
+        <span class="muted" style="font-size:11.5px;max-width:230px">Runs one market screener cycle, catalogs discovered candidates, then stops. No per-ticker evaluation.</span>
+      </div>
+      <div class="settings-row" style="gap:10px;align-items:flex-start;margin-top:2px">
+        <button class="btn run-once-depth-btn" id="discoverEvaluateOnceBtn" data-depth="discovery_plus_evaluation" ${runningNow ? "disabled" : ""}>
+          Discover &amp; Evaluate Once
+        </button>
+        <span class="muted" style="font-size:11.5px;max-width:230px">Runs one market screener cycle, then evaluates the top <strong>${esc(String(topN))}</strong> ranked candidates (configured top-N), then stops.</span>
+      </div>
+      <div id="runOnceDepthProgress" class="muted" style="font-size:12px;min-height:16px"></div>
+    </div>
   `;
 }
 

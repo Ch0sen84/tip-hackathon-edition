@@ -1086,6 +1086,16 @@ async function loadMarketWideRadar() {
       wireSchedulerModeToggle();
       const runOnceBtn = document.getElementById("schedulerRunOnceBtn");
       if (runOnceBtn) runOnceBtn.addEventListener("click", runSchedulerOnce);
+      // Final remediation round: the two decoupled one-time actions --
+      // same wiring pattern as the legacy button above (fresh element
+      // lookup every render, since controlsEl.innerHTML was just
+      // replaced), each posting its own fixed `depth` value.
+      const discoverOnceBtn = document.getElementById("discoverOnceBtn");
+      if (discoverOnceBtn) discoverOnceBtn.addEventListener("click", () => runOneTimeDepthAction("discovery_only"));
+      const discoverEvaluateOnceBtn = document.getElementById("discoverEvaluateOnceBtn");
+      if (discoverEvaluateOnceBtn) {
+        discoverEvaluateOnceBtn.addEventListener("click", () => runOneTimeDepthAction("discovery_plus_evaluation"));
+      }
     }
     const data = await apiGetAuthed("/api/radar/market-wide");
     if (listEl) listEl.innerHTML = renderMarketWideRadar(data);
@@ -1152,6 +1162,74 @@ async function runSchedulerOnce() {
     btn.disabled = false;
     btn.textContent = originalLabel;
     if (statusEl) statusEl.textContent = `Run Once failed: ${err.message}`;
+  }
+}
+
+// Final remediation round (2026-10-16): client-side guard for the two
+// decoupled one-time actions -- belt-and-suspenders alongside the
+// server-side lease/lock rejection (the REAL protection), same pattern
+// _watchlistRefreshInFlight already establishes below for W2's Refresh
+// Data action. Shared across BOTH depth buttons (not per-button) since
+// the backend's single in-process cycle lock means only one of these
+// two actions can genuinely be running at a time anyway.
+let _runOnceDepthInFlight = false;
+
+async function runOneTimeDepthAction(depth) {
+  if (_runOnceDepthInFlight) return; // a duplicate click while a request is already in flight is a silent no-op
+  const discoverBtn = document.getElementById("discoverOnceBtn");
+  const evalBtn = document.getElementById("discoverEvaluateOnceBtn");
+  const progressEl = document.getElementById("runOnceDepthProgress");
+  _runOnceDepthInFlight = true;
+  [discoverBtn, evalBtn].forEach((b) => {
+    if (b) b.disabled = true;
+  });
+  const activeBtn = depth === "discovery_only" ? discoverBtn : evalBtn;
+  const originalLabel = activeBtn ? activeBtn.textContent : "";
+  if (activeBtn) {
+    activeBtn.textContent = depth === "discovery_only" ? "Discovering..." : "Discovering & evaluating...";
+  }
+  if (progressEl) {
+    progressEl.textContent = depth === "discovery_only"
+      ? "Running a one-time market screener scan (discovery only, no per-ticker evaluation)..."
+      : "Running a one-time market screener scan, then evaluating the configured top-ranked candidates...";
+    progressEl.style.color = "";
+  }
+  let finalMessage = "";
+  let isError = false;
+  try {
+    const result = await apiPost("/api/scheduler/run-once", { depth });
+    const modeLabel = typeof schedulerModeShortLabel === "function" ? schedulerModeShortLabel(result.mode) : result.mode;
+    if (depth === "discovery_only") {
+      finalMessage = `Discover Once complete -- candidates discovered and cataloged. Recurring mode unchanged (still ${modeLabel}).`;
+    } else {
+      const n = result.candidates_evaluated ?? 0;
+      finalMessage = `Discover & Evaluate Once complete -- ${n} candidate(s) evaluated. Recurring mode unchanged (still ${modeLabel}).`;
+    }
+  } catch (err) {
+    // The shared lease/lock 409 rejection (a second one-time request, or
+    // a genuinely concurrent recurring cycle) and any other failure both
+    // land here with a real, specific message -- never a silent no-op.
+    isError = true;
+    const actionLabel = depth === "discovery_only" ? "Discover Once" : "Discover & Evaluate Once";
+    finalMessage = `${actionLabel} failed: ${err.message}`;
+  } finally {
+    _runOnceDepthInFlight = false;
+    if (activeBtn) activeBtn.textContent = originalLabel;
+  }
+  // Refresh scheduler status + the candidate list from the real backend
+  // (same full reload the legacy Run Once button triggers) BEFORE
+  // writing the completion/error message -- loadMarketWideRadar()
+  // rebuilds #schedulerControls' entire innerHTML from a fresh
+  // renderSchedulerControls() call, which would otherwise wipe out a
+  // message set before this reload almost instantly (a real flash-and-
+  // vanish risk the UI requirements explicitly call out). Writing the
+  // message AFTER the reload, into the freshly-rendered node, is what
+  // makes it actually stick on screen long enough to read.
+  await loadMarketWideRadar();
+  const freshProgressEl = document.getElementById("runOnceDepthProgress");
+  if (freshProgressEl) {
+    freshProgressEl.textContent = finalMessage;
+    freshProgressEl.style.color = isError ? "#b45309" : "";
   }
 }
 
