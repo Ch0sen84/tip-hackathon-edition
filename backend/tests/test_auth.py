@@ -214,3 +214,94 @@ def test_auth_token_store_matches_is_constant_time_and_correct(tmp_path):
     assert store.matches("wrong") is False
     assert store.matches(None) is False
     assert store.matches("") is False
+
+
+# --- Bootstrap route: Host/Origin/DNS-rebinding/forwarded-header hardening
+#
+# Chad's pre-merge security pass (2026-10-15/16): the generic Host/CORS
+# tests in test_cors_host_hardening.py exercise /api/settings, not
+# /api/auth/bootstrap specifically -- these pin the EXACT route that hands
+# out the token, since TrustedHostMiddleware/CORSMiddleware wrap the whole
+# ASGI app and a future refactor that accidentally exempted this one route
+# (e.g. moved it outside the middleware stack) would be the single most
+# dangerous regression possible here and deserves its own direct test.
+
+
+def test_bootstrap_rejects_mismatched_host_header_dns_rebinding(app_main):
+    """DNS rebinding: an attacker's page at evil.example.com gets the
+    victim's DNS resolver to answer evil.example.com -> 127.0.0.1, then
+    navigates/fetches http://evil.example.com:PORT/api/auth/bootstrap.
+    The TCP connection genuinely lands on this loopback server (so an
+    IP-only loopback check would wrongly allow it), but the browser's
+    Host header is still "evil.example.com" -- TrustedHostMiddleware must
+    reject this with 400 before the loopback-IP check in auth_bootstrap()
+    is ever reached, and the body must not leak the token."""
+    client = _client_without_auth(app_main)
+    resp = client.get("/api/auth/bootstrap", headers={"Host": "evil.example.com"})
+    assert resp.status_code == 400
+    assert "Invalid host header" in resp.text
+    assert app_main.auth_token not in resp.text
+
+
+def test_bootstrap_cors_rejects_foreign_origin(app_main):
+    """A foreign origin's own JS calling fetch() against this exact route
+    must never receive an access-control-allow-origin that would let the
+    browser's CORS check pass and the response body actually be read --
+    verified here at the header level (TestClient, unlike curl, still
+    reflects the real CORSMiddleware response headers); a live cross-
+    origin fetch() from a genuine second-origin browser page during this
+    verification pass independently confirmed the browser-side effect is
+    a hard "TypeError: Failed to fetch", not merely a missing header."""
+    client = _client_without_auth(app_main)
+    resp = client.get(
+        "/api/auth/bootstrap",
+        headers={"Origin": "https://evil.example.com"},
+    )
+    # The handler itself still runs for a same-host GET with a foreign
+    # Origin (CORS is a browser-enforced, not server-enforced, control --
+    # this is exactly why the header-level assertion below is the one
+    # that actually matters): the real protection is that no ACAO header
+    # names that origin, so a genuine browser's JS can never read this.
+    assert resp.headers.get("access-control-allow-origin") != "https://evil.example.com"
+
+
+def test_bootstrap_ignores_spoofed_forwarded_headers(app_main):
+    """A remote attacker cannot bypass the loopback restriction by adding
+    X-Forwarded-For/X-Real-IP/Forwarded headers claiming 127.0.0.1 --
+    this app never runs uvicorn with --proxy-headers and never reads any
+    forwarded-* header anywhere (grepped this session: zero matches in
+    main.py/auth.py) -- request.client.host is the one and only signal
+    is_loopback() ever sees, sourced from the genuine ASGI transport
+    peer address, not from any attacker-controlled header."""
+    from starlette.requests import Request
+
+    scope = {
+        "type": "http",
+        "method": "GET",
+        "path": "/api/auth/bootstrap",
+        "headers": [
+            (b"x-forwarded-for", b"127.0.0.1"),
+            (b"x-real-ip", b"127.0.0.1"),
+            (b"forwarded", b"for=127.0.0.1"),
+        ],
+        "client": ("203.0.113.5", 54321),  # the REAL peer -- remote, not loopback
+        "server": ("127.0.0.1", 8000),
+        "query_string": b"",
+    }
+    request = Request(scope)
+    with pytest.raises(HTTPException) as excinfo:
+        app_main.auth_bootstrap(request)
+    assert excinfo.value.status_code == 403
+    # The 403 detail text is a static help message -- confirm it never
+    # echoes the real token even incidentally.
+    assert app_main.auth_token not in str(excinfo.value.detail)
+
+
+def test_bootstrap_error_response_never_contains_token(app_main):
+    """Belt-and-suspenders: both failure paths (Host mismatch, non-
+    loopback peer) must never leak the real token value anywhere in the
+    response body, regardless of how the request was constructed."""
+    client = _client_without_auth(app_main)
+    resp = client.get("/api/auth/bootstrap")  # TestClient peer = "testclient", non-loopback
+    assert resp.status_code == 403
+    assert app_main.auth_token not in resp.text
