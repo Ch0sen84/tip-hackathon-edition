@@ -867,6 +867,19 @@ function initWatchlistEditor() {
       statusEl.textContent = `"${raw}" doesn't look like a valid ticker symbol.`;
       return;
     }
+    // Reliability round (2026-10-16), item 5: adding a ticker already on
+    // the watchlist used to be a silent no-op from the user's point of
+    // view -- the `Set` below already deduped it (so no duplicate chip
+    // ever rendered), the input cleared as if something happened, and
+    // saveWatchlist() still fired a real PUT that persisted an
+    // unchanged list. Nothing distinguished "added" from "already had
+    // it" from "nothing happened." Give clear, specific feedback and
+    // skip the network round-trip entirely for the genuine no-op case.
+    if (currentTickers().includes(raw)) {
+      statusEl.textContent = `"${raw}" is already on your watchlist.`;
+      addInput.value = "";
+      return;
+    }
     const updated = Array.from(new Set([...currentTickers(), raw]));
     addInput.value = "";
     saveWatchlist(updated);
