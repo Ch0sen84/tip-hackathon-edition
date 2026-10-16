@@ -63,6 +63,7 @@ import threading
 from datetime import date, datetime, timezone
 from typing import Callable, Optional
 
+from .adapters.synthetic_adapter import SyntheticDataAdapter
 from .core import discovery as discovery_module
 from .core import uw_concurrency
 from .core.scheduler_store import SchedulerStore, new_worker_id
@@ -126,6 +127,19 @@ class SchedulerRunner:
         self._lease_token: Optional[str] = None
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
+        # QA remediation D9: an in-process, non-blocking mutual-exclusion
+        # lock around the ACT of running a cycle -- separate from (and in
+        # addition to) the cross-process SQLite lease above. The lease
+        # alone does not stop two concurrent calls FROM THE SAME
+        # worker_id (e.g. the background loop thread and a manual
+        # run-once HTTP request both using this one SchedulerRunner
+        # instance) from both successfully acquiring/renewing it, since
+        # try_acquire_lease is intentionally idempotent for its own
+        # worker_id. This lock is what actually guarantees "a second
+        # run-once call while one is already in flight is rejected, not
+        # queued" -- a non-blocking acquire() either gets it immediately
+        # or returns False, there is no waiting/queueing behavior at all.
+        self._cycle_lock = threading.Lock()
 
     # --- lifecycle -------------------------------------------------------
 
@@ -195,9 +209,53 @@ class SchedulerRunner:
             return {"ran": False, "reason": "market_closed"}
         if not self._due(state, now):
             return {"ran": False, "reason": "not_due"}
-        if not self._ensure_lease(now):
-            return {"ran": False, "reason": "lease_not_held"}
-        return self._run_cycle(mode, now)
+        acquired = self._cycle_lock.acquire(blocking=False)
+        if not acquired:
+            return {"ran": False, "reason": "cycle_already_in_progress"}
+        try:
+            if not self._ensure_lease(now):
+                return {"ran": False, "reason": "lease_not_held"}
+            return self._run_cycle(mode, now)
+        finally:
+            self._cycle_lock.release()
+
+    def run_once(self, now: Optional[datetime] = None) -> dict:
+        """QA remediation D9: an authenticated, bounded, SUPERVISED
+        single-cycle validation action -- see app/main.py's
+        POST /api/scheduler/run-once. Deliberately bypasses the
+        due-interval check (an explicit one-off user action should not
+        be refused just because the normal schedule says "not yet"), but
+        NEVER bypasses:
+          * mode == "disabled" -> refuses, same as the automatic loop.
+          * the SAME in-process `_cycle_lock` the automatic loop itself
+            uses -- a manual run-once while either the background loop
+            OR another run-once call is actively mid-cycle is REJECTED
+            outright (`cycle_already_in_progress`), never queued.
+          * the SAME cross-process SQLite `scheduler_lease` -- a
+            run-once call can never proceed while a genuinely different
+            worker/process holds the lease.
+        Runs EXACTLY one cycle (discovery only in dry_run; discovery +
+        bounded top_n evaluation in enabled -- the existing mode
+        distinction, completely unchanged) and then returns to idle --
+        there is no new recurring timer started by this call, and
+        calling it once never schedules or implies a second call.
+        """
+        now = now or self._now_fn()
+        state = self.store.get_state()
+        mode = state["mode"]
+        if mode == "disabled":
+            return {"ran": False, "reason": "disabled", "triggered_by": "run_once"}
+        acquired = self._cycle_lock.acquire(blocking=False)
+        if not acquired:
+            return {"ran": False, "reason": "cycle_already_in_progress", "triggered_by": "run_once"}
+        try:
+            if not self._ensure_lease(now):
+                return {"ran": False, "reason": "lease_not_held", "triggered_by": "run_once"}
+            outcome = self._run_cycle(mode, now)
+            outcome["triggered_by"] = "run_once"
+            return outcome
+        finally:
+            self._cycle_lock.release()
 
     def _ensure_lease(self, now: datetime) -> bool:
         if self._lease_token:
@@ -226,14 +284,32 @@ class SchedulerRunner:
             with uw_concurrency.background_priority():
                 disc = discovery_module.run_discovery(adapter, {})
             candidates = disc.get("candidates") or []
-            try:
-                catalog.catalog_discovery_snapshot(
-                    filters={}, candidates=candidates, snapshot_at=disc.get("snapshot_at") or now.isoformat(),
-                    kind="background",
-                )
-            except (StorageGuardPausedError, IngestionStorageGuardPausedError) as e:
-                pause_reason = str(e)
-                candidates = []  # storage guard paused -- do not proceed into per-ticker evaluation either
+            # QA remediation D3: this snapshot persistence is now gated to
+            # exclude a real SyntheticDataAdapter (demo mode) -- SAME
+            # Demo/Live separation intent app/main.py's
+            # _catalog_*_best_effort helpers already apply via their own
+            # isinstance(adapter, LiveUWAdapter) checks. Written as a
+            # NEGATIVE check here (not SyntheticDataAdapter) rather than
+            # a positive LiveUWAdapter check so that scheduler-mechanics
+            # tests exercising a plain test-double adapter (never a real
+            # SyntheticDataAdapter) keep their existing, already-verified
+            # cataloging behavior unaffected by this fix -- only the ONE
+            # real adapter class whose data is genuinely fabricated/demo
+            # is ever excluded. Before this fix, running the scheduler
+            # against TIP_MODE=demo (e.g. a dry_run smoke test before a
+            # UW key is ever configured) would have cataloged fabricated
+            # synthetic candidates into the SAME discovery_snapshots/
+            # discovery_candidates tables Live data relies on --
+            # contaminating real historical data with synthetic rows.
+            if not isinstance(adapter, SyntheticDataAdapter):
+                try:
+                    catalog.catalog_discovery_snapshot(
+                        filters={}, candidates=candidates, snapshot_at=disc.get("snapshot_at") or now.isoformat(),
+                        kind="background",
+                    )
+                except (StorageGuardPausedError, IngestionStorageGuardPausedError) as e:
+                    pause_reason = str(e)
+                    candidates = []  # storage guard paused -- do not proceed into per-ticker evaluation either
 
             if mode == "enabled" and not pause_reason:
                 bounded = [c for c in candidates if c.get("evaluate_supported")][: self.top_n]
