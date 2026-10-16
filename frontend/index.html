@@ -8,6 +8,13 @@
 </head>
 <body>
   <div class="shell">
+  <!-- Phase A: real browser-usable auth setup/re-auth banner. Hidden
+       (display:none) until app.live.js's ensureAuthToken()/
+       showAuthSetupBanner() populate + reveal it -- see app.core.js's
+       renderAuthSetupBanner() for the markup and README.md
+       "Authentication" for the full design writeup. Placed outside
+       #sidebar/#app so it is visible regardless of which view is active. -->
+  <div id="authSetupBanner" style="display:none"></div>
   <aside id="sidebar">
     <!-- Branding hierarchy/rhythm adapted from production's .brand block
          (name / product line / tagline, stacked) -- content stays

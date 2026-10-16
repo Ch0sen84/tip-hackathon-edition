@@ -125,12 +125,40 @@ tools/check_deployment_binding.sh <compose_project_name>
 ```
 
 This fails loudly if the container ended up published on `0.0.0.0`/`::`
-(every interface) instead of the intended `BIND_HOST`. The Settings UI's
-credential-management endpoints have no authentication of their own --
-they rely entirely on this network-level binding, so this check matters
-more than it might look like for a demo app.
+(every interface) instead of the intended `BIND_HOST`.
 
-### h. Enabling Live UW mode (optional, user-driven)
+### h. Authentication token (Phase A)
+
+Every settings/credential write, the watchlist editor, Market Discovery,
+and Investigate with AI now require an `X-TIP-Auth` header (see
+README.md "Authentication" for the full design). For the normal
+localhost install this walkthrough just set up, **the frontend handles
+this automatically** -- no agent action needed; the user's browser
+self-serves the token on first page load via `GET /api/auth/bootstrap`
+(which only ever answers a same-machine/loopback caller).
+
+If you (the installing agent) need to drive a mutating API call yourself
+for verification -- e.g. the Live-mode curl examples in step i below --
+fetch the token the same way the browser does (this call only succeeds
+because you're running on the same machine as the container):
+
+```bash
+TIP_TOKEN=$(curl -s http://localhost:8000/api/auth/bootstrap | python3 -c 'import sys,json;print(json.load(sys.stdin)["token"])')
+```
+
+If that 403s (meaning you are NOT on the same machine as the container --
+e.g. driving a remote host over SSH), retrieve it via `docker exec`
+instead:
+
+```bash
+TIP_TOKEN=$(docker exec <container_name_or_id> cat /srv/data/.auth_token)
+```
+
+Then pass it as a header on every mutating call: `-H "X-TIP-Auth: $TIP_TOKEN"`.
+Never paste this token into chat or any log the user will see shared
+publicly -- treat it like any other local secret.
+
+### i. Enabling Live UW mode (optional, user-driven)
 
 Live mode replaces synthetic fixtures with real Unusual Whales API calls.
 This requires a real UW API key, which **only the user** should supply,
@@ -143,14 +171,17 @@ and only into their own running instance:
    only against their own local instance, and only because they explicitly
    asked), the calls are:
    ```bash
+   # TIP_TOKEN from step h above -- every one of these is now a mutating
+   # call and 401s without it.
    curl -s -X POST http://localhost:8000/api/settings/uw-key \
-     -H 'Content-Type: application/json' \
+     -H 'Content-Type: application/json' -H "X-TIP-Auth: $TIP_TOKEN" \
      -d '{"api_key": "<the user enters/supplies this themselves>"}'
 
-   curl -s -X POST http://localhost:8000/api/settings/uw-key/test
+   curl -s -X POST http://localhost:8000/api/settings/uw-key/test \
+     -H "X-TIP-Auth: $TIP_TOKEN"
 
    curl -s -X POST http://localhost:8000/api/settings/mode \
-     -H 'Content-Type: application/json' \
+     -H 'Content-Type: application/json' -H "X-TIP-Auth: $TIP_TOKEN" \
      -d '{"mode": "live"}'
    ```
    `uw-key/test` makes one real live call (stock-info for SPY) and reports

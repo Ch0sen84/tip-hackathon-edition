@@ -31,7 +31,24 @@ from datetime import date as date_cls
 from pathlib import Path
 from typing import Optional
 
+from .migrations import run_migrations
+from .storage_guard import ONDEMAND, StorageGuard, default_mount_point
+
 REAL_DEFAULT_DB_PATH = "./data/tip_hackathon.db"
+
+
+class StorageGuardPausedError(RuntimeError):
+    """Raised by record_scan() when the Phase A storage-guard circuit
+    breaker (app/storage_guard.py) finds the real volume below the
+    on-demand free-space threshold. Callers (see main.py's _run_scan) are
+    expected to turn this into a clear HTTP 507, never a generic 500 --
+    this is an expected, structured "paused" condition, not a crash. No
+    data is ever deleted by this guard; it only ever blocks ONE new write
+    until free space recovers."""
+
+    def __init__(self, result):
+        super().__init__(result.reason)
+        self.result = result
 
 
 def _running_under_pytest() -> bool:
@@ -132,6 +149,12 @@ class QualifyingDaysStore:
         )
         if db_path != ":memory:":
             Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+        # Phase A storage guard: no real disk-usage concept for ':memory:'
+        # (there's nothing on disk to run out of), so it's simply skipped
+        # in that case -- never a fabricated check.
+        self._storage_guard: Optional[StorageGuard] = (
+            None if db_path == ":memory:" else StorageGuard(default_mount_point(db_path))
+        )
         self._init_schema()
 
     @contextmanager
@@ -149,9 +172,20 @@ class QualifyingDaysStore:
         with self._conn() as conn:
             conn.executescript(SCHEMA)
             conn.commit()
+            # Phase A: versioned, additive migration runner -- safe to run
+            # against a real pre-existing DB file (takes a timestamped
+            # backup the first time it ever runs against one; never
+            # touches ticker_scan_log/ticker_current_state). Runs on
+            # every store construction, which is a safe no-op once
+            # everything is already applied. See app/migrations.py.
+            run_migrations(conn, self.db_path)
 
     def record_scan(self, ticker: str, any_gate_passed: bool, state: str,
                      scan_date: Optional[str] = None) -> None:
+        if self._storage_guard is not None:
+            result = self._storage_guard.check_before_write(ONDEMAND)
+            if not result.allowed:
+                raise StorageGuardPausedError(result)
         scan_date = scan_date or date_cls.today().isoformat()
         with self._conn() as conn:
             conn.execute(

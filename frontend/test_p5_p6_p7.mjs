@@ -73,7 +73,24 @@ function check(name, fn) {
   }
 }
 
+// Phase A: seed a real X-TIP-Auth token (fetched over genuine loopback
+// HTTP from this same machine) before any mutating call -- see
+// test_navigation.mjs's seedAuthToken() for the full rationale; this
+// harness's loadReal() strips the real bootstrap() IIFE the same way.
+async function seedAuthToken() {
+  const res = await fetch(`${BASE}/api/auth/bootstrap`);
+  if (!res.ok) throw new Error(`GET /api/auth/bootstrap -> HTTP ${res.status}`);
+  const { token } = await res.json();
+  const store = { tip_auth_token: token };
+  global.localStorage = {
+    getItem: (k) => (k in store ? store[k] : null),
+    setItem: (k, v) => { store[k] = String(v); },
+    removeItem: (k) => { delete store[k]; },
+  };
+}
+
 async function main() {
+  await seedAuthToken();
   const lib = loadReal(
     [
       fileURLToPath(new URL("./app.core.js", import.meta.url)),
