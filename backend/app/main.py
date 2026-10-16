@@ -53,7 +53,7 @@ from .ai.simulated import get_simulated_transcript
 from .ai.validation import ValidationError as AiValidationError
 from .auth import TOKEN_HEADER, AuthTokenStore, default_token_path, is_loopback
 from .config import settings
-from .core import scan_service, tip_evidence
+from .core import dark_pool_baseline, scan_service, tip_evidence
 from .core.candles import build_markers
 from .ingestion import IngestionCatalog, StorageGuardPausedError as IngestionStorageGuardPausedError
 from .settings_store import MAX_WATCHLIST_SIZE, SettingsStore, last4
@@ -243,12 +243,41 @@ def _catalog_scan_best_effort(adapter: UWDataAdapter, ticker: str, flow_alerts: 
         )
 
 
+def _catalog_dark_pool_baseline_best_effort(adapter: UWDataAdapter, ticker: str) -> Optional[dict]:
+    """Phase C: computes a real historical dark-pool baseline PURELY from
+    whatever Phase B has already cataloged for `ticker` (never a live UW
+    call, never a backfill) and shapes it into the exact keyword-argument
+    form signal_engine.evaluate_gates already expects for its
+    dark_pool_anomaly gate -- see scan_service.build_gate_inputs'
+    `catalog_dark_pool_baseline` parameter and
+    dark_pool_baseline.BaselineResult.as_gate_inputs().
+
+    Only meaningful for a LiveUWAdapter scan (the synthetic/demo adapter's
+    data is never cataloged, same precondition `_catalog_scan_best_effort`
+    already uses). Returns None -- never raises -- on ANY failure
+    (including an empty/nonexistent catalog for a ticker never scanned
+    before): this must never be allowed to block or alter the scan it
+    feeds into, exactly like `_catalog_scan_best_effort` below."""
+    if not isinstance(adapter, LiveUWAdapter):
+        return None
+    try:
+        catalog = get_catalog()
+        result = dark_pool_baseline.compute_baseline_for_ticker(catalog, ticker)
+        return result.as_gate_inputs()
+    except Exception:  # noqa: BLE001 -- best-effort, same invariant as _catalog_scan_best_effort
+        logging.getLogger(__name__).info(
+            "Phase C dark-pool baseline computation skipped for %s (non-fatal, falls back to bootstrap)", ticker
+        )
+        return None
+
+
 def _run_scan(adapter: UWDataAdapter, store: QualifyingDaysStore, ticker: str) -> dict:
     flow_alerts = adapter.get_flow_alerts(ticker)
     darkpool_trades = adapter.get_darkpool_trades(ticker)
     stock_state = adapter.get_stock_state(ticker)
     current_state = store.current_state(ticker)
     qualifying_days = store.qualifying_days_count(ticker)
+    catalog_dark_pool_baseline = _catalog_dark_pool_baseline_best_effort(adapter, ticker)
     result = scan_service.evaluate_ticker_scan(
         ticker=ticker,
         flow_alerts=flow_alerts,
@@ -257,6 +286,7 @@ def _run_scan(adapter: UWDataAdapter, store: QualifyingDaysStore, ticker: str) -
         qualifying_days_count=qualifying_days,
         price_move_pct=_price_move_pct(stock_state),
         catalyst_identified=adapter.get_catalyst_identified(ticker),
+        catalog_dark_pool_baseline=catalog_dark_pool_baseline,
     )
     any_gate_passed = len(result["gates_passed"]) > 0
     try:

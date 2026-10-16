@@ -23,6 +23,7 @@ from unittest.mock import MagicMock
 from fastapi.testclient import TestClient
 
 from app.adapters.live_uw_adapter import LiveUWAdapter, UWRestClient
+from app.ingestion import IngestionCatalog
 from app.storage import QualifyingDaysStore
 
 
@@ -90,6 +91,23 @@ def _fresh_memory_store(app_main, monkeypatch):
     return store
 
 
+def _fresh_catalog(app_main, monkeypatch):
+    """Phase C: get_catalog()'s global `_catalog` singleton (unlike
+    get_store()'s) is NOT reset by the app_main fixture -- it is lazily
+    created once and then reused for the rest of the pytest session. That
+    was harmless before Phase C (catalog WRITE success/failure never fed
+    back into a response), but now that a read off this same catalog
+    feeds the dark_pool_anomaly gate's inputs, a test comparing two scans
+    of the SAME ticker must give each its own isolated, empty catalog --
+    otherwise an EARLIER, unrelated test's cataloged NVDA rows (left over
+    in the shared singleton) would leak into one run's baseline but not
+    the other's, which is a test-isolation gap, not a real behavior
+    difference."""
+    catalog = IngestionCatalog(db_path=":memory:")
+    monkeypatch.setattr(app_main, "get_catalog", lambda: catalog)
+    return catalog
+
+
 EXPECTED_TICKER_ANALYSIS_KEYS = {
     "ticker", "state", "previous_state", "transition_rule", "confidence", "signal_type",
     "confidence_reason", "qualifies", "qualifying_days_count", "gates", "headline",
@@ -125,6 +143,7 @@ def test_ticker_analysis_response_identical_whether_ingestion_succeeds_or_is_bro
     client = TestClient(app_main.app)
 
     _fresh_memory_store(app_main, monkeypatch)
+    _fresh_catalog(app_main, monkeypatch)  # Phase C: see _fresh_catalog's docstring
     resp_ok = client.get("/api/ticker/NVDA")
     assert resp_ok.status_code == 200
     body_ok = resp_ok.json()
@@ -132,10 +151,23 @@ def test_ticker_analysis_response_identical_whether_ingestion_succeeds_or_is_bro
     def _boom(*args, **kwargs):
         raise RuntimeError("simulated ingestion failure")
 
+    # Phase C: get_catalog() is now ALSO used for a read-only historical
+    # baseline lookup (app/core/dark_pool_baseline.compute_baseline_for_ticker,
+    # via _catalog_dark_pool_baseline_best_effort) -- a plain MagicMock
+    # with only the WRITE methods stubbed would auto-mock those two READ
+    # methods too, returning Mock objects instead of the real empty-list/
+    # empty-dict a never-cataloged ticker's catalog actually returns, and
+    # the resulting diverging dark_pool_anomaly gate inputs would make
+    # this test fail for a reason that has nothing to do with what it's
+    # actually testing (WRITE robustness). Stub them to the same empty
+    # shape the real, never-before-cataloged-for-NVDA catalog gives in
+    # the "ok" run above, so only the WRITE path is genuinely broken here.
     monkeypatch.setattr(app_main, "get_catalog", lambda: MagicMock(
         catalog_options_flow_observations=_boom,
         catalog_darkpool_observations=_boom,
         catalog_signal_evaluation=_boom,
+        list_coverage_status=lambda ticker: [],
+        list_darkpool_observations_by_date=lambda ticker: {},
     ))
     _fresh_memory_store(app_main, monkeypatch)  # fresh, independent history again
     resp_broken = client.get("/api/ticker/NVDA")
@@ -157,6 +189,7 @@ def test_radar_response_shape_unaffected_when_ingestion_catalog_write_is_paused(
     client = TestClient(app_main.app)
 
     _fresh_memory_store(app_main, monkeypatch)
+    _fresh_catalog(app_main, monkeypatch)  # Phase C: see _fresh_catalog's docstring
     resp_ok = client.get("/api/radar")
     assert resp_ok.status_code == 200
     assert set(resp_ok.json().keys()) == EXPECTED_RADAR_KEYS
@@ -170,10 +203,18 @@ def test_radar_response_shape_unaffected_when_ingestion_catalog_write_is_paused(
                                 mount_point="/fake")
         )
 
+    # Phase C: see the equivalent comment in
+    # test_ticker_analysis_response_identical_whether_ingestion_succeeds_or_is_broken
+    # above -- the two new READ-only methods must be stubbed to the same
+    # empty shape a real, never-cataloged ticker's catalog returns, or
+    # this MagicMock would also accidentally change dark_pool_anomaly's
+    # gate inputs for a reason unrelated to what this test checks.
     monkeypatch.setattr(app_main, "get_catalog", lambda: MagicMock(
         catalog_options_flow_observations=_boom,
         catalog_darkpool_observations=_boom,
         catalog_signal_evaluation=_boom,
+        list_coverage_status=lambda ticker: [],
+        list_darkpool_observations_by_date=lambda ticker: {},
     ))
     _fresh_memory_store(app_main, monkeypatch)
     resp_paused = client.get("/api/radar")
