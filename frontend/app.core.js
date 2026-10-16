@@ -101,7 +101,15 @@ function renderAuthSetupBanner(variant) {
 // have. This extends (does not replace) the prior session's bare
 // `#ticker=XXX` convention: that exact old format is still recognized on
 // load (see parseNavHash) so old bookmarks/links keep working.
-const NAV_VIEWS = ["radar", "ticker", "settings", "about"];
+// URL-backed navigation fix (2026-10-16): "marketwide" (Market
+// Intelligence) was missing from this list entirely -- a REAL bug,
+// since parseNavHash() silently rejects any view not in NAV_VIEWS,
+// falling back to the default Market Radar view. That meant F5 (or
+// restarting the browser) on Market Intelligence always bounced back
+// to My Watchlist instead of staying put -- unsupported-route handling
+// working "correctly" by accident for a view that WAS supposed to be
+// supported. See applyNavState below for the matching restore branch.
+const NAV_VIEWS = ["radar", "ticker", "settings", "about", "marketwide"];
 
 function parseNavHash(hash) {
   const raw = String(hash || "").replace(/^#/, "");
@@ -205,6 +213,19 @@ function applyNavState(state, handlers, opts = {}) {
   if (state.view === "settings" || state.view === "about") {
     setHistory(state.view, null);
     switchView(state.view);
+    return;
+  }
+  if (state.view === "marketwide") {
+    setHistory("marketwide", null);
+    switchView("marketwide");
+    // URL-backed nav fix: restoring this view from a refresh/deep-link/
+    // Back-Forward/history event must behave EXACTLY like the real nav
+    // button click does (which lazily loads it via initMarketWideRadar,
+    // see app.live.js) -- never a second, parallel load path, and never
+    // a duplicate fetch if it was already loaded this session
+    // (initMarketWideRadar's own _marketWideLoaded guard makes repeat
+    // calls here a no-op, so this is safe to call unconditionally).
+    if (handlers && handlers.onMarketWideRestore) handlers.onMarketWideRestore();
     return;
   }
   // state.view === "ticker"
@@ -528,10 +549,14 @@ function wireRadarModeToggle(onDiscoverySelected) {
 // the fetch calls and button wiring, same split as every other
 // render*/wire* pair in this file.
 
+// UX round (2026-10-16), item 5: made understandable without reading
+// docs -- what each mode actually does, framed as an action (never
+// implies this controls the personal watchlist, which has its own
+// separate, manual-only "Refresh Data" action -- see item 9/W2).
 const SCHEDULER_MODE_LABELS = {
-  disabled: "Disabled -- zero background UW calls",
-  dry_run: "Dry run -- discovery + ranking only, no per-ticker evaluation",
-  enabled: "Enabled -- discovery + bounded per-ticker evaluation",
+  disabled: "Disabled -- no scheduled broader-market scans run automatically. Zero background UW calls.",
+  dry_run: "Dry Run -- automatically discovers candidates across the broader market on a schedule, without deeper per-ticker evaluation.",
+  enabled: "Enabled -- automatically discovers candidates AND evaluates the configured top-ranked selections on a schedule.",
 };
 
 // QA remediation D7: the mode TOGGLE BUTTONS below used to render the
@@ -559,16 +584,48 @@ function renderSchedulerControls(status) {
   const pauseNote = status.pause_reason
     ? `<div class="muted" style="color:#b45309">Paused: ${esc(status.pause_reason)}</div>`
     : "";
+  // UX round (2026-10-16), item 5: surfaces the EXISTING backend
+  // POST /api/scheduler/run-once action (built in the prior QA-
+  // remediation round) -- never a new scheduling framework, this is
+  // purely frontend wiring against an already-tested endpoint. Says
+  // plainly what a one-time run will do using the CURRENTLY SELECTED
+  // mode (never implies this enables recurring scheduling), and shows
+  // the real configured top-N so it's never a guess. `runningNow`
+  // reflects the backend's own lease/lock (status.cycle_in_progress) --
+  // the button is disabled whenever a cycle (scheduled OR run-once) is
+  // already executing, so a duplicate click can't even be attempted,
+  // and the backend's 409 lease rejection is still handled cleanly by
+  // runSchedulerOnce() (app.live.js) for the rare race where a cycle
+  // starts between render and click.
+  const runningNow = !!status.cycle_in_progress;
+  const topN = status.top_n_configured ?? status.top_n ?? "n/a";
+  const runOnceActionCopy = {
+    disabled: "Run Once will do nothing -- the scheduler is Disabled, so a one-time run has no action to perform. Switch to Dry Run or Enabled first.",
+    dry_run: `Run Once will discover candidates across the broader market right now, rank them, and stop -- no per-ticker evaluation, no AI, never enables recurring scheduling.`,
+    enabled: `Run Once will discover candidates right now and evaluate the top ${esc(String(topN))} ranked selections -- once, then stop. Never enables recurring scheduling, never triggers a paid AI investigation.`,
+  }[status.mode] || "";
   return `
     <div class="radar-mode-toggle" id="schedulerModeToggle">${buttons}</div>
     <div class="muted" style="margin-top:6px">${esc(SCHEDULER_MODE_LABELS[status.mode] || status.mode)}</div>
+    <div class="muted" style="margin-top:2px;font-size:12px">
+      This controls <strong>broader market discovery</strong> only -- your personal watchlist has its own
+      separate, manual-only <strong>Refresh Data</strong> action on My Watchlist, never this scheduler.
+    </div>
     <div class="muted" style="font-size:12px;margin-top:4px">
       Last run: ${esc(status.last_run_finished_at || "never")} &middot;
       Next run: ${esc(status.next_run_at || "n/a")} &middot;
       Candidates evaluated last cycle: ${status.last_cycle_candidates_evaluated ?? "n/a"} &middot;
-      Freshness window: ${Math.round((status.freshness_window_s || 0) / 60)}m
+      Freshness window: ${Math.round((status.freshness_window_s || 0) / 60)}m &middot;
+      Top-N configured: ${esc(String(topN))}
     </div>
     ${pauseNote}
+    <div class="settings-row" style="margin-top:8px;align-items:flex-start">
+      <button class="btn" id="schedulerRunOnceBtn" ${runningNow || status.mode === "disabled" ? "disabled" : ""}>${
+        runningNow ? "Run in progress..." : "Run Once now"
+      }</button>
+      <span class="muted" style="font-size:12px;max-width:520px">${runOnceActionCopy}</span>
+    </div>
+    <div id="schedulerRunOnceStatus" class="muted" style="font-size:12px;margin-top:4px"></div>
   `;
 }
 
@@ -583,15 +640,54 @@ function renderMarketWideCandidateRow(candidate) {
   const evalState = candidate.evaluation
     ? `${esc(candidate.evaluation.state || "n/a")} (${esc(candidate.evaluation.confidence || "n/a")})`
     : "no evaluation yet";
-  const ageNote =
-    candidate.age_s != null ? `${Math.round(candidate.age_s / 60)}m old` : "never evaluated";
+  // UX round (2026-10-16), item 6: human-readable ET + relative time via
+  // the new centralized frontend/timefmt.js, instead of a raw age-in-
+  // minutes computed from age_s -- "Not evaluated" when there's genuinely
+  // no cataloged evaluation at all (never a fabricated "0m old").
+  const retrievedAt = candidate.evaluation ? candidate.evaluation.retrieved_at : null;
+  const ageNote = typeof formatRelative === "function" ? formatRelative(retrievedAt) : (candidate.age_s != null ? `${Math.round(candidate.age_s / 60)}m old` : "never evaluated");
   return `
     <div class="candidate-row" data-ticker="${esc(candidate.ticker)}">
       <span class="ticker">${esc(candidate.ticker)}</span>
       <span class="${badgeClass}">${esc(FRESHNESS_LABELS[candidate.freshness] || candidate.freshness)}</span>
       <span class="muted">${evalState}</span>
-      <span class="muted" style="font-size:11px">${ageNote}</span>
+      <span class="muted" style="font-size:11px" title="${esc(typeof formatTimestampET === "function" ? formatTimestampET(retrievedAt) : "")}">${esc(ageNote)}</span>
     </div>
+  `;
+}
+
+// UX round (2026-10-16), item 4: compact discovered/evaluated/awaiting
+// summary, SCOPED TO THE ACTIVE DISCOVERY SNAPSHOT ONLY (never a
+// lifetime total across every snapshot ever cataloged) -- that scope is
+// made explicit in the rendered text itself ("this scan"), computed
+// purely from the one GET /api/radar/market-wide response already
+// fetched (candidate_count_in_snapshot = discovered this scan; each
+// returned candidate's `freshness` -- "current"/"stale" both mean a
+// real evaluation exists; "unevaluated" means it doesn't yet).
+// Also carries the ONE honest, current-scheduler-mode-aware line this
+// page must never get wrong: it must NEVER imply continuous scanning
+// is happening if the scheduler is actually Disabled right now.
+function renderMarketWideSummary(data, status) {
+  const discovered = data.candidate_count_in_snapshot ?? (data.candidates || []).length;
+  const shown = (data.candidates || []).length;
+  const evaluated = (data.candidates || []).filter((c) => c.freshness === "current" || c.freshness === "stale").length;
+  const awaiting = Math.max(0, shown - evaluated);
+  const asOf = data.snapshot_at ? `as of ${esc(data.snapshot_at)}` : "no scan yet";
+  const modeNote = !status
+    ? ""
+    : status.mode === "disabled"
+    ? "The scheduler is currently Disabled -- this reflects the last scan that was run (manually or before Disabled was selected), not an ongoing scan."
+    : status.mode === "dry_run"
+    ? "The scheduler is in Dry Run -- it keeps discovering new candidates automatically, but does not evaluate them further."
+    : "The scheduler is Enabled -- it keeps discovering and evaluating candidates automatically.";
+  return `
+    <div class="summary-strip" style="display:flex;gap:16px;flex-wrap:wrap;align-items:baseline">
+      <span><strong>${discovered}</strong> discovered <span class="muted">(this scan)</span></span>
+      <span><strong>${evaluated}</strong> evaluated <span class="muted">(of ${shown} shown)</span></span>
+      <span><strong>${awaiting}</strong> awaiting evaluation</span>
+      <span class="muted">${esc(asOf)}</span>
+    </div>
+    <div class="muted" style="font-size:12px;margin-top:3px">${esc(modeNote)}</div>
   `;
 }
 
@@ -602,8 +698,9 @@ function renderMarketWideRadar(data) {
   }
   const rows = data.candidates.map(renderMarketWideCandidateRow).join("");
   const coverage = data.coverage_note ? `<p class="muted" style="font-size:12px">${esc(data.coverage_note)}</p>` : "";
+  const snapshotLabel = typeof formatTimestampFull === "function" ? formatTimestampFull(data.snapshot_at) : (data.snapshot_at || "n/a");
   return `
-    <div class="muted" style="font-size:12px">Snapshot at ${esc(data.snapshot_at || "n/a")}</div>
+    <div class="muted" style="font-size:12px">Snapshot: ${esc(snapshotLabel)}</div>
     <div class="candidate-list">${rows}</div>
     ${coverage}
   `;
@@ -2738,7 +2835,7 @@ function renderSettingsView(d) {
 // Market Radar right now" were the same thing. They are not -- this is
 // the SAVED configuration that becomes active watchlist scanning only
 // once you switch to Live Mode in Settings.
-function renderWatchlistEditor(d) {
+function renderWatchlistEditor(d, opts = {}) {
   const publicDemo = !!d.public_demo;
   if (publicDemo) return "";
   const watchlist = d.watchlist || { tickers: [], max_size: 20 };
@@ -2751,8 +2848,24 @@ function renderWatchlistEditor(d) {
         your Live-Mode watchlist configuration now so it's ready the moment you switch to Live Mode in Settings --
         it has no effect on what Demo Mode's Market Radar displays.</p>`
     : "";
+  // W1 FIX (real bug: add a ticker, immediately click its new chip's x
+  // remove button -- nothing happens; a refresh "fixes" it): this
+  // <details> was rebuilt from scratch via wlRoot.innerHTML on EVERY
+  // add/remove save (see loadSettings() in app.live.js), which, with no
+  // `open` attribute in this template, silently collapsed the editor
+  // back closed every single time regardless of whether the user had
+  // it expanded -- so a click on the just-rendered remove button that
+  // landed a moment after that re-render hit a now-hidden/closed
+  // <details>, not the control the user saw. The fix is for the CALLER
+  // to read the current <details>'s real open/closed state BEFORE
+  // replacing the DOM and pass it back in here as `opts.open`, so the
+  // editor's expand/collapse state survives every save, exactly like a
+  // real production-grade editor (never collapses itself out from under
+  // an in-progress interaction). See initWatchlistEditor()/app.live.js's
+  // render call site for where `opts.open` is captured and passed.
+  const openAttr = opts.open ? " open" : "";
   return `
-    <details class="settings-card watchlist-editor-compact" id="watchlistEditorCard">
+    <details class="settings-card watchlist-editor-compact" id="watchlistEditorCard"${openAttr}>
       <summary class="watchlist-editor-summary">
         <strong>My Watchlist</strong>
         <span class="muted">${count}/${watchlist.max_size} tickers${count ? " \u2014 " + esc(preview) : " (" + preview + ")"}${isDemo ? " \u00b7 saved for Live Mode" : ""}</span>

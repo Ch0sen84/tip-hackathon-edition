@@ -12,10 +12,14 @@ cd "$(dirname "$0")/.."
 cp frontend/app.core.js static-demo/app.core.js
 cp frontend/styles.css static-demo/styles.css
 cp frontend/lightweight-charts.js static-demo/lightweight-charts.js
+# UX round (2026-10-16), item 6: the new centralized timestamp-
+# formatting utility is shared the same byte-identical way.
+cp frontend/timefmt.js static-demo/timefmt.js
 
 echo "Copied frontend/app.core.js -> static-demo/app.core.js"
 echo "Copied frontend/styles.css  -> static-demo/styles.css"
 echo "Copied frontend/lightweight-charts.js -> static-demo/lightweight-charts.js"
+echo "Copied frontend/timefmt.js -> static-demo/timefmt.js"
 
 PY=python3
 if [ -x backend/.venv_run/bin/python ]; then

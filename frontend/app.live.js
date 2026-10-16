@@ -339,6 +339,7 @@ async function loadRadar() {
       `${scopeLabel}: ${data.scanned} ticker(s) · ${data.highest.length} highest attention · ` +
       `${data.other.length} other · last scanned ${formatAgo(data.last_scan_at)}`;
     document.getElementById("activityStrip").innerHTML = renderActivitySummary(data);
+    updateRadarRefreshDataButtonVisibility();
 
     // 2026-10-15 fix: renderFeaturedArea() (app.core.js) now owns the
     // Featured Signal heading + hero/breakdown grid + compact-notice
@@ -746,7 +747,16 @@ async function loadSettings() {
     // after every add/remove save, see initWatchlistEditor() below).
     const wlRoot = document.getElementById("radarWatchlistEditor");
     if (wlRoot) {
-      wlRoot.innerHTML = renderWatchlistEditor(d);
+      // W1 FIX: capture whether the editor was genuinely open BEFORE
+      // destroying/rebuilding it, so an add/remove save never silently
+      // collapses an editor the user had expanded -- see
+      // renderWatchlistEditor()'s docstring in app.core.js for the full
+      // root-cause explanation (a closed <details> after an in-flight
+      // save is what made the just-added ticker's remove button appear
+      // to do "nothing" immediately after adding it).
+      const existingDetails = wlRoot.querySelector("details");
+      const wasOpen = existingDetails ? existingDetails.open : false;
+      wlRoot.innerHTML = renderWatchlistEditor(d, { open: wasOpen });
       initWatchlistEditor();
     }
     return d;
@@ -1029,9 +1039,13 @@ async function loadMarketWideRadar() {
     if (controlsEl) {
       controlsEl.innerHTML = renderSchedulerControls(status);
       wireSchedulerModeToggle();
+      const runOnceBtn = document.getElementById("schedulerRunOnceBtn");
+      if (runOnceBtn) runOnceBtn.addEventListener("click", runSchedulerOnce);
     }
     const data = await apiGetAuthed("/api/radar/market-wide");
     if (listEl) listEl.innerHTML = renderMarketWideRadar(data);
+    const summaryEl = document.getElementById("marketWideSummary");
+    if (summaryEl) summaryEl.innerHTML = renderMarketWideSummary(data, status);
     if (statusEl) statusEl.textContent = "";
   } catch (err) {
     if (statusEl) statusEl.textContent = `Failed to load Market-wide Radar: ${err.message}`;
@@ -1055,6 +1069,42 @@ function wireSchedulerModeToggle() {
   });
 }
 
+// UX round (2026-10-16), item 5: wires the EXISTING, already-tested
+// POST /api/scheduler/run-once backend action to the "Run Once now"
+// button rendered by renderSchedulerControls() above -- real loading/
+// success/failure feedback, the backend's lease/lock 409 rejection
+// surfaced cleanly (never a silent failure or a generic error), and a
+// full reload of Market-wide Radar afterward so the new evaluations
+// (if any) show up immediately. Never triggers an AI investigation,
+// never flips the scheduler into a recurring mode, always goes through
+// the same require_auth path (apiPost) every other mutating action uses.
+async function runSchedulerOnce() {
+  const btn = document.getElementById("schedulerRunOnceBtn");
+  const statusEl = document.getElementById("schedulerRunOnceStatus");
+  if (!btn || btn.disabled) return; // disabled covers both "already running" and mode===disabled
+  btn.disabled = true;
+  const originalLabel = btn.textContent;
+  btn.textContent = "Running...";
+  if (statusEl) statusEl.textContent = "Running a one-time scan now...";
+  try {
+    const result = await apiPost("/api/scheduler/run-once", {});
+    const n = result.candidates_evaluated ?? result.candidates_discovered ?? result.discovered ?? null;
+    if (statusEl) {
+      statusEl.textContent = n != null
+        ? `Run complete -- ${n} candidate(s) processed. Reloading...`
+        : "Run complete. Reloading...";
+    }
+    await loadMarketWideRadar(); // re-renders schedulerControls fresh from /api/scheduler/status too
+  } catch (err) {
+    // The shared lease/lock rejection (409, "already in progress") and
+    // any other failure both land here with a real, specific message --
+    // never a silent no-op on a second click.
+    btn.disabled = false;
+    btn.textContent = originalLabel;
+    if (statusEl) statusEl.textContent = `Run Once failed: ${err.message}`;
+  }
+}
+
 function initMarketWideRadar() {
   if (_marketWideLoaded) return;
   _marketWideLoaded = true;
@@ -1066,6 +1116,62 @@ document.querySelectorAll(".nav-item").forEach((b) => {
   if (b.dataset.view === "marketwide") b.addEventListener("click", initMarketWideRadar);
 });
 document.getElementById("refreshRadar").addEventListener("click", loadRadar);
+
+// W2 (item 9): the ONE explicit "go get real fresh data" action for the
+// personal watchlist -- everything else (page load, "refresh view"
+// above, nav back, auth-state-change, history restoration) only ever
+// reads cached/catalog data via GET /api/radar (see main.py's cache-
+// first fix). Structurally separate from the market-wide scheduler's
+// Run Once (different trigger, different scope -- watchlist vs
+// broader-market) -- sharing only the same uw_concurrency gate and
+// catalog tables server-side, never a second pipeline here either.
+let _watchlistRefreshInFlight = false;
+async function refreshWatchlistData() {
+  if (_watchlistRefreshInFlight) return; // belt-and-suspenders client-side guard; server-side lock is authoritative
+  const btn = document.getElementById("refreshWatchlistDataBtn");
+  const statusEl = document.getElementById("refreshWatchlistDataStatus");
+  _watchlistRefreshInFlight = true;
+  if (btn) { btn.disabled = true; btn.textContent = "Refreshing..."; }
+  if (statusEl) statusEl.textContent = "Fetching fresh data from Unusual Whales...";
+  try {
+    const data = await apiPost("/api/radar/refresh", {});
+    _lastRadarData = data;
+    renderFeaturedArea(data);
+    setupRadarFiltersAndRender(data, loadTickerDetail);
+    document.getElementById("activityStrip").innerHTML = renderActivitySummary(data);
+    const radarStatusEl = document.getElementById("radarStatus");
+    if (radarStatusEl) {
+      radarStatusEl.textContent =
+        `watchlist scan: ${data.scanned} ticker(s) \u00b7 ${data.highest.length} highest attention \u00b7 ` +
+        `${data.other.length} other \u00b7 last scanned ${formatAgo(data.last_scan_at)}`;
+    }
+    if (statusEl) statusEl.textContent = "Refreshed.";
+  } catch (err) {
+    // The server's duplicate-refresh 409 and any other failure both
+    // surface here with a real, specific message -- never a silent
+    // no-op on a double-click.
+    if (statusEl) statusEl.textContent = `Refresh failed: ${err.message}`;
+  } finally {
+    _watchlistRefreshInFlight = false;
+    if (btn) { btn.disabled = false; btn.textContent = "Refresh Data"; }
+  }
+}
+
+// updateRadarRefreshDataButtonVisibility: called every time loadRadar()
+// runs (after loadSettings() has had a chance to set _currentMode from
+// the real /api/settings response) -- NOT just once at script-eval
+// time, when _currentMode is still its "demo" module-level default
+// regardless of the real current mode. Demo Mode's synthetic scan has
+// no live-call cost to avoid, so this action is hidden there entirely
+// rather than showing a button that would be misleadingly identical to
+// "refresh view" (both end up doing the exact same thing in Demo Mode
+// under the hood).
+function updateRadarRefreshDataButtonVisibility() {
+  const btn = document.getElementById("refreshWatchlistDataBtn");
+  if (btn) btn.style.display = _currentMode === "live" ? "" : "none";
+}
+const _refreshWatchlistDataBtnEl = document.getElementById("refreshWatchlistDataBtn");
+if (_refreshWatchlistDataBtnEl) _refreshWatchlistDataBtnEl.addEventListener("click", refreshWatchlistData);
 // Unified ticker combobox (2026-10-14, replaces the old separate
 // <select> + manual-entry <input>): initTickerCombo() (app.core.js)
 // wires the one input's typing/suggestions/keyboard-nav/Analyze-click,
@@ -1118,6 +1224,13 @@ window.TIP_NAV_HANDLERS = {
   // way the Analyze button's click handler already does -- otherwise a
   // ticker outside TIP_LIVE_WATCHLIST worked once, then broke on refresh.
   isArbitraryTickerAllowed: () => _currentMode === "live",
+  // URL-backed nav fix: refresh/deep-link/Back-Forward restoration of
+  // Market Intelligence calls through this SAME lazy-load entry point
+  // the nav button's click listener uses -- initMarketWideRadar's own
+  // _marketWideLoaded guard makes this a safe no-op if it was already
+  // loaded this session, so restoring from history never issues a
+  // duplicate fetch beyond what a normal fresh load of this view would.
+  onMarketWideRestore: initMarketWideRadar,
 };
 wireHistoryHandling();
 (async function bootstrap() {
