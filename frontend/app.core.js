@@ -2293,12 +2293,27 @@ function renderTickerDetail(d) {
   const stateGloss = STATE_GLOSS[d.state] || "";
   const ruleGloss = TRANSITION_RULE_GLOSS[d.transition_rule] || "internal rule identifier";
   const timelineHtml = renderLifecycleTimeline(d.history, d.state);
+  // W2-b (2026-10-16): honest cache-vs-fresh disclosure, same freshness-
+  // badge pattern already established for My Watchlist -- reuses
+  // frontend/timefmt.js, never a raw ISO string. `served_from_cache`/
+  // `eval_freshness`/`last_evaluated_at` only exist on a real
+  // LiveUWAdapter response; Demo Mode responses omit them (always
+  // fresh by construction), so this block degrades to nothing there.
+  const hasFreshnessInfo = d.eval_freshness !== undefined && d.eval_freshness !== null;
+  const freshnessHtml = hasFreshnessInfo
+    ? `<div class="tags">
+        <span class="tag freshness-${esc(d.eval_freshness)}">${esc(FRESHNESS_LABELS[d.eval_freshness] || d.eval_freshness)}</span>
+        <span class="muted">${d.last_evaluated_at && typeof formatTimestampET === "function" ? `Last evaluated: ${esc(formatTimestampET(d.last_evaluated_at))}` : "Not yet evaluated"}</span>
+        <button id="tickerRefreshBtn" type="button" class="btn-refresh">Refresh this ticker</button>
+      </div>`
+    : "";
   return `
     <div class="card ticker-header-card">
       <div class="card-head"><span class="tk tk-lg">${esc(d.ticker)}</span>
         <span class="tag state-${esc(d.state)}">${esc(d.state)}</span>
         ${stateGloss ? `<span class="muted state-gloss">(${esc(stateGloss)})</span>` : ""}
       </div>
+      ${freshnessHtml}
       <div class="tags">
         <span class="tag">confidence: ${esc(d.confidence)}</span>
         <span class="tag">${esc(d.signal_type)}</span>

@@ -459,14 +459,39 @@ async function loadOhlcChart(ticker, range, mySeq) {
   }
 }
 
-async function loadTickerDetail(ticker) {
+// W2-b (2026-10-16): cache-first Ticker Analysis -- ordinary navigation
+// (open/F5/Back/direct-link) calls this with refresh=false (the
+// default), which hits the now-cache-only GET /api/ticker/{ticker} and
+// makes zero live UW calls / writes no new evaluation. An explicit user
+// action (the "Refresh" button wired below, or Market Discovery's
+// "Evaluate in TIP") passes refresh=true, which calls the new,
+// authenticated POST /api/ticker/{ticker}/refresh -- the SOLE path that
+// performs a real scan for this page, deliberately separate from the
+// watchlist's own Refresh Data control (different scope: one ticker vs
+// the whole watchlist).
+async function loadTickerDetail(ticker, { refresh = false } = {}) {
   const mySeq = ++_navSeq;
   const el = document.getElementById("tickerDetail");
-  el.innerHTML = `<div class="empty">Loading ${esc(ticker)}...</div>`;
+  el.innerHTML = `<div class="empty">${refresh ? "Refreshing" : "Loading"} ${esc(ticker)}...</div>`;
   try {
-    const d = await apiGet(`/api/ticker/${encodeURIComponent(ticker)}`);
+    const d = refresh
+      ? await apiPost(`/api/ticker/${encodeURIComponent(ticker)}/refresh`, {})
+      : await apiGet(`/api/ticker/${encodeURIComponent(ticker)}`);
     if (mySeq !== _navSeq) return; // superseded by a newer ticker/mode switch
     el.innerHTML = renderTickerDetail(d);
+    const refreshBtn = document.getElementById("tickerRefreshBtn");
+    if (refreshBtn) {
+      refreshBtn.addEventListener("click", async () => {
+        refreshBtn.disabled = true;
+        try {
+          await loadTickerDetail(ticker, { refresh: true });
+        } finally {
+          // loadTickerDetail re-renders the whole panel on success (new
+          // button instance), so this only matters on the error path.
+          if (refreshBtn.isConnected) refreshBtn.disabled = false;
+        }
+      });
+    }
     const range = getChartRange();
     const rangeRow = document.getElementById("chartRangeRow");
     if (rangeRow) {
@@ -706,7 +731,10 @@ async function evaluateDiscoveryCandidate(ticker) {
   _discoveryStates[ticker] = "evaluating";
   rerenderDiscoveryList();
   try {
-    await navigateToTicker(ticker, loadTickerDetail);
+    // W2-b: "Evaluate in TIP" must genuinely perform a real evaluation
+    // (that's its whole purpose) -- GET is cache-first now, so this
+    // passes refresh=true to use the explicit POST refresh route.
+    await navigateToTicker(ticker, (t) => loadTickerDetail(t, { refresh: true }));
     _discoveryStates[ticker] = "evaluated";
   } catch (err) {
     _discoveryStates[ticker] = "candidate";
