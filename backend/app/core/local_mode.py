@@ -30,12 +30,55 @@ Local-Mode-enabled instance).
 """
 from __future__ import annotations
 
-from typing import Optional
+from typing import List, Optional
 
 from ..auth import is_loopback
 
 _TRUE_VALUES = {"1", "true", "yes", "on"}
 _FALSE_VALUES = {"0", "false", "no", "off"}
+
+# Deliberately the SAME loopback-alias set app/main.py's TrustedHostMiddleware
+# config (_LOOPBACK_HOST_ALIASES) already uses for the Host header -- see
+# compute_allowed_origins below (finding B3): Origin validation must accept
+# exactly the hosts Host validation already does, never a broader or
+# narrower set.
+LOOPBACK_HOST_ALIASES: frozenset[str] = frozenset({"127.0.0.1", "localhost"})
+
+
+def compute_allowed_origins(
+    allowed_host: str,
+    bind_port: str,
+    allowed_origin_override: Optional[str] = None,
+) -> List[str]:
+    """Pure function (Windows Docker Desktop QA round 2, findings B1/B3):
+    the set of `Origin` header values this deployment must accept, given
+    its real configured host/port.
+
+    * An explicit ALLOWED_ORIGIN override wins outright -- exactly one
+      origin, never widened (unchanged behavior for anyone fronting this
+      with a reverse proxy under a different hostname).
+    * Otherwise, when `allowed_host` is one of the loopback aliases
+      (127.0.0.1/localhost -- the exact same set already accepted for the
+      Host header), EVERY alias on the real configured port is accepted
+      (fixes B3: `http://localhost:<port>` and `http://127.0.0.1:<port>`
+      for the SAME port are both valid, never just one of them).
+    * Otherwise (a genuine non-loopback/custom ALLOWED_HOST, e.g. a
+      reverse-proxy hostname with no explicit ALLOWED_ORIGIN set), exactly
+      one origin for that host:port -- no widening.
+
+    `bind_port` must be the REAL externally-published port (fixes B1) --
+    see docker-compose.yml's BIND_HOST/BIND_PORT environment entries for
+    why this is now genuinely forwarded into the container instead of
+    silently falling back to the 8000 default regardless of what was
+    actually published.
+
+    Always returns a small, exact, bounded list -- never a wildcard.
+    """
+    if allowed_origin_override:
+        return [allowed_origin_override]
+    if allowed_host in LOOPBACK_HOST_ALIASES:
+        return sorted(f"http://{h}:{bind_port}" for h in LOOPBACK_HOST_ALIASES)
+    return [f"http://{allowed_host}:{bind_port}"]
 
 
 class LocalModeMisconfiguration(RuntimeError):
@@ -94,14 +137,44 @@ def effective_local_mode(bind_host: Optional[str], tip_local_mode_raw: Optional[
     return loopback
 
 
-def assert_local_mode_configuration(bind_host: Optional[str], tip_local_mode_raw: Optional[str]) -> None:
+def assert_local_mode_configuration(
+    bind_host: Optional[str],
+    tip_local_mode_raw: Optional[str],
+    allowed_host_override: Optional[str] = None,
+) -> None:
     """Call once at process startup (see main.py's `_on_startup`, same
     place single_process_guard.assert_single_process() is called).
     Raises LocalModeMisconfiguration -- and only that -- when
     TIP_LOCAL_MODE explicitly requests Local Mode against a BIND_HOST
     that is not loopback. Every other combination (including the
     non-loopback+auto case, which just means Network Mode stays active,
-    completely unchanged) is a silent no-op."""
+    completely unchanged) is a silent no-op.
+
+    `allowed_host_override` (Windows Docker Desktop QA round 2, finding
+    B2's secondary ask): pass the RAW `ALLOWED_HOST` env var here only
+    when an operator has set it explicitly to something other than
+    BIND_HOST's own value (main.py passes None whenever ALLOWED_HOST was
+    never set, i.e. it just defaults to BIND_HOST and cannot diverge from
+    it by construction). This is a narrow, genuinely detectable
+    self-consistency check: both BIND_HOST and ALLOWED_HOST are operator-
+    supplied env vars visible to this same process, so if BIND_HOST claims
+    loopback (Local Mode would activate) while the operator has ALSO
+    explicitly pointed ALLOWED_HOST somewhere non-loopback, that is an
+    internal contradiction this process genuinely CAN see and must refuse
+    to silently resolve one way or the other.
+
+    This is NOT, and cannot be, a general detector of "is BIND_HOST
+    actually telling the truth about what's reachable from outside this
+    container" -- that depends on real host-level network/Compose
+    behavior (what `docker compose` actually published this container on)
+    which is fundamentally unobservable from inside the container itself.
+    That class of divergence is closed structurally instead, by making
+    docker-compose.yml forward the SAME ${BIND_HOST}/${BIND_PORT} shell
+    variables into both the `ports:` publish and this process's own
+    environment (see docker-compose.yml's BIND_HOST/BIND_PORT environment
+    entries and their comment) -- not by trying to verify it from here,
+    which honestly cannot be done.
+    """
     intent = _parse_explicit_intent(tip_local_mode_raw)
     if intent is True and not is_loopback(bind_host):
         message = (
@@ -116,5 +189,23 @@ def assert_local_mode_configuration(bind_host: Optional[str], tip_local_mode_raw
             "deployment really is loopback-only. See README.md 'Local Mode / Network Mode' for "
             "the full design and the explicitly UNSUPPORTED topologies (custom Compose port "
             "overrides, reverse proxies, tunnels) that must never be combined with Local Mode."
+        )
+        raise LocalModeMisconfiguration(message)
+    if (
+        is_loopback(bind_host)
+        and allowed_host_override is not None
+        and not is_loopback(allowed_host_override)
+    ):
+        message = (
+            f"Refusing to start: BIND_HOST={bind_host!r} says this deployment is loopback-only "
+            f"(which would activate Local Mode's zero-token bypass), but ALLOWED_HOST has been "
+            f"explicitly set to {allowed_host_override!r}, a non-loopback value -- these two "
+            "operator-supplied settings directly contradict each other. This process cannot "
+            "verify from inside a container what is truly reachable on the host's real network "
+            "interfaces (see this module's docstring), but it CAN see that its own two config "
+            "values disagree, and refuses to silently pick one. Fix: either remove the "
+            "ALLOWED_HOST override so it defaults to BIND_HOST, or set BIND_HOST to match the "
+            "real non-loopback address you intend (which will correctly fall back to Network "
+            "Mode) -- never leave BIND_HOST and ALLOWED_HOST pointing at different trust levels."
         )
         raise LocalModeMisconfiguration(message)

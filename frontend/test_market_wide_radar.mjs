@@ -11,6 +11,7 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import { fileURLToPath } from "node:url";
+import { obtainAuthToken } from "./test_lib_auth.mjs";
 
 const BASE = process.argv[2] || "http://127.0.0.1:8899";
 
@@ -101,12 +102,12 @@ console.log("\n=== renderMarketWideCandidateRow / renderMarketWideRadar ===");
 console.log("\n=== End-to-end over the REAL /api/scheduler/* + /api/radar/market-wide routes ===");
 {
   let token;
-  await check_async("GET /api/auth/bootstrap returns a real token (loopback test run)", async () => {
-    const res = await fetch(`${BASE}/api/auth/bootstrap`);
-    assert.equal(res.status, 200);
-    const body = await res.json();
-    assert.ok(body.token);
-    token = body.token;
+  // Windows Docker Desktop QA round 2 (finding T1): falls back to the
+  // pairing code (TIP_TEST_PAIRING_CODE) when bootstrap fails under
+  // real Docker Desktop's port-publishing NAT -- see test_lib_auth.mjs.
+  await check_async("a real X-TIP-Auth token is obtained (bootstrap, or pairing-code fallback under Docker Desktop)", async () => {
+    token = await obtainAuthToken(BASE);
+    assert.ok(token);
   });
 
   await check_async("unauthenticated GET /api/scheduler/status is rejected", async () => {

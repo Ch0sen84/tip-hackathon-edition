@@ -217,12 +217,52 @@ modes, decided automatically by the backend from `BIND_HOST` (see
   exact, unmodified `X-TIP-Auth` bootstrap/pairing-code token model
   described below -- nothing about it changed in this round.
 
+**Custom ports and both loopback spellings are genuinely supported**
+(Windows Docker Desktop QA round 2, findings B1/B3): `docker-compose.yml`
+forwards your real `BIND_HOST`/`BIND_PORT` into the container's own
+environment (not just into the `ports:` publish mapping), so a custom
+`BIND_PORT` (e.g. `18000`) is reflected correctly in both the Host and
+Origin checks below -- and on a loopback install, opening the app via
+`http://127.0.0.1:<port>` or `http://localhost:<port>` are equally
+supported, interchangeably, on the same port. Neither one is "the"
+canonical address.
+
+**What Local Mode's `Sec-Fetch-Site`/`Origin` check actually protects
+against -- and what it does NOT (read this before assuming more than it
+promises):** this mechanism defends against a **malicious or unrelated
+WEBSITE**, opened in the same browser, trying to issue a cross-origin
+request against your TIP instance -- the real CSRF/cross-origin threat
+`Sec-Fetch-Site` exists to signal, and which only a real browser can
+compute (a remote page cannot forge it). It does **not**, and
+fundamentally **cannot**, authenticate an arbitrary **local process** on
+the same machine (a curl command, a Python script, any other HTTP
+client) -- `Sec-Fetch-Site` and `Origin` are browser-computed signals
+with zero enforcement for a non-browser caller, which can set either
+header to literally anything it wants. A local script that deliberately
+sends `Sec-Fetch-Site: same-origin` gets the exact same zero-token
+bypass a real browser tab does. This is **not a bug to fix** -- a
+process already running arbitrary code on this machine is already
+inside the trust boundary every localhost-bound dev tool on earth
+implicitly relies on (the same boundary SSH-agent, most local dev
+servers, and Docker's own default socket permissions already assume).
+Local Mode's value is specifically stopping a **remote attacker's
+website** from reaching your local instance through your browser; it
+was never a defense against **your own machine being compromised**,
+and no amount of header-checking from inside this one process could
+honestly provide that.
+
 **`BIND_HOST` is read as your STATED INTENT, never independently
 verified.** This process cannot confirm from inside a container that a
 loopback-looking `BIND_HOST` genuinely means nothing outside this
-machine can reach the port. Do **not** combine Local Mode with any of
-the following -- none of them are supported, and doing so defeats Local
-Mode's trust model entirely:
+machine can reach the port. `docker-compose.yml` forwards the SAME
+`BIND_HOST`/`BIND_PORT` values used to publish the container into the
+container's own environment, so the Compose-level publish and this
+process's own Local-Mode decision cannot structurally diverge (Windows
+Docker Desktop QA round 2, finding B2) -- but this process still cannot
+independently verify that your Compose/host networking setup, overall,
+genuinely isolates this port to loopback. Do **not** combine Local Mode
+with any of the following -- none of them are supported, and doing so
+defeats Local Mode's trust model entirely:
 
 * a custom `docker-compose.override.yml` (or any other Compose
   override) that republishes or changes the port mapping;

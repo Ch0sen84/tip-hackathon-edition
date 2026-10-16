@@ -86,7 +86,7 @@ app = FastAPI(title="TIP Hackathon Edition", version="0.1.0")
 # reverse proxy under a different hostname.
 _BIND_HOST = os.environ.get("BIND_HOST", "127.0.0.1")
 _BIND_PORT = os.environ.get("BIND_PORT", "8000")
-ALLOWED_ORIGIN = os.environ.get("ALLOWED_ORIGIN", f"http://{_BIND_HOST}:{_BIND_PORT}")
+_ALLOWED_HOST_ENV_RAW = os.environ.get("ALLOWED_HOST")  # None iff never set explicitly
 ALLOWED_HOST = os.environ.get("ALLOWED_HOST", _BIND_HOST)
 
 # QA remediation D2: localhost:8000 returned 400 while 127.0.0.1:8000
@@ -122,10 +122,34 @@ if _extra_hosts:
 if os.environ.get("PYTEST_CURRENT_TEST") or "pytest" in sys.modules:
     _ALLOWED_HOSTS += ["testserver", "testclient"]
 
+# QA remediation B1/B3 (Windows Docker Desktop QA round 2): Origin
+# validation used to be a single hardcoded ALLOWED_ORIGIN string computed
+# once from BIND_HOST/BIND_PORT. Two concrete bugs followed from that:
+#   B1 -- BIND_PORT was never actually forwarded into the container's
+#         environment by docker-compose.yml (fixed there now), so a
+#         custom published port's real browser Origin never matched
+#         whatever port this process happened to compute.
+#   B3 -- even with the right port, a browser opening the app via
+#         `http://localhost:<port>` sent Origin `http://localhost:<port>`,
+#         which never matched the single `http://127.0.0.1:<port>` this
+#         process computed -- even though TrustedHostMiddleware above
+#         already accepts BOTH `localhost` and `127.0.0.1` as the Host
+#         header. Origin validation must accept the SAME set of loopback
+#         aliases Host validation already does, for the SAME configured
+#         port -- never a wildcard, never a weakened Host check.
+# ALLOWED_ORIGIN is kept as a single representative value (existing
+# tests/docstrings/error messages reference it), but the real membership
+# check and the real CORSMiddleware config use the full computed set.
+_ALLOWED_ORIGIN_ENV = os.environ.get("ALLOWED_ORIGIN")
+_ALLOWED_ORIGINS = local_mode_module.compute_allowed_origins(
+    ALLOWED_HOST, _BIND_PORT, allowed_origin_override=_ALLOWED_ORIGIN_ENV
+)
+ALLOWED_ORIGIN = _ALLOWED_ORIGINS[0]
+
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=_ALLOWED_HOSTS)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[ALLOWED_ORIGIN],
+    allow_origins=list(_ALLOWED_ORIGINS),
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -178,7 +202,11 @@ _pairing_store = PairingCodeStore(
 
 
 def _origin_header_matches_configured_origin(origin: Optional[str]) -> bool:
-    return origin == ALLOWED_ORIGIN
+    """B3 fix: membership in the full computed _ALLOWED_ORIGINS set (every
+    loopback alias on the configured port, or the single explicit
+    ALLOWED_ORIGIN override) -- never a single hardcoded string. Still an
+    exact match against a known, bounded set; never a wildcard."""
+    return origin in _ALLOWED_ORIGINS
 
 
 def _sec_fetch_site_is_same_origin(request: Request) -> bool:
@@ -259,9 +287,9 @@ def require_auth(request: Request) -> None:
             status_code=403,
             detail=(
                 f"Origin header {origin!r} does not match this deployment's configured "
-                f"origin ({ALLOWED_ORIGIN!r}). A missing Origin header is never treated as "
-                "proof of legitimacy on its own, but a PRESENT, mismatched one is always "
-                "rejected outright, in both Local Mode and Network Mode."
+                f"origin(s) ({sorted(_ALLOWED_ORIGINS)!r}). A missing Origin header is never "
+                "treated as proof of legitimacy on its own, but a PRESENT, mismatched one is "
+                "always rejected outright, in both Local Mode and Network Mode."
             ),
         )
     if _local_mode_bypass_allowed(request):
@@ -402,7 +430,9 @@ def _on_startup() -> None:
     # requests Local Mode against a non-loopback BIND_HOST -- see
     # core/local_mode.py's docstring. Mirrors single_process_guard's
     # own fail-closed startup pattern immediately below.
-    local_mode_module.assert_local_mode_configuration(_BIND_HOST, _TIP_LOCAL_MODE_RAW)
+    local_mode_module.assert_local_mode_configuration(
+        _BIND_HOST, _TIP_LOCAL_MODE_RAW, allowed_host_override=_ALLOWED_HOST_ENV_RAW
+    )
     single_process_guard.assert_single_process()
     get_scheduler_runner().start()
     # QA remediation D1: loudly surface the pairing code on every real

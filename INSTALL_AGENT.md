@@ -147,13 +147,30 @@ round) applies to every settings/credential write, the watchlist
 editor, Market Discovery, and Investigate with AI.
 
 **Driving a mutating API call yourself via `curl` for verification**
-(e.g. the Live-mode examples in step i below) is a non-browser caller,
-so it never sends real `Sec-Fetch-Site`/`Origin` headers -- it always
-needs the Network Mode token, REGARDLESS of which mode the app is
-actually running in (Local Mode's bypass is specifically for a real
-browser's same-origin fetch, not for curl). Fetch the token the same
-way a browser's auto-bootstrap would (this call only succeeds because
-you're running on the same machine as the container):
+(e.g. the Live-mode examples in step i below): by default, a plain
+`curl` command never sends `Sec-Fetch-Site`/`Origin` headers at all, so
+it falls through to needing the Network Mode token regardless of which
+mode the app is actually running in. Be precise about WHY, though
+(Windows Docker Desktop QA round 2, finding S1): this is **not** because
+Local Mode somehow detects and blocks curl specifically, or because
+these headers are enforced for non-browser clients -- they are not.
+`Sec-Fetch-Site`/`Origin` are headers a real BROWSER computes and
+attaches itself, which a remote malicious WEBSITE's page cannot forge;
+that is the actual, real security property Local Mode relies on. A
+**local** script (curl, a Python `requests` call, anything else running
+on this same machine) can simply set `Sec-Fetch-Site: same-origin`
+itself and get the exact same zero-token bypass a real browser tab
+does -- Local Mode provides **zero protection against an already-
+running local process**, by design, because that process already has
+arbitrary code execution on this machine and is already inside the
+trust boundary the whole scheme (and every other localhost-bound dev
+tool) relies on. Don't use `curl -H "Sec-Fetch-Site: same-origin"` as a
+shortcut here even though it would work -- always fetch a real token so
+your verification pass exercises the SAME code path a real browser (or
+a real LAN/remote caller, who cannot forge these headers through an
+intervening network) goes through. Fetch the token the same way a
+browser's auto-bootstrap would (this call only succeeds because you're
+running on the same machine as the container):
 
 ```bash
 TIP_TOKEN=$(curl -s http://localhost:8000/api/auth/bootstrap | python3 -c 'import sys,json;print(json.load(sys.stdin)["token"])')
