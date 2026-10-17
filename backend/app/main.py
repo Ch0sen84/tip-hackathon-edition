@@ -1828,6 +1828,18 @@ def _ticker_analysis_impl(ticker: str, refresh: bool) -> dict:
         served_from_cache = True
 
     item = _to_evidence_item(scan)
+    history = store.history(ticker)
+    # Timeline wording needs each historical scan's own persisted rule, not
+    # today's/current rule. The catalog already stores that exact value in
+    # signal_evaluations.raw_json; enrich the legacy scan-log rows read-only,
+    # aligning newest-to-newest so older pre-catalog rows remain untouched.
+    rule_reader = getattr(catalog, "list_signal_evaluation_rules", None)
+    if served_from_cache and callable(rule_reader):
+        catalog_history = rule_reader(ticker)
+        if isinstance(catalog_history, list):
+            for history_entry, catalog_entry in zip(reversed(history), reversed(catalog_history)):
+                if isinstance(catalog_entry, dict) and history_entry.get("state") == catalog_entry.get("state"):
+                    history_entry["transition_rule"] = catalog_entry.get("transition_rule")
     return {
         "ticker": ticker,
         "state": scan["state"],
@@ -1843,7 +1855,7 @@ def _ticker_analysis_impl(ticker: str, refresh: bool) -> dict:
         "current_read": tip_evidence.current_read(item),
         "evidence": tip_evidence.evidence(item),
         "stock_state": scan.get("stock_state"),
-        "history": store.history(ticker),
+        "history": history,
         "raw": scan["raw"],
         "eval_freshness": eval_freshness,
         "last_evaluated_at": last_evaluated_at,

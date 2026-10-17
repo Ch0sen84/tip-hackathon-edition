@@ -589,6 +589,31 @@ class IngestionCatalog:
     # core/scheduler_freshness.py for the classification built on top of
     # this.
 
+    def list_signal_evaluation_rules(self, ticker: str) -> list[dict]:
+        """Read historical display metadata from existing evaluation JSON.
+
+        This is read-only: no schema or stored record is modified. The catalog
+        already persists each scan's exact transition_rule in raw_json.
+        """
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT event_time, state, raw_json FROM signal_evaluations "
+                "WHERE ticker = ? ORDER BY retrieved_at ASC, id ASC",
+                (ticker,),
+            ).fetchall()
+        result = []
+        for event_time, state, raw_json in rows:
+            try:
+                raw = json.loads(raw_json) if raw_json else {}
+            except (json.JSONDecodeError, TypeError):
+                raw = {}
+            result.append({
+                "event_time": event_time,
+                "state": state,
+                "transition_rule": raw.get("transition_rule"),
+            })
+        return result
+
     def get_latest_signal_evaluation(self, ticker: str) -> Optional[dict]:
         with self._conn() as conn:
             row = conn.execute(
