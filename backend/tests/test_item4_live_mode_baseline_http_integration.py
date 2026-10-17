@@ -40,6 +40,14 @@ from app.dark_pool_pagination import COMPLETE
 
 TICKER = "ZQXW"
 
+# Round 12 (ux-nav-watchlist-reliability) fix: a FIXED, deterministic date
+# known to be a real NYSE trading session (not a weekend, not a market
+# holiday) per trading_calendar.py's own is_trading_day() -- replaces this
+# module's prior wall-clock "today" assumption, which genuinely failed on
+# any real weekend/holiday. 2026-06-15 is a Monday; verified a real
+# trading day as of this fix via `trading_calendar.is_trading_day(...)`.
+ANCHOR_TRADING_DATE = dt.date(2026, 6, 15)
+
 
 class _FakeUWRestClient:
     """Duck-types UWRestClient's constructor + the three methods
@@ -105,11 +113,28 @@ def _seed_strong_dark_pool_baseline(catalog, ticker: str) -> dict:
 
     Today is marked 'complete' explicitly (not left to the real-time
     in-progress check) so this test is not flaky around market hours.
+
+    Round 12 (ux-nav-watchlist-reliability) fix: "today" here used to be
+    the real wall-clock date (dt.datetime.now(...).date()), which made
+    this whole test genuinely fail on any real weekend/market holiday
+    (confirmed failing on an actual Saturday, 2026-10-17, via
+    AssertionError on the old `assert tc.is_trading_day(today)` line) --
+    this module's seeded-history/HTTP-integration coverage has nothing
+    to do with which day it happens to be run on. Anchored instead to a
+    FIXED, deterministic date (ANCHOR_TRADING_DATE below) already known
+    to be a real NYSE trading day per this same trading_calendar module
+    (not a market holiday, not a weekend) -- the
+    `assert tc.is_trading_day(...)` safety check is intentionally KEPT
+    (not removed/weakened), it now just guards the fixed constant
+    instead of the wall clock, so a future change to the calendar module
+    that ever invalidated this specific date would still be caught
+    loudly rather than silently.
     """
-    today = dt.datetime.now(dt.timezone.utc).astimezone(tc.NY_TZ).date()
+    today = ANCHOR_TRADING_DATE
     assert tc.is_trading_day(today), (
-        f"test assumption violated: {today} is not a real NYSE trading day "
-        "per trading_calendar.py -- pick a different anchor date for this test"
+        f"test assumption violated: the fixed anchor date {today} is not a real "
+        "NYSE trading day per trading_calendar.py -- pick a different anchor date "
+        "for this test (must be a non-weekend, non-holiday session)"
     )
     today_open = tc.session_start_utc(today)
 
@@ -139,11 +164,44 @@ def live_mode_seeded(app_main, tmp_path, monkeypatch):
     watchlisted and mode flipped to 'live' directly on the settings
     store (bypassing the key-verification-gated HTTP route, which is an
     unrelated auth feature -- this test is about scan-gate wiring, not
-    credential verification)."""
+    credential verification).
+
+    Round 12 (ux-nav-watchlist-reliability) fix: the fixture now also
+    freezes `app.core.dark_pool_baseline`'s own notion of "now" to a
+    fixed instant on ANCHOR_TRADING_DATE. This is necessary (not
+    optional) once "today" in the seeded-history helper above stopped
+    being the real wall-clock date: `dark_pool_baseline.
+    compute_baseline_for_ticker()` -- called by the REAL, un-mocked
+    `_catalog_dark_pool_baseline_best_effort()` scan path this test
+    exercises -- independently defaults `as_of_utc` to the real wall
+    clock (`datetime.now(timezone.utc)`) whenever it isn't passed one
+    explicitly, which main.py's call site never does. Without this
+    freeze, the live scan's own "today" (the real wall-clock date) and
+    this fixture's seeded "today" (the fixed anchor date) would
+    silently diverge, breaking the baseline match this test depends on
+    -- this is a test-only monkeypatch of a module-level `datetime`
+    symbol, not a change to any application file's logic.
+    """
     import app.adapters.live_uw_adapter as live_uw_mod
+    import app.core.dark_pool_baseline as dark_pool_baseline_mod
     from app import main as _main
 
     monkeypatch.setattr(live_uw_mod, "UWRestClient", _FakeUWRestClient)
+
+    # A fixed instant 2 hours after ANCHOR_TRADING_DATE's real session
+    # open -- gives a genuine, non-zero elapsed window for the
+    # time-of-day cumulative comparison, exactly like a real mid-session
+    # live scan would see.
+    frozen_now = tc.session_start_utc(ANCHOR_TRADING_DATE) + dt.timedelta(hours=2)
+
+    class _FrozenDatetime(dt.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            if tz is None:
+                return frozen_now.replace(tzinfo=None)
+            return frozen_now.astimezone(tz)
+
+    monkeypatch.setattr(dark_pool_baseline_mod, "datetime", _FrozenDatetime)
 
     isolated_db = str(tmp_path / "item4_isolated.db")
     monkeypatch.setattr(_main.settings, "db_path", isolated_db)
