@@ -1071,6 +1071,26 @@ function fmtLastEvaluatedCell(entry) {
   if (typeof formatTimestampFull !== "function") return esc(entry.last_evaluated_at || "Not evaluated");
   return esc(formatTimestampFull(entry.last_evaluated_at));
 }
+// Round 14 item 1: the My Watchlist table's headline column used to
+// render `entry.headline` unconditionally -- for an entry Round 13
+// correctly made visible again (`isZeroGateEntry`, evaluated this scan
+// but zero qualifying gates passed), the backend's generic
+// tip_evidence.headline() text (e.g. "Unusual activity") still reads as
+// if something qualifying fired, directly contradicting the state
+// tag's own already-honest "(no qualifying signal)" note right next to
+// it in the State column on the SAME row. Reuses the exact same
+// isZeroGateEntry predicate stateTagHtml already branches on (never a
+// second/drifting check) -- a genuinely qualifying entry's headline is
+// returned completely untouched, and a never-evaluated placeholder's
+// honest "Not yet evaluated" headline is also untouched (isZeroGateEntry
+// already excludes not_evaluated entries internally).
+function rowHeadlineText(entry) {
+  if (isZeroGateEntry(entry)) {
+    return "No qualifying signal detected.";
+  }
+  return entry.headline;
+}
+
 function renderRow(entry) {
   const px = entry.price || {};
   return `
@@ -1081,7 +1101,7 @@ function renderRow(entry) {
       <td class="col-family">${renderFamilyLabel(entry)}</td>
       <td class="col-price">${fmtPriceCell(px)}</td>
       <td class="col-chg">${fmtChangeCell(px)}</td>
-      <td class="col-headline">${esc(entry.headline)}</td>
+      <td class="col-headline">${esc(rowHeadlineText(entry))}</td>
       <td class="col-lastEval">${fmtLastEvaluatedCell(entry)}</td>
       <td><button class="btn-link btn-investigate" data-investigate-ticker="${esc(entry.ticker)}">Investigate &rarr;</button></td>
     </tr>`;
@@ -1426,8 +1446,53 @@ function renderRadarLists(data, filters, loadTickerDetailFn) {
   // filteredOther, not the full unfiltered allOtherDisplay. filteredOther
   // is now drawn from allOtherDisplay (ALL entries), not qualifyingOther,
   // so never-evaluated tickers genuinely render a row here.
+  //
+  // Round 14 item 3: filteredOther is a flat mix of three genuinely
+  // different kinds of entry (genuinely qualifying, evaluated-zero-gate,
+  // never-evaluated) rendered one after another with no visual grouping
+  // at all -- the ONLY place a reader could tell them apart was each
+  // row's own State-column badge. The "Other Noteworthy" heading above
+  // this table reports the genuinely-qualifying count (see
+  // otherNoteworthyCount below), but ALL THREE kinds render as rows in
+  // this one table beneath it -- a real count/row mismatch (e.g.
+  // heading says 4, table shows 6). Fix: split into three sub-groups,
+  // each with its OWN labeled header row + its OWN count computed from
+  // (and therefore always exactly matching) the rows actually rendered
+  // under it this render pass -- never from a separately-tracked/
+  // possibly-stale counter. This does NOT hide the zero-gate/never-
+  // evaluated rows (that would reintroduce the Round 13 regression this
+  // whole initiative exists to fix) -- every row from filteredOther
+  // still renders, just grouped. A group with zero rows this pass
+  // renders no header at all, so there is never a heading sitting over
+  // zero rows.
+  const otherQualifyingRows = filteredOther.filter((e) => !e.not_evaluated && !e.zero_gate);
+  const otherZeroGateRows = filteredOther.filter((e) => e.zero_gate);
+  const otherNotEvaluatedRows = filteredOther.filter((e) => e.not_evaluated);
+  function otherGroupHeaderRow(label, count) {
+    return `<tr class="radar-group-header-row"><td colspan="9" class="radar-group-header">${esc(label)} (${count})</td></tr>`;
+  }
   const tbody = document.querySelector("#otherTable tbody");
-  if (tbody) tbody.innerHTML = filteredOther.map(renderRow).join("");
+  if (tbody) {
+    const groups = [];
+    if (otherQualifyingRows.length) groups.push(otherQualifyingRows.map(renderRow).join(""));
+    if (otherZeroGateRows.length) {
+      groups.push(otherGroupHeaderRow("No Qualifying Signal", otherZeroGateRows.length));
+      groups.push(otherZeroGateRows.map(renderRow).join(""));
+    }
+    if (otherNotEvaluatedRows.length) {
+      groups.push(otherGroupHeaderRow("Not Evaluated", otherNotEvaluatedRows.length));
+      groups.push(otherNotEvaluatedRows.map(renderRow).join(""));
+    }
+    tbody.innerHTML = groups.join("");
+  }
+  // The static "Other Noteworthy" <h2> heading itself gets its own
+  // accurate count, kept in permanent lockstep with
+  // otherQualifyingRows.length above -- the exact same number of rows
+  // actually rendered as plain (non-grouped) rows at the top of the
+  // table this render pass, under every filter state, never a
+  // separately-derived figure that could drift from what's rendered.
+  const otherHeadingCountEl = document.getElementById("otherNoteworthyCount");
+  if (otherHeadingCountEl) otherHeadingCountEl.textContent = ` (${otherQualifyingRows.length})`;
 
   // Counts: "qualifying" (highest+other, i.e. tip_evidence.qualifies()
   // entries) is always kept distinct from "scanned" (every synthetic
@@ -2696,7 +2761,14 @@ function renderLifecycleTimeline(history, currentState) {
 // fix requested here -- a scan that left the state unchanged shows
 // "Status: Still X" instead of the confusing "Transition: X -> X". Purely
 // presentation: does not touch what previous_state/state actually are.
+// Round 14 item 2 follow-on: when this ticker has genuinely never been
+// evaluated, BOTH previousState and state are honestly null/undefined
+// (see backend/app/main.py's _not_evaluated_ticker_analysis_response
+// fix) -- without this guard the first branch below would render the
+// literal, nonsensical string "Initial detection: null". Never invents
+// a state; just states plainly that there is none yet.
 function transitionLabel(previousState, state) {
+  if (!state) return "No evaluation recorded yet.";
   if (!previousState) return `Initial detection: ${state}`;
   if (previousState === state) return `Status: Still ${state}`;
   return `Transition: ${previousState} \u2192 ${state}`;
@@ -2774,9 +2846,29 @@ function primaryCurrentRead(d) {
   return d.current_read;
 }
 
+// Round 14 item 2: a never-evaluated ticker (no cataloged evaluation at
+// all -- backend/app/main.py's _not_evaluated_ticker_analysis_response,
+// now fixed to report `state: null`/`not_evaluated: true` instead of
+// faking `state: "NEW"`) must not render the lifecycle state badge at
+// all -- "NEW (just started qualifying)" directly contradicted this
+// same header card's own "Not yet evaluated" freshness text for the
+// exact same ticker. Distinct from the zero-gate case (primaryStateGloss
+// above): that is a ticker genuinely evaluated this scan with zero
+// qualifying gates, which keeps its real state tag plus the honest
+// "(no qualifying evidence yet)" gloss -- never evaluated at all is a
+// THIRD, different state that gets its own neutral badge, reusing the
+// SAME isNotEvaluated predicate the Market Radar grid's stateTagHtml
+// already uses, never a fourth ad-hoc check.
+function primaryStateBadgeHtml(d) {
+  if (isNotEvaluated(d)) {
+    return `<span class="tag state-unevaluated" title="This ticker has never been evaluated -- no real signal-detection scan has run for it yet.">Not evaluated</span>`;
+  }
+  const stateGloss = primaryStateGloss(d);
+  return `<span class="tag state-${esc(d.state)}">${esc(d.state)}</span>${stateGloss ? ` <span class="muted state-gloss">(${esc(stateGloss)})</span>` : ""}`;
+}
+
 function renderTickerDetail(d) {
   const gatesHtml = renderGateGroups(d.gates);
-  const stateGloss = primaryStateGloss(d);
   const ruleGloss = TRANSITION_RULE_GLOSS[d.transition_rule] || "internal rule identifier";
   const primaryHeadline = primaryTickerHeadline(d);
   const timelineHtml = renderLifecycleTimeline(d.history, d.state);
@@ -2797,8 +2889,7 @@ function renderTickerDetail(d) {
   return `
     <div class="card ticker-header-card">
       <div class="card-head"><span class="tk tk-lg">${esc(d.ticker)}</span>
-        <span class="tag state-${esc(d.state)}">${esc(d.state)}</span>
-        ${stateGloss ? `<span class="muted state-gloss">(${esc(stateGloss)})</span>` : ""}
+        ${primaryStateBadgeHtml(d)}
       </div>
       ${freshnessHtml}
       <div class="tags">
