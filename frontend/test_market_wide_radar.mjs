@@ -54,7 +54,14 @@ console.log("\n=== renderMarketWideCandidateRow: View Details + Why Surfaced (it
   check("Why Surfaced: a real net_premium/call_volume/etc. value renders as itself, not a placeholder", () => {
     const html = renderWhySurfacedBlock({ raw: { net_premium: 5_000_000, call_volume: 1200, put_volume: 300, iv_rank: 62.4, change_percent: 3.1, source_date: "2026-10-16" } });
     assert.match(html, /Net premium/);
-    assert.match(html, /\$5,000,000/);
+    // D3 fix (ux-nav-watchlist-reliability round 9): Net premium now
+    // uses the SAME fmtMoney() helper as the rest of the app (abbreviated
+    // magnitude + proper Unicode minus for negatives), not a raw
+    // unabbreviated "$5,000,000" -- see fmtMoney()'s own module comment
+    // and test_d3_why_surfaced_money.mjs for the full writeup of the
+    // real negative-premium display bug this closes.
+    assert.match(html, /\$5\.0M/);
+    assert.doesNotMatch(html, /\$5,000,000/);
     assert.doesNotMatch(html, /not captured/);
   });
   check("Why Surfaced: a genuinely real ZERO value (checked, found nothing) renders as '0', never blank/placeholder", () => {

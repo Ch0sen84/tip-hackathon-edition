@@ -761,8 +761,18 @@ const FRESHNESS_LABELS = {
 //     put_volume: 0) -- rendered as a normal, non-italic value, exactly
 //     like any other real number -- a genuine zero must never look the
 //     same as "we don't know".
+// D3 (ux-nav-watchlist-reliability round 9): this used to hand-roll its
+// own `$${...toLocaleString()}` formatting, which (unlike the rest of
+// the app) never abbreviated magnitude and, worse, put the sign INSIDE
+// the "$" for a negative net_premium (raw "$-89,231,250" instead of the
+// established, already-fixed "\u2212$89.2M" pattern -- see fmtMoney()'s
+// own module comment for the full prior writeup of that exact bug class).
+// Market Discovery's row/table already use fmtMoney() for this same
+// net_premium field (lines below, renderDiscoveryCandidateRow); this is
+// the one remaining display path that wasn't using it. Extends the
+// existing helper rather than inventing a second formatter.
 const WHY_SURFACED_FIELDS = [
-  { key: "net_premium", label: "Net premium", fmt: (v) => `$${Math.round(Number(v)).toLocaleString()}` },
+  { key: "net_premium", label: "Net premium", fmt: (v) => fmtMoney(Number(v)) ?? "$0" },
   { key: "call_volume", label: "Call volume", fmt: (v) => Number(v).toLocaleString() },
   { key: "put_volume", label: "Put volume", fmt: (v) => Number(v).toLocaleString() },
   { key: "iv_rank", label: "IV rank", fmt: (v) => Number(v).toFixed(1) },
@@ -976,6 +986,26 @@ function fmtChangeCell(px) {
 // Breakdown panel (click-through, renderSignalBreakdown, unchanged) and
 // in Ticker Analysis's full 4-way classification -- just not duplicated
 // inline on every card in the grid.
+// D4/D5 (ux-nav-watchlist-reliability round 9): a watchlist entry with no
+// real lifecycle record at all (entry.state is null/undefined -- see
+// backend/app/main.py's _radar_impl fix, which no longer fakes this to
+// "NEW") must render an honest "Not evaluated" badge -- "NEW" is a real
+// signal_engine lifecycle state that implies an evaluation actually
+// happened, and must never be shown for a ticker that has never been
+// scanned. `entry.not_evaluated` (also set by the backend fix above) is
+// the more explicit signal when present; falling back to `!entry.state`
+// covers the same real condition for any entry that didn't go through
+// that specific code path.
+function isNotEvaluated(entry) {
+  return !!entry.not_evaluated || !entry.state;
+}
+function stateTagHtml(entry) {
+  if (isNotEvaluated(entry)) {
+    return `<span class="tag state-unevaluated" title="This ticker has never been evaluated -- no real signal-detection scan has run for it yet.">Not evaluated</span>`;
+  }
+  return `<span class="tag state-${esc(entry.state)}">${esc(entry.state)}</span>`;
+}
+
 function renderCard(entry) {
   const px = entry.price || {};
   return `
@@ -986,7 +1016,7 @@ function renderCard(entry) {
       </div>
       <div class="tags">
         <span class="tag">${esc(entry.label)}</span>
-        <span class="tag state-${esc(entry.state)}">${esc(entry.state || "")}</span>
+        ${stateTagHtml(entry)}
         <span class="tag">confidence: ${esc(entry.confidence)}</span>
       </div>
       <div class="read card-headline">${esc(entry.headline)}</div>
@@ -1022,8 +1052,8 @@ function renderRow(entry) {
   return `
     <tr data-ticker="${esc(entry.ticker)}">
       <td><strong>${esc(entry.ticker)}</strong></td>
-      <td><span class="tag state-${esc(entry.state)}">${esc(entry.state || "")}</span></td>
-      <td>${esc(entry.confidence)}</td>
+      <td>${stateTagHtml(entry)}</td>
+      <td>${isNotEvaluated(entry) ? `<span class="muted">n/a</span>` : esc(entry.confidence)}</td>
       <td class="col-family">${renderFamilyLabel(entry)}</td>
       <td class="col-price">${fmtPriceCell(px)}</td>
       <td class="col-chg">${fmtChangeCell(px)}</td>
@@ -1035,12 +1065,32 @@ function renderRow(entry) {
 // Activity-summary strip above the grid. Built purely from fields the
 // /api/radar response (and its static-demo capture) already has:
 // scanned, highest.length, other.length -- no new backend fields.
+// D4/D5 (ux-nav-watchlist-reliability round 9): `data.other` can now
+// contain never-evaluated placeholder entries (not_evaluated: true) --
+// these must never count toward "highest attention"/"other noteworthy"
+// (both are genuinely-qualifying categories) or toward any "N qualifying
+// signals" total. Filters are presentation-only; nothing fed into these
+// counts changes what present()/tip_evidence actually classified.
+function qualifyingEntries(list) {
+  return (list || []).filter((e) => !e.not_evaluated);
+}
+
 function renderActivitySummary(data) {
+  // watchlist_size/evaluated_count are new, explicit fields (backend fix,
+  // same round) -- `scanned` is kept for back-compat but, on a cache-only
+  // read with never-evaluated tickers, does NOT mean "N were actually
+  // evaluated"; fall back to it only for older/static-demo payloads that
+  // predate these two fields (data/radar.json in static-demo).
+  const watchlistSize = data.watchlist_size != null ? data.watchlist_size : data.scanned;
+  const evaluatedCount = data.evaluated_count != null ? data.evaluated_count : data.scanned;
+  const evalNote = evaluatedCount !== watchlistSize
+    ? `<span class="activity-label">(${esc(evaluatedCount)} of ${esc(watchlistSize)} evaluated)</span>`
+    : "";
   return `
     <div class="activity-strip">
-      <div class="activity-stat"><span class="activity-num">${esc(data.scanned)}</span><span class="activity-label">tickers scanned</span></div>
-      <div class="activity-stat"><span class="activity-num accent-bull">${esc((data.highest || []).length)}</span><span class="activity-label">highest attention</span></div>
-      <div class="activity-stat"><span class="activity-num">${esc((data.other || []).length)}</span><span class="activity-label">other noteworthy</span></div>
+      <div class="activity-stat"><span class="activity-num">${esc(watchlistSize)}</span><span class="activity-label">tickers in watchlist</span>${evalNote}</div>
+      <div class="activity-stat"><span class="activity-num accent-bull">${esc(qualifyingEntries(data.highest).length)}</span><span class="activity-label">highest attention</span></div>
+      <div class="activity-stat"><span class="activity-num">${esc(qualifyingEntries(data.other).length)}</span><span class="activity-label">other noteworthy</span></div>
     </div>`;
 }
 
@@ -1251,8 +1301,12 @@ function renderFeaturedArea(data) {
 function renderRadarLists(data, filters, loadTickerDetailFn) {
   const familyFilter = (filters && filters.family) || "";
   const stateFilter = (filters && filters.state) || "";
-  const allHighest = data.highest || [];
-  const allOther = data.other || [];
+  // D4/D5 fix: never-evaluated placeholder entries (not_evaluated: true)
+  // must not be rendered as cards/rows alongside genuinely qualifying
+  // entries, and must not inflate totalQualifying below -- see
+  // qualifyingEntries()'s module comment.
+  const allHighest = qualifyingEntries(data.highest);
+  const allOther = qualifyingEntries(data.other);
   const featured = allHighest[0] || null;
   const restOfHighest = allHighest.slice(1);
   const filteredRest = filterRadarEntries(restOfHighest, familyFilter, stateFilter);
@@ -2200,23 +2254,37 @@ function mountActivityTimeline(containerId, allEvents) {
   }
 }
 
-function renderChartUnavailable(reason) {
+// D1 (ux-nav-watchlist-reliability round 9): honest empty-cache state +
+// an obvious "Load Chart Data" action, rather than a dead-end message.
+// `opts.showLoadButton` is true only when the caller (app.live.js, a real
+// backend) has a real authenticated POST /api/ticker/{t}/ohlc/refresh to
+// wire the button to -- the static demo (zero backend) never sets it, so
+// it still gets the plain honest message with no button that would 404.
+// This function still makes zero fetch() calls itself (the click handler
+// is wired by the caller after this HTML lands in the DOM), consistent
+// with the rest of this file's "no fetch() here" rule.
+function renderChartUnavailable(reason, opts = {}) {
   const detail = reason && reason.message ? reason.message
     : reason && reason.status ? `UW status: ${reason.status}`
     : "No OHLC data available for this ticker in the current mode.";
-  return `<div class="chart-unavailable">Chart data unavailable &mdash; ${esc(detail)}</div>`;
+  const btn = opts.showLoadButton
+    ? `<div style="margin-top:10px"><button id="loadChartDataBtn" type="button" class="btn-refresh">Load Chart Data</button>
+        <div id="loadChartDataStatus" class="muted" style="margin-top:6px;font-size:11px"></div></div>`
+    : "";
+  return `<div class="chart-unavailable">No chart data cached yet for this ticker &mdash; ${esc(detail)}${btn}</div>`;
 }
 
 // Mounts (or re-renders, if called again) a candlestick chart with
 // evidence markers into the DOM node with id `containerId`. `ohlc` is the
 // exact shape returned by /api/ticker/{t}/ohlc (live) or
 // data/ohlc/{t}.json (static demo) -- see backend/app/core/candles.py.
-function mountCandlestickChart(containerId, ohlc) {
+// `opts.showLoadButton`: see renderChartUnavailable above.
+function mountCandlestickChart(containerId, ohlc, opts = {}) {
   const root = document.getElementById(containerId);
   if (!root) return;
 
   if (!ohlc || ohlc.unavailable || !ohlc.candles || !ohlc.candles.length) {
-    root.innerHTML = renderChartUnavailable(ohlc ? ohlc.reason : null);
+    root.innerHTML = renderChartUnavailable(ohlc ? ohlc.reason : null, opts);
     return;
   }
   if (typeof LightweightCharts === "undefined") {
@@ -2494,10 +2562,32 @@ function transitionLabel(previousState, state) {
   return `Transition: ${previousState} \u2192 ${state}`;
 }
 
+// D2 (ux-nav-watchlist-reliability round 9): the backend's honest
+// no_qualifying_evidence_yet reason string (from signal_engine's
+// determine_transition, unchanged this round) was reaching the
+// TRANSITION_RULE_GLOSS map and being correctly glossed, but that gloss
+// was only ever read inside the bottom "Developer / Debug" <details>
+// panel (renderRawDataSummary) -- the PRIMARY visible headline in the
+// header card still showed the backend's generic tip_evidence.headline()
+// text (e.g. "Unusual activity") alongside the state-gloss tag's "(just
+// started qualifying)", which together read as if qualification had
+// happened. This computes the actual primary-visible headline, genuinely
+// branching on d.transition_rule (not guessing from d.state), and is
+// used in place of the raw backend headline for this one specific case
+// only -- every other transition_rule keeps the backend's own headline
+// untouched, no lifecycle-state/confidence/CONFIRMED logic changed.
+function primaryTickerHeadline(d) {
+  if (d.transition_rule === "no_qualifying_evidence_yet") {
+    return "No qualifying signal detected yet.";
+  }
+  return d.headline;
+}
+
 function renderTickerDetail(d) {
   const gatesHtml = renderGateGroups(d.gates);
   const stateGloss = STATE_GLOSS[d.state] || "";
   const ruleGloss = TRANSITION_RULE_GLOSS[d.transition_rule] || "internal rule identifier";
+  const primaryHeadline = primaryTickerHeadline(d);
   const timelineHtml = renderLifecycleTimeline(d.history, d.state);
   // W2-b (2026-10-16): honest cache-vs-fresh disclosure, same freshness-
   // badge pattern already established for My Watchlist -- reuses
@@ -2510,7 +2600,7 @@ function renderTickerDetail(d) {
     ? `<div class="tags">
         <span class="tag freshness-${esc(d.eval_freshness)}">${esc(FRESHNESS_LABELS[d.eval_freshness] || d.eval_freshness)}</span>
         <span class="muted">${d.last_evaluated_at && typeof formatTimestampET === "function" ? `Last evaluated: ${esc(formatTimestampET(d.last_evaluated_at))}` : "Not yet evaluated"}</span>
-        <button id="tickerRefreshBtn" type="button" class="btn-refresh">Refresh this ticker</button>
+        <button id="tickerRefreshBtn" type="button" class="btn-refresh" title="Re-runs signal detection (the gates/state above) for this ticker only. Does NOT refresh the price chart -- use the chart panel's own Load Chart Data / range buttons for that.">Refresh this ticker (signal only)</button>
       </div>`
     : "";
   return `
@@ -2525,7 +2615,7 @@ function renderTickerDetail(d) {
         <span class="tag">${esc(d.signal_type)}</span>
         <span class="tag">qualifying days: ${d.qualifying_days_count}</span>
       </div>
-      <div class="read">${esc(d.headline)}</div>
+      <div class="read primary-headline" id="tickerPrimaryHeadline">${esc(primaryHeadline)}</div>
       <div class="read">${esc(d.current_read)}</div>
       <div class="read">${esc(transitionLabel(d.previous_state, d.state))}</div>
       <div class="read">Confidence reason: ${esc(d.confidence_reason)}</div>
