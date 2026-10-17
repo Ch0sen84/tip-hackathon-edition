@@ -2454,6 +2454,214 @@ function renderChartUnavailable(reason, opts = {}) {
   return `<div class="chart-unavailable">No chart data cached yet for this ticker &mdash; ${esc(detail)}${btn}</div>`;
 }
 
+// --- Compact evidence marker overlay (2026-10-17 fix) ------------------
+//
+// Replaces lightweight-charts' native series.setMarkers() text labels
+// (which overlapped unreadably near the chart's right edge -- see the
+// root-cause comment inside mountCandlestickChart above) with a custom,
+// absolutely-positioned HTML overlay: one small fixed-size colored dot
+// per (bar, kind) group, a hover/click tooltip with the real aggregate +
+// per-event detail, and a legend with Flow only / Dark Pool only / Both
+// / None toggle buttons. Positions come from the SAME
+// chart.timeScale().timeToCoordinate() the candlesticks themselves use,
+// so dots stay correctly aligned through pan/zoom/resize/range changes
+// -- re-rendered on chart.timeScale().subscribeVisibleTimeRangeChange
+// and on the existing ResizeObserver callback (see call sites).
+//
+// Every number shown anywhere in the tooltip (count, summed premium,
+// each listed timestamp/price) is read directly from the real
+// marker/event objects the backend returned -- nothing here fabricates,
+// interpolates, or repositions a real event's time to "look cleaner";
+// grouping only changes what's drawn on the chart canvas, never the
+// real timestamps a user can see in the tooltip or the (unchanged)
+// evidence table below the chart.
+//
+// Degrades to a safe no-op under the repo's minimal getElementById-only
+// test DOM stubs (no real appendChild/getBoundingClientRect/
+// timeToCoordinate) -- same defensive-guard style this file already
+// uses for `typeof ResizeObserver !== "undefined"`.
+const EVIDENCE_MARKER_COLORS = { flow_alert: "#f59e0b", darkpool_trade: "#60a5fa" };
+const EVIDENCE_MARKER_LABELS = { flow_alert: "Flow alert", darkpool_trade: "Dark-pool trade" };
+const EVIDENCE_VISIBILITY_KEY = "tipEvidenceMarkerVisibility"; // "flow" | "dp" | "both" | "none"
+
+function getEvidenceVisibilityMode() {
+  try {
+    const v = typeof localStorage !== "undefined" ? localStorage.getItem(EVIDENCE_VISIBILITY_KEY) : null;
+    return v === "flow" || v === "dp" || v === "none" ? v : "both";
+  } catch (e) { return "both"; }
+}
+function setEvidenceVisibilityMode(v) {
+  try { if (typeof localStorage !== "undefined") localStorage.setItem(EVIDENCE_VISIBILITY_KEY, v); } catch (e) { /* ignore */ }
+}
+function evidenceModeShowsKind(mode, kind) {
+  if (mode === "none") return false;
+  if (mode === "flow") return kind === "flow_alert";
+  if (mode === "dp") return kind === "darkpool_trade";
+  return true; // "both" (default)
+}
+
+// Real per-group summary -- every field here traces directly back to
+// g.events (the real backend marker objects); never invented.
+function summarizeEvidenceGroup(g) {
+  const n = g.events.length;
+  const withPrice = g.events.filter((e) => e.price != null);
+  const withValue = g.events.filter((e) => e.value != null);
+  const sumValue = withValue.length ? withValue.reduce((s, e) => s + e.value, 0) : null;
+  return {
+    count: n,
+    sumValue,
+    latestPrice: withPrice.length ? Number(withPrice[withPrice.length - 1].price) : null,
+    earliestTime: g.events[0].time,
+    latestTime: g.events[n - 1].time,
+  };
+}
+
+// Tooltip HTML for one group -- aggregate line first, then up to the 8
+// most recent REAL events with their exact recorded time/price/value
+// (never rounded/repositioned for display), then a pointer to the full
+// list in the preserved evidence table for anything beyond 8.
+function evidenceGroupTooltipHtml(g) {
+  const s = summarizeEvidenceGroup(g);
+  const label = EVIDENCE_MARKER_LABELS[g.kind] || g.kind;
+  const rows = g.events.slice(-8).reverse().map((e) => `
+    <div class="cet-row"><span>${esc(e.time)}</span>${e.price != null ? `<span>@ ${Number(e.price).toFixed(2)}</span>` : ""}${e.value != null ? `<span>${esc(fmtMoney(e.value))}</span>` : ""}</div>`).join("");
+  const more = s.count > 8 ? `<div class="cet-row muted">+${s.count - 8} more \u2014 see table below</div>` : "";
+  return `
+    <div class="cet-head" style="color:${EVIDENCE_MARKER_COLORS[g.kind] || "#fff"}">${s.count} ${esc(label)}${s.count === 1 ? "" : "s"}</div>
+    <div class="cet-sub">${esc(dateOnly(s.latestTime))}${s.sumValue != null ? ` \u00b7 total ${esc(fmtMoney(s.sumValue))}` : ""}${s.latestPrice != null ? ` \u00b7 latest px ${s.latestPrice.toFixed(2)}` : ""}</div>
+    ${rows}${more}`;
+}
+
+// One shared tooltip element reused across every chart mount/dot (a
+// single floating div is simpler and cheaper than one per dot). Created
+// lazily, only when document.body is really appendChild-able.
+let _evidenceTooltipEl = null;
+function getEvidenceTooltipEl() {
+  if (!_evidenceTooltipEl
+      && typeof document !== "undefined"
+      && typeof document.createElement === "function"
+      && document.body && typeof document.body.appendChild === "function") {
+    _evidenceTooltipEl = document.createElement("div");
+    _evidenceTooltipEl.className = "chart-evidence-tooltip";
+    _evidenceTooltipEl.style.display = "none";
+    document.body.appendChild(_evidenceTooltipEl);
+  }
+  return _evidenceTooltipEl;
+}
+function showEvidenceTooltip(anchorEl, html) {
+  const tip = getEvidenceTooltipEl();
+  if (!tip || typeof anchorEl.getBoundingClientRect !== "function") return;
+  tip.innerHTML = html;
+  tip.style.display = "block";
+  const rect = anchorEl.getBoundingClientRect();
+  const tipRect = tip.getBoundingClientRect();
+  let left = rect.left + rect.width / 2 - tipRect.width / 2;
+  const maxLeft = (typeof window !== "undefined" ? window.innerWidth : left + tipRect.width) - tipRect.width - 4;
+  left = Math.max(4, Math.min(left, maxLeft));
+  let top = rect.top - tipRect.height - 8;
+  if (top < 4) top = rect.bottom + 8;
+  tip.style.left = `${left}px`;
+  tip.style.top = `${top}px`;
+}
+function hideEvidenceTooltip() {
+  if (_evidenceTooltipEl) _evidenceTooltipEl.style.display = "none";
+}
+
+// Mounts the legend/toggle row + absolutely-positioned dot overlay as
+// extra children of `root` (appended AFTER the chart library has
+// already populated it -- never replaces root.innerHTML again, so the
+// chart's own DOM is left untouched). `groups` is the same Map built in
+// mountCandlestickChart: key `${barTime}|${kind}` -> { barTime, kind,
+// events }.
+function mountEvidenceMarkerOverlay(root, chart, groups) {
+  const timeScale = chart.timeScale();
+  if (typeof root.appendChild !== "function" || typeof timeScale.timeToCoordinate !== "function") {
+    return; // minimal test DOM stub / non-browser environment -- safe no-op
+  }
+  const groupList = Array.from(groups.values());
+  if (!groupList.length) return; // nothing real to show -- no legend for an empty chart
+
+  if (root.style && !root.style.position) root.style.position = "relative";
+
+  let mode = getEvidenceVisibilityMode();
+
+  const legend = document.createElement("div");
+  legend.className = "chart-evidence-legend";
+  legend.innerHTML = `
+    <span class="cel-item"><span class="cel-dot cel-dot-flow"></span>Flow alerts</span>
+    <span class="cel-item"><span class="cel-dot cel-dot-dp"></span>Dark-pool</span>
+    <span class="cel-toggles">
+      <button type="button" class="cel-btn" data-mode="flow">Flow only</button>
+      <button type="button" class="cel-btn" data-mode="dp">Dark Pool only</button>
+      <button type="button" class="cel-btn" data-mode="both">Both</button>
+      <button type="button" class="cel-btn" data-mode="none">None</button>
+    </span>`;
+  root.appendChild(legend);
+
+  const overlay = document.createElement("div");
+  overlay.className = "chart-evidence-overlay";
+  root.appendChild(overlay);
+
+  function updateLegendActiveState() {
+    if (typeof legend.querySelectorAll !== "function") return;
+    legend.querySelectorAll(".cel-btn").forEach((b) => b.classList.toggle("active", b.dataset.mode === mode));
+  }
+
+  function renderDots() {
+    overlay.innerHTML = "";
+    const h = root.clientHeight || 320;
+    const flowLaneY = 12;
+    const dpLaneY = Math.max(24, h - 30);
+    for (const g of groupList) {
+      if (!evidenceModeShowsKind(mode, g.kind)) continue;
+      const x = timeScale.timeToCoordinate(g.barTime);
+      if (x == null) continue; // genuinely outside the currently-visible range -- correctly hidden, not misplaced
+      const dot = document.createElement("div");
+      const n = g.events.length;
+      const kindClass = g.kind === "darkpool_trade" ? "dp" : "flow";
+      dot.className = `chart-evidence-dot chart-evidence-dot-${kindClass}`;
+      dot.style.left = `${x}px`;
+      dot.style.top = `${g.kind === "darkpool_trade" ? dpLaneY : flowLaneY}px`;
+      if (n > 1) dot.textContent = n > 99 ? "99+" : String(n);
+      dot.title = ""; // never rely on the native title tooltip -- our own is the real UI
+      overlay.appendChild(dot);
+      if (typeof dot.addEventListener === "function") {
+        dot.addEventListener("mouseenter", () => showEvidenceTooltip(dot, evidenceGroupTooltipHtml(g)));
+        dot.addEventListener("mouseleave", () => { if (!dot._pinned) hideEvidenceTooltip(); });
+        dot.addEventListener("click", (ev) => {
+          ev.stopPropagation();
+          if (typeof overlay.querySelectorAll === "function") {
+            overlay.querySelectorAll(".chart-evidence-dot.pinned").forEach((d) => {
+              if (d !== dot) { d.classList.remove("pinned"); d._pinned = false; }
+            });
+          }
+          dot._pinned = !dot._pinned;
+          dot.classList.toggle("pinned", dot._pinned);
+          if (dot._pinned) showEvidenceTooltip(dot, evidenceGroupTooltipHtml(g)); else hideEvidenceTooltip();
+        });
+      }
+    }
+  }
+
+  if (typeof legend.addEventListener === "function") {
+    legend.addEventListener("click", (ev) => {
+      const btn = typeof ev.target.closest === "function" ? ev.target.closest(".cel-btn") : null;
+      if (!btn) return;
+      mode = btn.dataset.mode;
+      setEvidenceVisibilityMode(mode);
+      updateLegendActiveState();
+      renderDots();
+    });
+  }
+
+  updateLegendActiveState();
+  renderDots();
+  root._tipRenderEvidenceOverlay = renderDots;
+  if (typeof timeScale.subscribeVisibleTimeRangeChange === "function") {
+    timeScale.subscribeVisibleTimeRangeChange(renderDots);
+  }
+}
+
 // Mounts (or re-renders, if called again) a candlestick chart with
 // evidence markers into the DOM node with id `containerId`. `ohlc` is the
 // exact shape returned by /api/ticker/{t}/ohlc (live) or
@@ -2554,13 +2762,46 @@ function mountCandlestickChart(containerId, ohlc, opts = {}) {
   // on one bar render as N literally-overlapping circles. Root cause
   // was volume, not timestamp mapping.
   //
-  // Fix: GROUP markers by (bar, kind) into ONE chart marker per group,
-  // labeled with a real count ("23 flow alerts, latest $187.20") instead
-  // of plotting every individual event -- this is honest aggregation,
-  // not hiding evidence: every underlying event is still listed in the
-  // "Evidence on this chart" detail table rendered below (see
-  // renderMarkerDetailTable), so nothing is dropped, just not each
-  // individually plotted as a separate overlapping dot.
+  // Fix (2026-10-17, real captured-video defect: SPY markers unreadable/
+  // overlapping near the chart's right edge): GROUP markers by (bar,
+  // kind) into ONE group per bar+kind -- this part of the 2026-10-14 fix
+  // was and remains correct (verified: distinct trading days stay
+  // distinct groups, never collapsed; see nearestBarTime/dateOnly tests).
+  // The ACTUAL root cause of the right-edge overlap is downstream of
+  // this grouping: the old code then handed each group to lightweight-
+  // charts' native series.setMarkers() as a marker carrying a permanent
+  // inline TEXT label (e.g. "23 flow alerts (latest $187.20)"). That
+  // library renders marker text unconditionally and with zero collision
+  // detection between adjacent markers. Real UW evidence is heaviest on
+  // the most RECENT trading days (see this file's own C1 module note
+  // above: UW's flow-alert/dark-pool endpoints return only the most
+  // recent events), so the right-hand side of the chart is exactly where
+  // multiple consecutive daily bars are most likely to EACH carry a
+  // label -- and a label like that is 120-180px wide while a 1M/3M/6M
+  // view's bar spacing is often under 20px, so neighboring days' labels
+  // physically overlap. This is a label-width-vs-bar-spacing density
+  // problem, not a timestamp/timezone/bucketing bug (those were already
+  // fixed and are covered by nearestBarTime's own tests) and not a
+  // same-day stacking problem (also already fixed by this grouping).
+  // Confirmed by reading lightweight-charts' marker renderer: it does
+  // not reflow or hide overlapping marker text, and a marker anchored on
+  // one of the last few bars can render its text past the plot area,
+  // under/behind the right price scale.
+  //
+  // Fix: STOP asking the chart library to draw any permanent per-marker
+  // text. Native setMarkers() is no longer used at all. Instead,
+  // mountEvidenceMarkerOverlay() below draws small fixed-size, color-
+  // coded dots (compact, same color convention already used elsewhere
+  // in this app: orange = options flow, blue = dark pool) positioned via
+  // the SAME chart.timeScale().timeToCoordinate() the library itself
+  // uses, so dots always track real bar positions through scroll/zoom/
+  // resize/range changes. Each dot still represents exactly one (bar,
+  // kind) group -- same honest aggregation as before, same real count,
+  // same real underlying events -- but ALL detail (count, aggregate
+  // premium, real per-event timestamps) now lives in a hover/click
+  // tooltip and in the unchanged, already-existing evidence table below,
+  // never permanently drawn on the chart itself. See
+  // mountEvidenceMarkerOverlay's own header comment for the rest.
   let excludedCount = 0;
   const groups = new Map(); // key: `${barTime}|${kind}` -> { barTime, kind, events: [...] }
   for (const m of ohlc.markers || []) {
@@ -2574,24 +2815,7 @@ function mountCandlestickChart(containerId, ohlc, opts = {}) {
     groups.get(key).events.push(m);
   }
   const allEvents = []; // flat list for the detail table, newest-first within each group preserved
-  const markers = Array.from(groups.values()).map((g) => {
-    allEvents.push(...g.events);
-    const n = g.events.length;
-    const withPrice = g.events.filter((e) => e.price != null);
-    const latestPrice = withPrice.length ? Number(withPrice[withPrice.length - 1].price) : null;
-    const kindLabel = g.kind === "darkpool_trade" ? "dark-pool trade" : "flow alert";
-    const text = n === 1
-      ? (g.events[0].price != null ? `${g.events[0].label} @ ${Number(g.events[0].price).toFixed(2)}` : g.events[0].label)
-      : `${n} ${kindLabel}${n === 1 ? "" : "s"}${latestPrice != null ? ` (latest ${latestPrice.toFixed(2)})` : ""}`;
-    return {
-      time: g.barTime,
-      position: g.kind === "darkpool_trade" ? "belowBar" : "aboveBar",
-      color: g.kind === "darkpool_trade" ? "#60a5fa" : "#f59e0b",
-      shape: "circle",
-      text,
-    };
-  });
-  series.setMarkers(markers);
+  for (const g of groups.values()) allEvents.push(...g.events);
   chart.timeScale().fitContent();
 
   // Info panel below the chart (2026-10-14 fix): both the excluded-marker
@@ -2617,11 +2841,18 @@ function mountCandlestickChart(containerId, ohlc, opts = {}) {
   }
   mountActivityTimeline("activityTimelineContainer", allEvents);
 
+  // Compact marker overlay + legend/toggle controls (2026-10-17 fix) --
+  // see the long comment above this function's grouping loop for the
+  // full root-cause writeup. No-ops safely when running under a
+  // minimal test DOM stub (no real appendChild/timeToCoordinate).
+  mountEvidenceMarkerOverlay(root, chart, groups);
+
   root._tipChart = chart;
   if (!root._tipResizeObserverAttached && typeof ResizeObserver !== "undefined") {
     const ro = new ResizeObserver(() => {
       if (root._tipChart && root.clientWidth > 0) {
         root._tipChart.applyOptions({ width: root.clientWidth });
+        if (typeof root._tipRenderEvidenceOverlay === "function") root._tipRenderEvidenceOverlay();
       }
     });
     ro.observe(root);
