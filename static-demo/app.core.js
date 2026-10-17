@@ -1281,7 +1281,11 @@ function renderFeaturedArea(data) {
   const allHighest = data.highest || [];
   const allOther = data.other || [];
   const hasHighest = allHighest.length > 0;
-  const hasOther = allOther.length > 0;
+  // Round 12 (ux-nav-watchlist-reliability): mirrors frontend/app.core.js --
+  // kept in sync with the real app bundle. See that file's comment.
+  const hasGenuineOther = qualifyingEntries(allOther).length > 0;
+  const counts = radarSummaryCounts(data);
+  const nothingEvaluatedYet = counts.evaluatedCount === 0 && counts.watchlistCount > 0;
   const featured = allHighest[0] || null;
 
   const headingEl = document.getElementById("featuredSignalHeading");
@@ -1308,8 +1312,10 @@ function renderFeaturedArea(data) {
   if (breakdownEl) breakdownEl.innerHTML = "";
   if (noticeEl) {
     noticeEl.style.display = "";
-    noticeEl.innerHTML = hasOther
-      ? `<div class="breakdown-panel empty">No ticker currently qualifies for Highest Attention -- see Other Noteworthy below for the tickers tracked this scan.</div>`
+    noticeEl.innerHTML = hasGenuineOther
+      ? `<div class="breakdown-panel empty">No ticker currently qualifies for Highest Attention -- see Other Noteworthy below for the ticker(s) evaluated this scan.</div>`
+      : nothingEvaluatedYet
+      ? `<div class="breakdown-panel empty">No tickers in this watchlist have been evaluated yet -- run a scan to populate Market Radar.</div>`
       : `<div class="breakdown-panel empty">No tickers currently qualify for Market Radar attention this scan.</div>`;
   }
 }
