@@ -1809,10 +1809,35 @@ def _not_evaluated_ticker_analysis_response(ticker: str, store: QualifyingDaysSt
     Ticker Analysis, never fabricating gates/evidence/confidence for a
     ticker that genuinely has no cataloged evaluation yet. Mirrors
     _not_evaluated_evidence_item's honesty but shaped for this route's
-    response contract."""
+    response contract.
+
+    Round 14 item 2 fix (real bug, not a frontend mismatch): `state` used
+    to fall back to the literal string "NEW" whenever QualifyingDaysStore
+    genuinely had no real lifecycle record for this ticker either --
+    "NEW" is a real signal_engine lifecycle state that implies an
+    evaluation actually happened (determine_transition's
+    current_state-is-None branch), so Ticker Analysis's header badge
+    rendered "NEW (just started qualifying)" directly alongside this
+    same response's own "headline": "Not yet evaluated" / the freshness
+    block's "Not yet evaluated" text -- a plain contradiction (claims
+    qualifying activity for a ticker that was never scanned at all).
+    This is the exact same class of dishonesty D4/D5 (round 9) already
+    fixed for the Market Radar grid's `not_evaluated` entries -- that
+    fix never reached this separate Ticker Analysis cache-miss response.
+    Fix: `state` now reports the real value honestly (None when
+    genuinely never evaluated, never faked to "NEW"), and an explicit
+    `not_evaluated` marker is added so the frontend can apply the SAME
+    shared isNotEvaluated predicate it already uses for the radar grid,
+    rather than inventing a second check. When QualifyingDaysStore DOES
+    already have a real prior state for this ticker (it was evaluated at
+    some point, only this specific cache-miss path has nothing fresh),
+    that real state is still shown honestly, unchanged -- this is not a
+    never-evaluated case and must not be mislabeled as one."""
+    real_state = store.current_state(ticker)
     return {
         "ticker": ticker,
-        "state": store.current_state(ticker) or "NEW",
+        "state": real_state,
+        "not_evaluated": real_state is None,
         "previous_state": None,
         "transition_rule": None,
         "confidence": None,
