@@ -2510,8 +2510,15 @@ function mountCandlestickChart(containerId, ohlc, opts = {}) {
 // Renders ONE raw history entry's full detail row -- used ONLY inside the
 // bounded-height expandable <details> panel below, never directly in the
 // main page flow regardless of how long `entries` is.
+function historyEntryGloss(e) {
+  if (e && e.transition_rule === "no_qualifying_evidence_yet") {
+    return "no qualifying evidence yet";
+  }
+  return STATE_GLOSS[e && e.state] || "";
+}
+
 function renderRawHistoryStep(e, i, entries) {
-  const gloss = STATE_GLOSS[e.state] || "";
+  const gloss = historyEntryGloss(e);
   const prev = i > 0 ? entries[i - 1].state : null;
   const changed = prev && prev !== e.state;
   return `
@@ -2549,7 +2556,7 @@ function renderLifecycleTimeline(history, currentState) {
   }
   if (entries.length === 1) {
     const e = entries[0];
-    const gloss = STATE_GLOSS[e.state] || "";
+    const gloss = historyEntryGloss(e);
     return `
       <div class="card timeline-card">
         <div class="card-head"><strong>Signal Lifecycle</strong>
