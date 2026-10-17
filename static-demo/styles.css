@@ -170,7 +170,17 @@ nav#nav .ic { font-size: 13px; width: 16px; text-align: center; opacity: .7; }
    horizontal overflow/clipping on every view at mobile width. min(...)
    has no floor, so it actually shrinks below 1200px when the viewport
    is narrower than that. */
-.main { padding: 18px 20px 60px; max-width: min(1680px, 100%); width: 100%; margin: 0 auto; box-sizing: border-box; }
+/* D3 fix (ux-nav-watchlist-reliability round 9): real CDP measurement at
+   2560x1440 found a 320px empty right gutter (544px left, split mostly
+   by the fixed sidebar) with content capped at the old 1680px -- visibly
+   excessive on a large/ultra-wide desktop monitor, the exact "centered
+   desktop rows and excessive empty gutters" defect reported. Raised to
+   1880px (still well short of claiming full-bleed; production TIP's own
+   row/table convention is denser but this app's grid breakpoints were
+   tuned around ~1680px card/table widths, so a full re-layout is left
+   out of scope this round -- see this round's final report). Re-measured
+   at 1920x1080 and 390x844: no overflow/clipping introduced at either. */
+.main { padding: 18px 20px 60px; max-width: min(1880px, 100%); width: 100%; margin: 0 auto; box-sizing: border-box; }
 @media (max-width: 600px) { .main { padding: 14px 14px 50px; } }
 .view { display: none; }
 .view.active { display: block; }
