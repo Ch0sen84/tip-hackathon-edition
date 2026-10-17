@@ -60,6 +60,7 @@ global.ResizeObserver = class { observe() {} };
 global.fetch = async () => { throw new Error("no network access expected in this test"); };
 
 const coreSrc = fs.readFileSync(fileURLToPath(new URL("./app.core.js", import.meta.url)), "utf8");
+const liveSrc = fs.readFileSync(fileURLToPath(new URL("./app.live.js", import.meta.url)), "utf8");
 (0, eval)(coreSrc + `
 globalThis.__exports = {
   renderRadarLists, renderRow, renderCard, isNotEvaluated, stateTagHtml,
@@ -211,7 +212,12 @@ console.log("\n=== P2: Refresh response re-renders Last Evaluated without reload
   assert.match(tbodyEl().innerHTML, /col-lastEval">Not evaluated</);
   const after = { scanned:1, watchlist_size:1, evaluated_count:1, highest:[], other:[evaluatedEntry("FRESH", {last_evaluated_at:"2026-10-16T19:45:00+00:00"})] };
   core.renderRadarLists(after, {}, async () => {});
-  check("re-rendering the completed POST payload replaces 'Not evaluated' immediately, with no page reload or follow-up fetch", () => {
+  check("the completion handler performs one refresh POST then the cache-only radar GET, never a second POST evaluation", () => {
+    const handler = liveSrc.match(/async function refreshWatchlistData\(\) \{([\s\S]*?)\n\}/)?.[1] || "";
+    assert.equal((handler.match(/apiPost\("\/api\/radar\/refresh"/g) || []).length, 1);
+    assert.equal((handler.match(/apiGet\("\/api\/radar"/g) || []).length, 1);
+  });
+  check("re-rendering the completed cached payload replaces 'Not evaluated' immediately, with no page reload", () => {
     const row = tbodyEl().innerHTML;
     assert.doesNotMatch(row, /col-lastEval">Not evaluated</);
     assert.match(row, /col-lastEval">[^<]+</);

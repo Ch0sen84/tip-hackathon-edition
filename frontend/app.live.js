@@ -1379,7 +1379,12 @@ async function refreshWatchlistData() {
   if (btn) { btn.disabled = true; btn.textContent = "Refreshing..."; }
   if (statusEl) statusEl.textContent = "Fetching fresh data from Unusual Whales...";
   try {
-    const data = await apiPost("/api/radar/refresh", {});
+    await apiPost("/api/radar/refresh", {});
+    // The POST has already performed and persisted exactly one evaluation
+    // per watchlist ticker. Re-read through the existing cache-only GET so
+    // Last Evaluated comes from the committed catalog rows; this is not a
+    // second evaluation and makes zero additional UW calls.
+    const data = await apiGet("/api/radar");
     _lastRadarData = data;
     renderFeaturedArea(data);
     setupRadarFiltersAndRender(data, loadTickerDetail);

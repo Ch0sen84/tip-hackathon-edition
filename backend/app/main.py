@@ -1482,13 +1482,10 @@ def _radar_impl(refresh: bool):
     for ticker in universe:
         if live_fetch:
             scan = _run_scan(adapter, store, ticker)
-            # Freshness after a real fetch is always "current" by definition.
-            # Carry the just-completed evaluation timestamp in the POST response
-            # so the existing client-side re-render updates Last Evaluated
-            # immediately, without F5 or a second evaluation.
+            # Freshness after a real fetch is always "current" by definition
+            # (it was just retrieved) -- avoid a second catalog round-trip.
             freshness_by_ticker[ticker] = scheduler_freshness.FreshnessResult(
-                ticker=ticker, state=scheduler_freshness.CURRENT,
-                evaluation={"retrieved_at": _ingestion_utcnow_iso()}, age_s=0.0,
+                ticker=ticker, state=scheduler_freshness.CURRENT, evaluation=None, age_s=0.0,
                 window_s=scheduler_freshness.freshness_window_s(),
             )
         else:
