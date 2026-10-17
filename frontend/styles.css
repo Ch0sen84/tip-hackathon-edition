@@ -316,6 +316,16 @@ nav#nav .ic { font-size: 13px; width: 16px; text-align: center; opacity: .7; }
 .col-price, .col-chg { white-space: nowrap; }
 @media (max-width: 860px) { .col-family { display: none; } }
 @media (max-width: 760px) { .col-chg { display: none; } }
+
+/* Round 14 item 3: sub-group header rows inside the Other Noteworthy
+   table -- distinguishes the genuinely-qualifying rows (no header, sit
+   directly under the "Other Noteworthy" heading) from the evaluated-
+   zero-gate group ("No Qualifying Signal") and the never-evaluated
+   group ("Not Evaluated"), each labeled with its own accurate count
+   computed by renderRadarLists() from the rows actually rendered under
+   it. Deliberately plain/muted -- a section divider, not a data row. */
+.radar-group-header-row td { background: var(--panel2); }
+.radar-group-header { font-size: 10.5px; font-weight: 600; text-transform: uppercase; letter-spacing: .4px; color: var(--muted); }
 @media (max-width: 560px) { .col-headline { display: none; } }
 
 .empty { color: var(--muted); padding: 30px 16px; text-align: center; font-size: 13px; }

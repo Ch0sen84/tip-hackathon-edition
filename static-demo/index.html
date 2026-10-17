@@ -71,7 +71,11 @@
             <div class="attn-grid" id="highestGrid"></div>
           </div>
 
-          <h2 class="section-title eyebrow">Other Noteworthy</h2>
+          <!-- Round 14 item 3: the count span is kept accurate by
+               renderRadarLists() -- always the exact number of rows
+               actually rendered as plain (non-grouped) rows in the
+               table below, under any filter state. -->
+          <h2 class="section-title eyebrow">Other Noteworthy<span id="otherNoteworthyCount"></span></h2>
           <div class="table-wrap" id="otherNoteworthyTable">
             <table class="tbl" id="otherTable">
               <thead>
