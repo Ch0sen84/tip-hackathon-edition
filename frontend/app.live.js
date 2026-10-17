@@ -439,8 +439,7 @@ async function loadOhlcChart(ticker, range, mySeq) {
     const ohlc = await apiGet(`/api/ticker/${encodeURIComponent(ticker)}/ohlc?range=${encodeURIComponent(range)}`);
     if (mySeq !== _navSeq) return;
     mountCandlestickChart("ohlcChartContainer", ohlc, { showLoadButton: true });
-    wireLoadChartDataButton(ticker, range, mySeq);
-    if (!noteEl) return;
+    if (!noteEl) { wireLoadChartDataButton(ticker, range, mySeq); return; }
     const unit = range === "1D" ? "5-minute bar(s)" : "trading day(s)";
     // 2026-10-15 (Chad's item #4): real raw-record disclosure, not just
     // the final candle count -- lets you verify (not just trust) the
@@ -450,12 +449,32 @@ async function loadOhlcChart(ticker, range, mySeq) {
         `${ohlc.regular_session_records_retained} retained]`
       : "";
     if (ohlc.unavailable || !ohlc.candle_count) {
-      noteEl.textContent = "";
+      noteEl.innerHTML = "";
     } else if (ohlc.range_fully_satisfied === false) {
-      noteEl.textContent =
-        `${range} requested \u00b7 only ${ohlc.candle_count} ${unit} of real history available` +
-        `${range !== "1D" && ohlc.available_span_days != null ? ` (~${ohlc.available_span_days} calendar days)` : ""} -- ` +
-        `showing everything UW has for ${esc(ticker)}, not padded to the full requested range.${rawNote}`;
+      // P2 fix (ux-nav-watchlist-reliability round 10): the real bug
+      // Claude's retest found -- this GET is cache-only (see
+      // _ticker_ohlc_impl's S1-b comment), so it has verified NOTHING
+      // about what UW itself could provide upstream; the previous
+      // wording ("showing everything UW has for TICKER") asserted an
+      // upstream fact this read never checked. Rephrased to say exactly
+      // what IS verified (what's cached locally, with its own real
+      // date bounds) versus what is NOT verified (whether UW has more
+      // -- that can only be learned by actually calling the protected
+      // refresh route), and a real "Load more" action that calls that
+      // SAME existing POST /api/ticker/{ticker}/ohlc/refresh route
+      // (never a new endpoint, never a silent/automatic fetch).
+      const spanNote = (range !== "1D" && ohlc.available_span_days != null)
+        ? ` spanning ~${ohlc.available_span_days} calendar day(s)`
+        : "";
+      const boundsNote = (ohlc.earliest_candle && ohlc.latest_candle)
+        ? ` (${esc(String(ohlc.earliest_candle))} \u2192 ${esc(String(ohlc.latest_candle))})`
+        : "";
+      noteEl.innerHTML =
+        `<span>${esc(range)} requested \u00b7 only ${ohlc.candle_count} ${unit} cached locally${spanNote}${boundsNote} -- ` +
+        `this is what's cached, not a confirmed upstream limit for ${esc(ticker)}; UW may have more.${esc(rawNote)}</span>` +
+        `<div style="margin-top:6px"><button id="loadMoreChartDataBtn" type="button" class="btn-refresh">` +
+        `Load more (fetch real ${esc(range)} data from UW)</button>` +
+        `<div id="loadMoreChartDataStatus" class="muted" style="margin-top:6px;font-size:11px"></div></div>`;
     } else {
       const negNote = ohlc.negative_volume_bars_clamped
         ? ` \u00b7 ${ohlc.negative_volume_bars_clamped} bar(s) had an upstream negative-volume artifact (clamped to 0 for display)`
@@ -463,11 +482,13 @@ async function loadOhlcChart(ticker, range, mySeq) {
       const kind = range === "1D" ? "5-minute candles (pre/regular/post-market)" : "daily candles";
       noteEl.textContent = `${range} \u00b7 ${ohlc.candle_count} ${kind}${negNote}${rawNote}`;
     }
+    wireLoadChartDataButton(ticker, range, mySeq);
+    wireLoadMoreChartDataButton(ticker, range, mySeq);
   } catch (chartErr) {
     if (mySeq !== _navSeq) return;
     mountCandlestickChart("ohlcChartContainer", { unavailable: true, reason: { message: chartErr.message } }, { showLoadButton: true });
     wireLoadChartDataButton(ticker, range, mySeq);
-    if (noteEl) noteEl.textContent = "";
+    if (noteEl) noteEl.innerHTML = "";
   }
 }
 
@@ -519,6 +540,63 @@ function wireLoadChartDataButton(ticker, range, mySeq) {
       if (mySeq !== _navSeq) return;
       if (statusEl && statusEl.isConnected) {
         statusEl.textContent = `Failed to load chart data: ${err.message}`;
+      }
+      if (btn.isConnected) btn.disabled = false;
+    } finally {
+      _chartLoadInFlight = false;
+    }
+  });
+}
+
+// P2 fix (ux-nav-watchlist-reliability round 10): the "Load more" action
+// for the PARTIAL-coverage case -- #otherwise non-empty chart already
+// rendered, range_fully_satisfied is honestly false, chartRangeNote
+// explains that only what's cached locally was verified. This wires
+// that note's own button to the EXACT SAME authenticated
+// POST /api/ticker/{ticker}/ohlc/refresh route wireLoadChartDataButton
+// already uses (never a new endpoint) -- a real, explicit, user-
+// triggered action is the only thing that may turn "not confirmed
+// upstream" into a verified answer. Same client-side duplicate-click
+// guard (_chartLoadInFlight) and the same server-side
+// _ticker_ohlc_refresh_lock as the sibling button.
+function wireLoadMoreChartDataButton(ticker, range, mySeq) {
+  const btn = document.getElementById("loadMoreChartDataBtn");
+  if (!btn) return;
+  const statusEl = document.getElementById("loadMoreChartDataStatus");
+  btn.addEventListener("click", async () => {
+    if (_chartLoadInFlight) return;
+    _chartLoadInFlight = true;
+    btn.disabled = true;
+    if (statusEl) statusEl.textContent = `Fetching real ${range} data from UW...`;
+    try {
+      const ohlc = await apiPost(
+        `/api/ticker/${encodeURIComponent(ticker)}/ohlc/refresh?range=${encodeURIComponent(range)}`,
+        {}
+      );
+      if (mySeq !== _navSeq) return; // user navigated away while this was in flight
+      mountCandlestickChart("ohlcChartContainer", ohlc, { showLoadButton: true });
+      const noteEl = document.getElementById("chartRangeNote");
+      if (noteEl) {
+        if (ohlc.unavailable || !ohlc.candle_count) {
+          noteEl.innerHTML = "";
+        } else if (ohlc.range_fully_satisfied === false) {
+          // Now a GENUINELY verified upstream limit -- a real live
+          // call just ran and UW still didn't have the full range, so
+          // this claim (unlike the cache-only wording above) is
+          // honestly backed by the fetch that just happened.
+          noteEl.textContent =
+            `${range} \u00b7 ${ohlc.candle_count} real candle(s) loaded -- UW does not have the full ${range} range for ${esc(ticker)} (verified by this fetch).`;
+        } else {
+          const kind = range === "1D" ? "5-minute candles (pre/regular/post-market)" : "daily candles";
+          noteEl.textContent = `${range} \u00b7 ${ohlc.candle_count} ${kind} (just loaded)`;
+        }
+      }
+      wireLoadChartDataButton(ticker, range, mySeq);
+      wireLoadMoreChartDataButton(ticker, range, mySeq);
+    } catch (err) {
+      if (mySeq !== _navSeq) return;
+      if (statusEl && statusEl.isConnected) {
+        statusEl.textContent = `Failed to load more chart data: ${err.message}`;
       }
       if (btn.isConnected) btn.disabled = false;
     } finally {
