@@ -1494,10 +1494,24 @@ def _radar_impl(refresh: bool):
             if scan is None:
                 never_evaluated_tickers.add(ticker)
                 scan = _not_evaluated_evidence_item(ticker)
-                # Give the placeholder the real current qualifying-days
-                # history (QualifyingDaysStore is independent of the UW-
-                # call-costing catalog -- reading it is not a live fetch).
-                scan["state"] = store.current_state(ticker) or "NEW"
+                # D4/D5 fix (ux-nav-watchlist-reliability round 9): this
+                # used to fall back to the literal string "NEW" whenever
+                # QualifyingDaysStore had no real lifecycle record for a
+                # ticker that has NEVER been evaluated at all -- "NEW" is
+                # a genuine signal_engine lifecycle state that implies an
+                # evaluation actually happened (determine_transition's
+                # current_state-is-None branch), so a watchlist ticker
+                # with zero real evaluations was being mislabeled exactly
+                # like one that WAS evaluated and genuinely just started
+                # qualifying. Leave `state` as the real None here when
+                # there is truly no lifecycle record -- the frontend (see
+                # app.core.js renderRow/renderCard) now renders that as an
+                # honest "Not evaluated" badge instead of a blank or fake
+                # "NEW" tag. A ticker that DOES have a real prior
+                # lifecycle record (store.current_state returns a real
+                # state) is unaffected -- this only changes the
+                # genuinely-never-evaluated case.
+                scan["state"] = store.current_state(ticker)
                 scan["confidence"] = None
                 scan["signal_type"] = None
                 scan["qualifying_days_count"] = store.qualifying_days_count(ticker)
@@ -1514,12 +1528,36 @@ def _radar_impl(refresh: bool):
     for ticker in never_evaluated_tickers:
         if ticker in shown_tickers:
             continue
+        # D4/D5 fix (ux-nav-watchlist-reliability round 9): this used to
+        # unconditionally blank out `state`/mark not_evaluated=True for
+        # EVERY ticker in never_evaluated_tickers (no cataloged
+        # signal_evaluations row), even one that DOES have a real prior
+        # lifecycle record in QualifyingDaysStore (scans_by_ticker[ticker]
+        # ["state"], set just above from store.current_state()) -- that
+        # ticker genuinely WAS evaluated at some point, it's only this
+        # round's catalog cache that's empty/stale, so it must keep
+        # showing its real state honestly, not get relabeled as if it
+        # had never been evaluated at all. `not_evaluated` is only True
+        # when there truly is no real state either.
+        real_prior_state = scans_by_ticker.get(ticker, {}).get("state")
         other.append({
             "ticker": ticker, "name": None, "families": [], "evidence": [],
-            "current_read": "This ticker has not been scanned yet.",
-            "headline": "Not yet evaluated", "label": None, "categories": [],
+            "current_read": "This ticker has not been scanned yet." if real_prior_state is None
+                else "No fresh evaluation cached for this ticker this cycle; showing its last known state.",
+            "headline": "Not yet evaluated" if real_prior_state is None else "Not yet evaluated this cycle",
+            "label": None, "categories": [],
             "index_context": False, "question": None, "research": [],
             "enriched": False, "price": None,
+            "state": real_prior_state,
+            # An explicit, honest marker so the frontend (and this
+            # route's own "qualifying signal(s)" count below) can
+            # distinguish a genuinely never-evaluated placeholder from a
+            # real evaluated-but-non-qualifying/qualifying entry -- this
+            # ticker was force-appended here specifically because
+            # present()'s qualifies() filter correctly never considers an
+            # empty-gates placeholder a qualifying signal; it must not be
+            # counted as one just because it shares the `other` list.
+            "not_evaluated": real_prior_state is None,
         })
 
     def _attach(entry: dict) -> dict:
@@ -1580,6 +1618,16 @@ def _radar_impl(refresh: bool):
         "highest": [_attach(e) for e in highest],
         "other": [_attach(e) for e in other],
         "scanned": len(universe),
+        # D4/D5 fix (ux-nav-watchlist-reliability round 9): `scanned`
+        # above is the TOTAL watchlist size (len(universe)), which is
+        # honest for a real live_fetch but was being read by the
+        # frontend as if it meant "N tickers were actually evaluated" --
+        # false on a cache-only read with a brand-new/partially-stale
+        # watchlist (never_evaluated_tickers genuinely non-empty). These
+        # two new fields make the real distinction explicit without
+        # changing `scanned`'s existing meaning/callers.
+        "watchlist_size": len(universe),
+        "evaluated_count": len(universe) - len(never_evaluated_tickers),
         # Honest disclosure (2026-10-14, Phase A): this is a scan of the
         # user's configured watchlist, never broader-market discovery --
         # see this function's docstring for why that distinction matters.

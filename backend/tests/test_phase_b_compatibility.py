@@ -118,7 +118,15 @@ EXPECTED_TICKER_ANALYSIS_KEYS = {
     "eval_freshness", "last_evaluated_at", "served_from_cache",
 }
 
-EXPECTED_RADAR_KEYS = {"highest", "other", "scanned", "scan_scope", "last_scan_at", "served_from_cache"}
+EXPECTED_RADAR_KEYS = {
+    "highest", "other", "scanned", "scan_scope", "last_scan_at", "served_from_cache",
+    # D4/D5 fix (ux-nav-watchlist-reliability round 9): explicit total-
+    # watchlist-size vs actually-evaluated-count disclosure -- see
+    # app/main.py's _radar_impl docstring update for the real bug this
+    # closes (an unevaluated ticker's cache-only "scanned" count was
+    # being misread by the frontend as "N were actually evaluated").
+    "watchlist_size", "evaluated_count",
+}
 
 
 def test_ticker_analysis_response_shape_matches_documented_contract(app_main, monkeypatch):

@@ -111,6 +111,40 @@ def test_ordinary_page_load_still_zero_calls_with_no_cache_at_all(app_main, monk
     assert body["scanned"] == len(watchlist_tickers)
     assert body["served_from_cache"] is True
     assert mock_session.get.call_count == 0
+    # D4/D5 fix (ux-nav-watchlist-reliability round 9): a genuinely
+    # never-evaluated ticker must get an honest None state -- NOT the
+    # literal string "NEW", which is a real signal_engine lifecycle
+    # state implying an evaluation actually happened. Also explicitly
+    # marked not_evaluated so the frontend never counts it as a
+    # qualifying signal just because it lives in the "other" list.
+    for e in body["other"]:
+        assert e["state"] is None, f"never-evaluated {e['ticker']} must not be labeled a real state, got {e['state']!r}"
+        assert e["not_evaluated"] is True
+    # watchlist_size/evaluated_count must distinguish total watchlist
+    # size from how many were ACTUALLY evaluated -- here, zero.
+    assert body["watchlist_size"] == len(watchlist_tickers)
+    assert body["evaluated_count"] == 0
+
+
+def test_never_evaluated_ticker_with_a_real_prior_lifecycle_state_is_unaffected(app_main, monkeypatch, watchlist_tickers):
+    """D4/D5 fix must only change the GENUINELY-never-evaluated case.
+    A ticker whose evaluation cache row doesn't exist (e.g. evicted) but
+    which DOES have a real prior lifecycle record in QualifyingDaysStore
+    (store.current_state returns a real value) must keep showing that
+    real state honestly -- never forced to None either."""
+    app_main._settings_store.set_watchlist(watchlist_tickers)
+    adapter, mock_session = _wire_live_adapter_with_mock_session(app_main, monkeypatch, watchlist_tickers)
+    ticker = watchlist_tickers[0]
+    # Give this ticker a real lifecycle record without a cataloged scan.
+    app_main.get_store().record_scan(ticker, any_gate_passed=True, state="BUILDING")
+
+    client = TestClient(app_main.app)
+    resp = client.get("/api/radar")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    entry = next(e for e in (body["highest"] + body["other"]) if e["ticker"] == ticker)
+    assert entry["state"] == "BUILDING"
+    assert not entry.get("not_evaluated")
 
 
 def test_repeated_ordinary_loads_navigate_back_and_auth_state_change_stay_zero(app_main, monkeypatch, watchlist_tickers):
