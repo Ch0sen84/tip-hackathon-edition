@@ -338,7 +338,7 @@ nav#nav .ic { font-size: 13px; width: 16px; text-align: center; opacity: .7; }
    flex-wrap layout fixes this without touching .candidate-row itself,
    so Market Radar's own freshness rows (still plain .candidate-row,
    4 real columns) are completely unaffected. */
-.market-wide-row { display: flex; flex-direction: column; gap: 3px; }
+.market-wide-row { display: flex; flex-direction: column; align-items: stretch; gap: 3px; }
 /* UX remediation item 4 (2026-10-16): tighter, strictly left-aligned,
    more information-dense row to better match production TIP's own
    row convention (read read-only from ~/.hermes/scripts/uw/webapp/ for
