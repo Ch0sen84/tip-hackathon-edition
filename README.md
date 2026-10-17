@@ -728,3 +728,36 @@ disable with zero AI key) is implemented and passing locally: **95 tests
 passing, 0 failing** (73 prior + 22 new). This README is a skeleton;
 polish (screenshots, architecture diagram, deployment notes) is planned
 for a later pass before submission.
+
+## License
+
+TIP Hackathon Edition (this repository's public source code) is licensed
+under the [MIT License](LICENSE).
+
+A few things the license does **not** cover:
+
+- **Private production TIP is separate.** The production Trading
+  Intelligence Platform this project was ported from is a private,
+  unpublished codebase with its own Postgres/TimescaleDB/Databento
+  infrastructure, baselines, and operational history. It is not included
+  in this repository and this license does not apply to it.
+- **You need your own Unusual Whales API credentials for Live Mode.**
+  This project does not include, proxy, or grant any license to
+  Unusual Whales market data. Live Mode simply calls the Unusual Whales
+  API using a key you supply yourself, under your own UW account and
+  subject to Unusual Whales' own terms.
+- **No redistribution rights over third-party market data.** The MIT
+  license covers this repository's source code only. It does not grant
+  any right to redistribute, resell, or republish Unusual Whales (or any
+  other third-party) market data obtained through Live Mode; that
+  remains governed entirely by the applicable data provider's own terms.
+- **Third-party components retain their own licenses.** Notably,
+  `frontend/lightweight-charts.js` (and its `static-demo/` copy) is
+  [TradingView Lightweight Charts™](https://github.com/tradingview/lightweight-charts)
+  v4.2.0, Copyright (c) 2024 TradingView, Inc., licensed under the
+  [Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0) — its
+  original license header is kept intact in the vendored file. Ordinary
+  pip dependencies (FastAPI, Uvicorn, Requests, httpx, python-dotenv,
+  pytest, the isolated `mcp` client, etc.) are not vendored into this
+  repo and remain under their own respective licenses as installed from
+  PyPI.
