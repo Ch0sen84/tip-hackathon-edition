@@ -2631,9 +2631,37 @@ function primaryTickerHeadline(d) {
   return d.headline;
 }
 
+// P3 fix (ux-nav-watchlist-reliability round 10): a SECOND, separate
+// display location for the same zero-gate dishonesty the headline fix
+// (primaryTickerHeadline above) already fixed two rounds ago. This
+// badge/pill sits right next to the state tag in the header card
+// (renderTickerDetail below) and used to be `STATE_GLOSS[d.state]`
+// unconditionally -- keyed ONLY off the lifecycle state, never the
+// transition reason. signal_engine.py's determine_transition can
+// return state=NEW for TWO genuinely different reasons (see its
+// `current_state is None` branch): any_gate_passed=True ->
+// transition_rule="first_qualifying_gate" (a real qualifying signal
+// just fired), or any_gate_passed=False ->
+// transition_rule="no_qualifying_evidence_yet" (zero gates passed --
+// nothing is actually qualifying). STATE_GLOSS["NEW"] is "just started
+// qualifying", which is only true for the first case; for the second,
+// zero-gate case it directly contradicts the already-fixed headline
+// right above it ("No qualifying signal detected yet.") on the exact
+// same page. Mirrors primaryTickerHeadline's own branch on
+// d.transition_rule (never on state alone) so the two visible strings
+// can never disagree again -- no signal_engine.py/lifecycle-state/
+// threshold change, pure frontend display-layer fix, same as the
+// headline fix it extends.
+function primaryStateGloss(d) {
+  if (d.transition_rule === "no_qualifying_evidence_yet") {
+    return "no qualifying evidence yet";
+  }
+  return STATE_GLOSS[d.state] || "";
+}
+
 function renderTickerDetail(d) {
   const gatesHtml = renderGateGroups(d.gates);
-  const stateGloss = STATE_GLOSS[d.state] || "";
+  const stateGloss = primaryStateGloss(d);
   const ruleGloss = TRANSITION_RULE_GLOSS[d.transition_rule] || "internal rule identifier";
   const primaryHeadline = primaryTickerHeadline(d);
   const timelineHtml = renderLifecycleTimeline(d.history, d.state);
