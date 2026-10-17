@@ -1479,6 +1479,23 @@ def _radar_impl(refresh: bool):
     # set explicitly here so it can be force-appended below, without
     # touching qualifies()/present()'s qualifying semantics at all.
     never_evaluated_tickers: set[str] = set()
+    # Round 13 item 1 (real bug, traced to the route, not the frontend):
+    # tip_evidence.present() -- correctly, for its own purpose -- only
+    # ever returns items where qualifies(item) is True (see its one-line
+    # `q = sorted((i for i in items if qualifies(i)), ...)`). A watchlist
+    # ticker that WAS genuinely evaluated this cycle but passed ZERO
+    # qualifying gates (e.g. a brand-new ARTNA/MSEX with no anomaly yet)
+    # produces a real, non-empty `scan["gates"]` -- so it is NOT added to
+    # never_evaluated_tickers above -- but qualifies() is still False for
+    # it, so present() silently drops it from BOTH highest and other.
+    # Unlike the never-evaluated case, nothing downstream ever knew this
+    # ticker existed at all: it was computed, evaluated, and discarded
+    # before the response was built. `items_by_ticker` lets the
+    # force-append step below recover exactly those items -- using the
+    # SAME already-computed item dict (identical headline/current_read/
+    # price/evidence tip_evidence would have shown had it qualified),
+    # never fabricated -- without touching qualifies()/present() at all.
+    items_by_ticker: dict[str, dict] = {}
     for ticker in universe:
         if live_fetch:
             scan = _run_scan(adapter, store, ticker)
@@ -1517,7 +1534,9 @@ def _radar_impl(refresh: bool):
                 scan["qualifying_days_count"] = store.qualifying_days_count(ticker)
                 scan["gates"] = {}
         scans_by_ticker[ticker] = scan
-        items.append(_to_evidence_item(scan) if scan.get("gates") else _not_evaluated_evidence_item(ticker, scan.get("state")))
+        item = _to_evidence_item(scan) if scan.get("gates") else _not_evaluated_evidence_item(ticker, scan.get("state"))
+        items_by_ticker[ticker] = item
+        items.append(item)
 
     highest, other = tip_evidence.present(items, next_session=date.today() + timedelta(days=1))
 
@@ -1560,6 +1579,48 @@ def _radar_impl(refresh: bool):
             "not_evaluated": real_prior_state is None,
         })
 
+    # Round 13 item 1 (the real fix): recompute which tickers are still
+    # missing from the response after BOTH the above steps -- this is
+    # exactly the set that was genuinely evaluated this cycle (real
+    # gates, real state/confidence) but qualifies() correctly judged
+    # zero qualifying gates passed. present() already built the honest
+    # headline/current_read/evidence tip_evidence would show for this
+    # item; recover it unchanged from items_by_ticker (never a second,
+    # re-derived description) rather than inventing new text. This must
+    # NEVER be presented as a qualifying/noteworthy signal -- it goes
+    # into `other` (same bucket the never-evaluated placeholders above
+    # already share) tagged `zero_gate: True` so frontend/app.core.js's
+    # qualifyingEntries() can keep excluding it from every qualifying/
+    # "other noteworthy" count, exactly like `not_evaluated` already
+    # does for the never-evaluated case -- distinct from both
+    # "not evaluated" (no real state at all) and a genuinely qualifying
+    # entry (which already reached highest/other above via present()).
+    shown_tickers = {e["ticker"] for e in highest} | {e["ticker"] for e in other}
+    for ticker in universe:
+        if ticker in shown_tickers or ticker in never_evaluated_tickers:
+            continue
+        item = items_by_ticker.get(ticker)
+        if item is None:
+            continue
+        other.append({
+            "ticker": ticker,
+            "name": item.get("name"),
+            "families": tip_evidence.families(item),
+            "evidence": tip_evidence.evidence(item, False),
+            "current_read": tip_evidence.current_read(item),
+            "headline": tip_evidence.headline(item),
+            "label": tip_evidence.dominant_label(item),
+            "categories": tip_evidence.categories(item),
+            "index_context": ticker in tip_evidence.INDEX_CONTEXT_TICKERS,
+            "question": tip_evidence.open_question(item, date.today() + timedelta(days=1)),
+            "research": list(item.get("research") or []),
+            "enriched": bool(item.get("enriched", True)),
+            "price": item.get("price"),
+            "state": scans_by_ticker[ticker].get("state"),
+            "not_evaluated": False,
+            "zero_gate": True,
+        })
+
     def _attach(entry: dict) -> dict:
         s = scans_by_ticker[entry["ticker"]]
         fr = freshness_by_ticker.get(entry["ticker"])
@@ -1576,6 +1637,12 @@ def _radar_impl(refresh: bool):
         entry["confidence"] = s.get("confidence")
         entry["signal_type"] = s.get("signal_type")
         entry["qualifying_days_count"] = s.get("qualifying_days_count")
+        # Round 13 item 1 support: expose the real transition_rule on
+        # every radar entry (never previously attached here) so the
+        # frontend can apply the SAME shared isZeroGateTransitionReason
+        # helper used elsewhere, rather than relying only on the
+        # `zero_gate` marker set above for the force-appended case.
+        entry["transition_rule"] = s.get("transition_rule")
         # Compact signal-history indicator (Stage 2 / P3): only non-empty
         # when this ticker genuinely has more than one real recorded scan
         # (store.history() -- never fabricated). On a freshly started

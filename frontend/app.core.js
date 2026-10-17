@@ -999,11 +999,25 @@ function fmtChangeCell(px) {
 function isNotEvaluated(entry) {
   return !!entry.not_evaluated || !entry.state;
 }
+// Round 13 item 1: a genuinely-evaluated zero-qualifying-gate entry
+// (backend `zero_gate: true`, or any entry whose real transition_rule
+// is one of the two zero-gate reasons -- same shared predicate used
+// everywhere else, isZeroGateTransitionReason, defined below) must be
+// visibly distinguishable from BOTH a never-evaluated placeholder
+// (isNotEvaluated above) and a genuinely qualifying entry -- the three
+// states this fix is required to keep distinct and renderable.
+function isZeroGateEntry(entry) {
+  return !isNotEvaluated(entry) && (!!entry.zero_gate || isZeroGateTransitionReason(entry.transition_rule));
+}
 function stateTagHtml(entry) {
   if (isNotEvaluated(entry)) {
     return `<span class="tag state-unevaluated" title="This ticker has never been evaluated -- no real signal-detection scan has run for it yet.">Not evaluated</span>`;
   }
-  return `<span class="tag state-${esc(entry.state)}">${esc(entry.state)}</span>`;
+  const tag = `<span class="tag state-${esc(entry.state)}">${esc(entry.state)}</span>`;
+  if (isZeroGateEntry(entry)) {
+    return `${tag} <span class="muted zero-gate-note" title="Evaluated this scan -- zero qualifying gates passed, not a qualifying/noteworthy signal.">(no qualifying signal)</span>`;
+  }
+  return tag;
 }
 
 function renderCard(entry) {
@@ -1082,8 +1096,17 @@ function renderRow(entry) {
 // (both are genuinely-qualifying categories) or toward any "N qualifying
 // signals" total. Filters are presentation-only; nothing fed into these
 // counts changes what present()/tip_evidence actually classified.
+// Round 13 item 1: `data.other` can ALSO now contain genuinely-evaluated
+// zero-qualifying-gate entries (`zero_gate: true`, backend/app/main.py's
+// _radar_impl -- previously these were silently dropped from the
+// response entirely, not just from this count; see that file's comment
+// for the real route-level bug). Same rule applies: "evaluated, found
+// nothing" is never a qualifying/noteworthy signal either, so it is
+// excluded from this count exactly like not_evaluated already is --
+// while still being rendered as a real, visible, distinctly-labeled row
+// (see stateTagHtml below), never silently dropped from the table.
 function qualifyingEntries(list) {
-  return (list || []).filter((e) => !e.not_evaluated);
+  return (list || []).filter((e) => !e.not_evaluated && !e.zero_gate);
 }
 
 function radarSummaryCounts(data) {
@@ -1416,8 +1439,14 @@ function renderRadarLists(data, filters, loadTickerDetailFn) {
   // watchlist that's 100% never-evaluated now correctly shows its rows
   // instead of "No tickers qualify right now." over an empty table.
   const totalQualifying = qualifyingHighest.length + qualifyingOther.length;
-  const notEvaluatedShown = filteredOther.filter((e) => e.not_evaluated).length;
-  const totalShownQualifying = (featured ? 1 : 0) + filteredRest.length + (filteredOther.length - notEvaluatedShown);
+  // Round 13 item 1: this count must exclude the SAME two non-qualifying
+  // kinds qualifyingEntries() already excludes (not_evaluated AND the
+  // new zero_gate case) -- otherwise a genuinely-evaluated zero-gate
+  // ticker would inflate "N qualifying signal(s) shown" even though it
+  // is deliberately never counted as qualifying anywhere else on this
+  // page (radarSummaryCounts/the activity strip above).
+  const nonQualifyingShown = filteredOther.filter((e) => e.not_evaluated || e.zero_gate).length;
+  const totalShownQualifying = (featured ? 1 : 0) + filteredRest.length + (filteredOther.length - nonQualifyingShown);
   const totalShownAll = (featured ? 1 : 0) + filteredRest.length + filteredOther.length;
   const countsEl = document.getElementById("radarFilterCounts");
   if (countsEl) {
@@ -1427,7 +1456,7 @@ function renderRadarLists(data, filters, loadTickerDetailFn) {
     // guarded against ReferenceError in contexts (e.g. static-demo) where
     // _currentMode is never declared.
     const c = radarSummaryCounts(data);
-    const notEvalSuffix = notEvaluatedShown > 0 ? ` (+ ${notEvaluatedShown} not yet evaluated)` : "";
+    const notEvalSuffix = nonQualifyingShown > 0 ? ` (+ ${nonQualifyingShown} not yet evaluated / zero-gate)` : "";
     countsEl.textContent = (familyFilter || stateFilter)
       ? `Showing ${totalShownQualifying} of ${totalQualifying} qualifying signal(s) after filters${notEvalSuffix} \u2014 ${c.evaluatedCount} evaluated of ${c.watchlistCount} watchlist ticker(s)`
       : `${totalQualifying} qualifying signal(s) shown${notEvalSuffix} \u2014 ${c.evaluatedCount} evaluated of ${c.watchlistCount} watchlist ticker(s)`;
