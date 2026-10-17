@@ -999,11 +999,25 @@ function fmtChangeCell(px) {
 function isNotEvaluated(entry) {
   return !!entry.not_evaluated || !entry.state;
 }
+// Round 13 item 1: a genuinely-evaluated zero-qualifying-gate entry
+// (backend `zero_gate: true`, or any entry whose real transition_rule
+// is one of the two zero-gate reasons -- same shared predicate used
+// everywhere else, isZeroGateTransitionReason, defined below) must be
+// visibly distinguishable from BOTH a never-evaluated placeholder
+// (isNotEvaluated above) and a genuinely qualifying entry -- the three
+// states this fix is required to keep distinct and renderable.
+function isZeroGateEntry(entry) {
+  return !isNotEvaluated(entry) && (!!entry.zero_gate || isZeroGateTransitionReason(entry.transition_rule));
+}
 function stateTagHtml(entry) {
   if (isNotEvaluated(entry)) {
     return `<span class="tag state-unevaluated" title="This ticker has never been evaluated -- no real signal-detection scan has run for it yet.">Not evaluated</span>`;
   }
-  return `<span class="tag state-${esc(entry.state)}">${esc(entry.state)}</span>`;
+  const tag = `<span class="tag state-${esc(entry.state)}">${esc(entry.state)}</span>`;
+  if (isZeroGateEntry(entry)) {
+    return `${tag} <span class="muted zero-gate-note" title="Evaluated this scan -- zero qualifying gates passed, not a qualifying/noteworthy signal.">(no qualifying signal)</span>`;
+  }
+  return tag;
 }
 
 function renderCard(entry) {
@@ -1082,8 +1096,17 @@ function renderRow(entry) {
 // (both are genuinely-qualifying categories) or toward any "N qualifying
 // signals" total. Filters are presentation-only; nothing fed into these
 // counts changes what present()/tip_evidence actually classified.
+// Round 13 item 1: `data.other` can ALSO now contain genuinely-evaluated
+// zero-qualifying-gate entries (`zero_gate: true`, backend/app/main.py's
+// _radar_impl -- previously these were silently dropped from the
+// response entirely, not just from this count; see that file's comment
+// for the real route-level bug). Same rule applies: "evaluated, found
+// nothing" is never a qualifying/noteworthy signal either, so it is
+// excluded from this count exactly like not_evaluated already is --
+// while still being rendered as a real, visible, distinctly-labeled row
+// (see stateTagHtml below), never silently dropped from the table.
 function qualifyingEntries(list) {
-  return (list || []).filter((e) => !e.not_evaluated);
+  return (list || []).filter((e) => !e.not_evaluated && !e.zero_gate);
 }
 
 function radarSummaryCounts(data) {
@@ -1281,9 +1304,19 @@ function renderFeaturedArea(data) {
   const allHighest = data.highest || [];
   const allOther = data.other || [];
   const hasHighest = allHighest.length > 0;
-  // Round 12 (ux-nav-watchlist-reliability): mirrors frontend/app.core.js --
-  // kept in sync with the real app bundle. See that file's comment.
+  // Round 12 (ux-nav-watchlist-reliability) fix: `allOther.length > 0` was
+  // true even when every entry in it is a not_evaluated placeholder (a
+  // watchlist ticker that has never actually been scanned) -- in that
+  // case the old wording below ("...for the tickers tracked this scan")
+  // falsely implied a real scan had run and found noteworthy tickers.
+  // hasGenuineOther is true only when Other Noteworthy actually contains
+  // at least one REAL, evaluated entry (qualifyingEntries() already
+  // excludes not_evaluated placeholders -- same filter used for the
+  // "N qualifying signals" count above).
   const hasGenuineOther = qualifyingEntries(allOther).length > 0;
+  // Honest counts, reused from radarSummaryCounts() (same
+  // watchlist_size/evaluated_count fields the activity strip and status
+  // line already use) -- never invented, never re-derived.
   const counts = radarSummaryCounts(data);
   const nothingEvaluatedYet = counts.evaluatedCount === 0 && counts.watchlistCount > 0;
   const featured = allHighest[0] || null;
@@ -1312,6 +1345,17 @@ function renderFeaturedArea(data) {
   if (breakdownEl) breakdownEl.innerHTML = "";
   if (noticeEl) {
     noticeEl.style.display = "";
+    // Round 12: three genuinely distinct, honestly-derived cases --
+    // never a single wording that overstates what actually happened.
+    //   1. Other Noteworthy has at least one REAL evaluated entry: point
+    //      to it (this is the only case where "see Other Noteworthy
+    //      below" is both true and useful).
+    //   2. Nothing in the watchlist has been evaluated yet
+    //      (evaluated_count === 0, watchlist_size > 0): say so plainly --
+    //      no scan has actually run, so neither "this scan" nor "Other
+    //      Noteworthy" may be referenced.
+    //   3. A real scan ran, evaluated something, and genuinely found zero
+    //      qualifying tickers anywhere: the original, accurate wording.
     noticeEl.innerHTML = hasGenuineOther
       ? `<div class="breakdown-panel empty">No ticker currently qualifies for Highest Attention -- see Other Noteworthy below for the ticker(s) evaluated this scan.</div>`
       : nothingEvaluatedYet
@@ -1395,8 +1439,14 @@ function renderRadarLists(data, filters, loadTickerDetailFn) {
   // watchlist that's 100% never-evaluated now correctly shows its rows
   // instead of "No tickers qualify right now." over an empty table.
   const totalQualifying = qualifyingHighest.length + qualifyingOther.length;
-  const notEvaluatedShown = filteredOther.filter((e) => e.not_evaluated).length;
-  const totalShownQualifying = (featured ? 1 : 0) + filteredRest.length + (filteredOther.length - notEvaluatedShown);
+  // Round 13 item 1: this count must exclude the SAME two non-qualifying
+  // kinds qualifyingEntries() already excludes (not_evaluated AND the
+  // new zero_gate case) -- otherwise a genuinely-evaluated zero-gate
+  // ticker would inflate "N qualifying signal(s) shown" even though it
+  // is deliberately never counted as qualifying anywhere else on this
+  // page (radarSummaryCounts/the activity strip above).
+  const nonQualifyingShown = filteredOther.filter((e) => e.not_evaluated || e.zero_gate).length;
+  const totalShownQualifying = (featured ? 1 : 0) + filteredRest.length + (filteredOther.length - nonQualifyingShown);
   const totalShownAll = (featured ? 1 : 0) + filteredRest.length + filteredOther.length;
   const countsEl = document.getElementById("radarFilterCounts");
   if (countsEl) {
@@ -1406,7 +1456,7 @@ function renderRadarLists(data, filters, loadTickerDetailFn) {
     // guarded against ReferenceError in contexts (e.g. static-demo) where
     // _currentMode is never declared.
     const c = radarSummaryCounts(data);
-    const notEvalSuffix = notEvaluatedShown > 0 ? ` (+ ${notEvaluatedShown} not yet evaluated)` : "";
+    const notEvalSuffix = nonQualifyingShown > 0 ? ` (+ ${nonQualifyingShown} not yet evaluated / zero-gate)` : "";
     countsEl.textContent = (familyFilter || stateFilter)
       ? `Showing ${totalShownQualifying} of ${totalQualifying} qualifying signal(s) after filters${notEvalSuffix} \u2014 ${c.evaluatedCount} evaluated of ${c.watchlistCount} watchlist ticker(s)`
       : `${totalQualifying} qualifying signal(s) shown${notEvalSuffix} \u2014 ${c.evaluatedCount} evaluated of ${c.watchlistCount} watchlist ticker(s)`;
@@ -1950,8 +2000,12 @@ const STATE_GLOSS = {
 const TRANSITION_RULE_GLOSS = {
   first_qualifying_gate: "First time this ticker qualified.",
   no_qualifying_evidence_yet: "No qualifying signal detected yet.",
-  // Round 12 (ux-nav-watchlist-reliability): mirrors frontend/app.core.js --
-  // kept in sync with the real app bundle. See that file's comment.
+  // Round 12 (ux-nav-watchlist-reliability): the L1 any_gate_passed guard's
+  // SECOND zero-gate reason string -- a later re-evaluation of an
+  // already-NEW ticker that again found zero qualifying gates. Means the
+  // exact same thing to a reader as no_qualifying_evidence_yet above; see
+  // isZeroGateTransitionReason() below, which is the single shared place
+  // all three visible-UI locations branch on these two reason strings.
   no_gate_passed_remains_new: "No qualifying signal detected yet.",
   multi_signal_or_persistence_on_first_reeval: "Two+ signals fired together, or this is at least the 2nd qualifying day.",
   single_signal_reevaluated: "Still only one signal firing on re-evaluation.",
@@ -2523,9 +2577,20 @@ function mountCandlestickChart(containerId, ohlc, opts = {}) {
 // Renders ONE raw history entry's full detail row -- used ONLY inside the
 // bounded-height expandable <details> panel below, never directly in the
 // main page flow regardless of how long `entries` is.
-// Round 12 (ux-nav-watchlist-reliability): mirrors frontend/app.core.js's
-// isZeroGateTransitionReason() -- single shared predicate for both
-// zero-gate reason strings, used by all three visible-UI locations below.
+// Round 12 (ux-nav-watchlist-reliability): the backend's determine_transition
+// (signal_engine.py, unchanged this round) can emit TWO separate reason
+// strings for a zero-qualifying-gate case: no_qualifying_evidence_yet (the
+// very first evaluation of a ticker) and no_gate_passed_remains_new (the
+// L1 any_gate_passed guard's case -- a LATER re-evaluation of an
+// already-NEW ticker that again found zero gates). Both mean exactly the
+// same thing to a reader -- "nothing is actually qualifying" -- and prior
+// rounds (P0/D2/P3/P5) only ever checked the first string, so the second
+// one fell through to the generic STATE_GLOSS["NEW"] ("just started
+// qualifying") / the backend's raw headline in all three visible
+// locations below. This is the SINGLE shared predicate every one of those
+// locations (primaryTickerHeadline, primaryStateGloss, historyEntryGloss)
+// now branches on, so the "is this a zero-gate case" check is defined
+// exactly once and can never drift between call sites again.
 function isZeroGateTransitionReason(reason) {
   return reason === "no_qualifying_evidence_yet" || reason === "no_gate_passed_remains_new";
 }
@@ -2686,6 +2751,29 @@ function primaryStateGloss(d) {
   return STATE_GLOSS[d.state] || "";
 }
 
+// Round 13 item 3: a THIRD, previously-unfound display location for the
+// same zero-gate dishonesty primaryTickerHeadline/primaryStateGloss
+// already fixed two/three rounds ago -- this one is the results/
+// activity-summary line directly below the primary headline in the
+// Ticker Analysis header card (renderTickerDetail below), which used to
+// render the backend's raw tip_evidence.current_read() narrative
+// unconditionally (e.g. "Unusual activity; stock little changed." for
+// ARTNA/MSEX with zero qualifying gates -- a backend-generated but
+// genuinely misleading sentence for this specific case, same class of
+// bug as the headline fix, just a different generator function and a
+// different call site). Reuses the EXISTING shared
+// isZeroGateTransitionReason predicate (no new/fourth check) -- when
+// true, substitutes one honest, neutral sentence; every other
+// transition_rule keeps the backend's own current_read untouched, same
+// pattern as primaryTickerHeadline/primaryStateGloss. Pure frontend
+// text-generation fix -- no signal_engine.py/lifecycle-state change.
+function primaryCurrentRead(d) {
+  if (isZeroGateTransitionReason(d.transition_rule)) {
+    return "No qualifying signal detected -- this scan found zero qualifying gates for this ticker.";
+  }
+  return d.current_read;
+}
+
 function renderTickerDetail(d) {
   const gatesHtml = renderGateGroups(d.gates);
   const stateGloss = primaryStateGloss(d);
@@ -2719,7 +2807,7 @@ function renderTickerDetail(d) {
         <span class="tag">qualifying days: ${d.qualifying_days_count}</span>
       </div>
       <div class="read primary-headline" id="tickerPrimaryHeadline">${esc(primaryHeadline)}</div>
-      <div class="read">${esc(d.current_read)}</div>
+      <div class="read">${esc(primaryCurrentRead(d))}</div>
       <div class="read">${esc(transitionLabel(d.previous_state, d.state))}</div>
       <div class="read">Confidence reason: ${esc(d.confidence_reason)}</div>
     </div>

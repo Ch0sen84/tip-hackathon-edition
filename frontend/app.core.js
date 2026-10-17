@@ -2751,6 +2751,29 @@ function primaryStateGloss(d) {
   return STATE_GLOSS[d.state] || "";
 }
 
+// Round 13 item 3: a THIRD, previously-unfound display location for the
+// same zero-gate dishonesty primaryTickerHeadline/primaryStateGloss
+// already fixed two/three rounds ago -- this one is the results/
+// activity-summary line directly below the primary headline in the
+// Ticker Analysis header card (renderTickerDetail below), which used to
+// render the backend's raw tip_evidence.current_read() narrative
+// unconditionally (e.g. "Unusual activity; stock little changed." for
+// ARTNA/MSEX with zero qualifying gates -- a backend-generated but
+// genuinely misleading sentence for this specific case, same class of
+// bug as the headline fix, just a different generator function and a
+// different call site). Reuses the EXISTING shared
+// isZeroGateTransitionReason predicate (no new/fourth check) -- when
+// true, substitutes one honest, neutral sentence; every other
+// transition_rule keeps the backend's own current_read untouched, same
+// pattern as primaryTickerHeadline/primaryStateGloss. Pure frontend
+// text-generation fix -- no signal_engine.py/lifecycle-state change.
+function primaryCurrentRead(d) {
+  if (isZeroGateTransitionReason(d.transition_rule)) {
+    return "No qualifying signal detected -- this scan found zero qualifying gates for this ticker.";
+  }
+  return d.current_read;
+}
+
 function renderTickerDetail(d) {
   const gatesHtml = renderGateGroups(d.gates);
   const stateGloss = primaryStateGloss(d);
@@ -2784,7 +2807,7 @@ function renderTickerDetail(d) {
         <span class="tag">qualifying days: ${d.qualifying_days_count}</span>
       </div>
       <div class="read primary-headline" id="tickerPrimaryHeadline">${esc(primaryHeadline)}</div>
-      <div class="read">${esc(d.current_read)}</div>
+      <div class="read">${esc(primaryCurrentRead(d))}</div>
       <div class="read">${esc(transitionLabel(d.previous_state, d.state))}</div>
       <div class="read">Confidence reason: ${esc(d.confidence_reason)}</div>
     </div>
