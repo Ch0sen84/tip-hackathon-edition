@@ -169,11 +169,20 @@ def test_explicit_refresh_data_action_does_make_real_calls(app_main, monkeypatch
     adapter, mock_session = _wire_live_adapter_with_mock_session(app_main, monkeypatch, watchlist_tickers[:2])
     mock_session.get.return_value = MagicMock(status_code=200, ok=True, text="{}", headers={},
                                                 json=MagicMock(return_value={"data": []}))
+    # Keep the response rows visible even though this fixture's empty UW
+    # payloads do not qualify; this test is about refresh transport/freshness,
+    # not tip_evidence category selection.
+    monkeypatch.setattr(app_main.tip_evidence, "present", lambda items, next_session: ([], [{"ticker": i["ticker"]} for i in items]))
     client = TestClient(app_main.app)
     resp = client.post("/api/radar/refresh")
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert body["served_from_cache"] is False
+    rendered_entries = body["highest"] + body["other"]
+    assert rendered_entries
+    assert all(entry["last_evaluated_at"] for entry in rendered_entries), (
+        "Refresh POST response must carry the new evaluation timestamps so the table can re-render without F5"
+    )
     assert mock_session.get.call_count > 0, "Explicit Refresh Data must make real UW calls -- that's its whole purpose."
 
 

@@ -202,4 +202,19 @@ console.log("\n=== P1: this is the EXACT round-9 regression -- confirm the old b
   });
 }
 
+console.log("\n=== P2: Refresh response re-renders Last Evaluated without reload ===");
+{
+  setupDom();
+  const before = { scanned:1, watchlist_size:1, evaluated_count:0, highest:[], other:[notEvaluatedEntry("FRESH")] };
+  core.renderRadarLists(before, {}, async () => {});
+  assert.match(tbodyEl().innerHTML, /col-lastEval">Not evaluated</);
+  const after = { scanned:1, watchlist_size:1, evaluated_count:1, highest:[], other:[evaluatedEntry("FRESH", {last_evaluated_at:"2026-10-16T19:45:00+00:00"})] };
+  core.renderRadarLists(after, {}, async () => {});
+  check("re-rendering the completed POST payload replaces 'Not evaluated' immediately, with no page reload or follow-up fetch", () => {
+    const row = tbodyEl().innerHTML;
+    assert.doesNotMatch(row, /col-lastEval">Not evaluated</);
+    assert.match(row, /col-lastEval">[^<]+</);
+  });
+}
+
 console.log(`\n${passed} check(s) passed.`);
