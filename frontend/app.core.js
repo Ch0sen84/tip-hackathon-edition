@@ -1086,22 +1086,27 @@ function qualifyingEntries(list) {
   return (list || []).filter((e) => !e.not_evaluated);
 }
 
-function renderActivitySummary(data) {
-  // watchlist_size/evaluated_count are new, explicit fields (backend fix,
-  // same round) -- `scanned` is kept for back-compat but, on a cache-only
-  // read with never-evaluated tickers, does NOT mean "N were actually
-  // evaluated"; fall back to it only for older/static-demo payloads that
-  // predate these two fields (data/radar.json in static-demo).
-  const watchlistSize = data.watchlist_size != null ? data.watchlist_size : data.scanned;
+function radarSummaryCounts(data) {
+  const watchlistCount = data.watchlist_size != null ? data.watchlist_size : data.scanned;
   const evaluatedCount = data.evaluated_count != null ? data.evaluated_count : data.scanned;
-  const evalNote = evaluatedCount !== watchlistSize
-    ? `<span class="activity-label">(${esc(evaluatedCount)} of ${esc(watchlistSize)} evaluated)</span>`
-    : "";
+  const highestCount = qualifyingEntries(data.highest).length;
+  const otherNoteworthyCount = qualifyingEntries(data.other).length;
+  return { watchlistCount, evaluatedCount, qualifyingCount: highestCount + otherNoteworthyCount, otherNoteworthyCount };
+}
+
+function renderRadarStatus(data) {
+  const c = radarSummaryCounts(data);
+  return `watchlist: ${c.watchlistCount} ticker(s) \u00b7 ${c.evaluatedCount} evaluated \u00b7 ${c.qualifyingCount} qualifying \u00b7 ${c.otherNoteworthyCount} other noteworthy \u00b7 last scanned ${formatAgo(data.last_scan_at)}`;
+}
+
+function renderActivitySummary(data) {
+  const c = radarSummaryCounts(data);
   return `
     <div class="activity-strip">
-      <div class="activity-stat"><span class="activity-num">${esc(watchlistSize)}</span><span class="activity-label">tickers in watchlist</span>${evalNote}</div>
-      <div class="activity-stat"><span class="activity-num accent-bull">${esc(qualifyingEntries(data.highest).length)}</span><span class="activity-label">highest attention</span></div>
-      <div class="activity-stat"><span class="activity-num">${esc(qualifyingEntries(data.other).length)}</span><span class="activity-label">other noteworthy</span></div>
+      <div class="activity-stat"><span class="activity-num">${esc(c.watchlistCount)}</span><span class="activity-label">tickers in watchlist</span></div>
+      <div class="activity-stat"><span class="activity-num">${esc(c.evaluatedCount)}</span><span class="activity-label">evaluated</span></div>
+      <div class="activity-stat"><span class="activity-num accent-bull">${esc(c.qualifyingCount)}</span><span class="activity-label">qualifying signals</span></div>
+      <div class="activity-stat"><span class="activity-num">${esc(c.otherNoteworthyCount)}</span><span class="activity-label">other noteworthy</span></div>
     </div>`;
 }
 
@@ -1394,12 +1399,11 @@ function renderRadarLists(data, filters, loadTickerDetailFn) {
     // scenarios at all -- just real watchlist tickers. Mode-aware wording,
     // guarded against ReferenceError in contexts (e.g. static-demo) where
     // _currentMode is never declared.
-    const isLive = typeof _currentMode !== "undefined" && _currentMode === "live";
-    const scannedUnit = isLive ? "ticker(s) scanned" : "scenario(s) scanned (including non-qualifying controls)";
+    const c = radarSummaryCounts(data);
     const notEvalSuffix = notEvaluatedShown > 0 ? ` (+ ${notEvaluatedShown} not yet evaluated)` : "";
     countsEl.textContent = (familyFilter || stateFilter)
-      ? `Showing ${totalShownQualifying} of ${totalQualifying} qualifying signal(s) after filters${notEvalSuffix} \u2014 ${data.scanned} ${scannedUnit}`
-      : `${totalQualifying} qualifying signal(s) shown${notEvalSuffix} \u2014 ${data.scanned} ${scannedUnit}`;
+      ? `Showing ${totalShownQualifying} of ${totalQualifying} qualifying signal(s) after filters${notEvalSuffix} \u2014 ${c.evaluatedCount} evaluated of ${c.watchlistCount} watchlist ticker(s)`
+      : `${totalQualifying} qualifying signal(s) shown${notEvalSuffix} \u2014 ${c.evaluatedCount} evaluated of ${c.watchlistCount} watchlist ticker(s)`;
   }
   const radarEmptyEl = document.getElementById("radarEmpty");
   if (radarEmptyEl) {

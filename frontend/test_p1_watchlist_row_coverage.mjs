@@ -63,6 +63,7 @@ const coreSrc = fs.readFileSync(fileURLToPath(new URL("./app.core.js", import.me
 (0, eval)(coreSrc + `
 globalThis.__exports = {
   renderRadarLists, renderRow, renderCard, isNotEvaluated, stateTagHtml,
+  radarSummaryCounts, renderActivitySummary, renderRadarStatus,
 };`);
 const core = globalThis.__exports;
 
@@ -214,6 +215,31 @@ console.log("\n=== P2: Refresh response re-renders Last Evaluated without reload
     const row = tbodyEl().innerHTML;
     assert.doesNotMatch(row, /col-lastEval">Not evaluated</);
     assert.match(row, /col-lastEval">[^<]+</);
+  });
+}
+
+console.log("\n=== P4: mutually consistent watchlist summary counts ===");
+{
+  const data = { scanned:4, watchlist_size:4, evaluated_count:0, highest:[], other:["A","B","C","D"].map(notEvaluatedEntry), last_scan_at:null };
+  const counts = core.radarSummaryCounts(data);
+  check("empty Live cache counts only watchlist membership, never scanned/qualifying/noteworthy", () => {
+    assert.deepEqual(counts, {watchlistCount:4, evaluatedCount:0, qualifyingCount:0, otherNoteworthyCount:0});
+  });
+  check("all summary surfaces display the same four truthful numbers", () => {
+    const activity = core.renderActivitySummary(data);
+    const status = core.renderRadarStatus(data);
+    assert.match(activity, />4<\/span><span class="activity-label">tickers in watchlist/);
+    assert.match(activity, />0<\/span><span class="activity-label">evaluated/);
+    assert.match(activity, />0<\/span><span class="activity-label">qualifying signals/);
+    assert.match(activity, />0<\/span><span class="activity-label">other noteworthy/);
+    assert.match(status, /watchlist: 4 ticker\(s\).*0 evaluated.*0 qualifying.*0 other noteworthy/);
+    assert.doesNotMatch(status, /4 ticker\(s\) scanned/);
+  });
+  setupDom();
+  core.renderRadarLists(data, {}, async () => {});
+  check("the table row count and filter summary agree with watchlist/evaluated counts", () => {
+    assert.equal(rowTickers(tbodyEl().innerHTML).length, 4);
+    assert.match(el("radarFilterCounts").textContent, /0 evaluated of 4 watchlist ticker\(s\)/);
   });
 }
 

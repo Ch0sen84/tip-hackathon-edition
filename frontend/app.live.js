@@ -334,10 +334,7 @@ async function loadRadar() {
     // never implies broader-market discovery that isn't happening, and
     // states plainly when this scan actually ran (persisted server-side,
     // survives container recreation -- see settings_store.record_scan()).
-    const scopeLabel = data.scan_scope === "watchlist" ? "watchlist scan" : data.scan_scope || "scan";
-    statusEl.textContent =
-      `${scopeLabel}: ${data.scanned} ticker(s) · ${data.highest.length} highest attention · ` +
-      `${data.other.length} other · last scanned ${formatAgo(data.last_scan_at)}`;
+    statusEl.textContent = renderRadarStatus(data);
     document.getElementById("activityStrip").innerHTML = renderActivitySummary(data);
     updateRadarRefreshDataButtonVisibility();
 
@@ -1389,9 +1386,7 @@ async function refreshWatchlistData() {
     document.getElementById("activityStrip").innerHTML = renderActivitySummary(data);
     const radarStatusEl = document.getElementById("radarStatus");
     if (radarStatusEl) {
-      radarStatusEl.textContent =
-        `watchlist scan: ${data.scanned} ticker(s) \u00b7 ${data.highest.length} highest attention \u00b7 ` +
-        `${data.other.length} other \u00b7 last scanned ${formatAgo(data.last_scan_at)}`;
+      radarStatusEl.textContent = renderRadarStatus(data);
     }
     if (statusEl) statusEl.textContent = "Refreshed.";
   } catch (err) {
