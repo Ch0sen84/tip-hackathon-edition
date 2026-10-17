@@ -423,12 +423,23 @@ function setChartRange(range) {
 // discloses when UW doesn't have that much real history for this
 // ticker (range_fully_satisfied/available_span_days) instead of ever
 // implying full coverage it doesn't have.
+// D1 (ux-nav-watchlist-reliability round 9): guards against duplicate
+// simultaneous "Load Chart Data" clicks client-side; the server-side
+// _ticker_ohlc_refresh_lock (409 on a second concurrent call) is the REAL
+// protection, this is just a fast, cheap UX guard so a double-click
+// doesn't even issue a second request.
+let _chartLoadInFlight = false;
+
 async function loadOhlcChart(ticker, range, mySeq) {
   const noteEl = document.getElementById("chartRangeNote");
   try {
+    // S1-b-compliant: this is the cache-only GET -- zero outbound UW
+    // calls, zero writes, called on every ordinary load/F5/navigation/
+    // range click. It must NEVER be upgraded to the refresh route here.
     const ohlc = await apiGet(`/api/ticker/${encodeURIComponent(ticker)}/ohlc?range=${encodeURIComponent(range)}`);
     if (mySeq !== _navSeq) return;
-    mountCandlestickChart("ohlcChartContainer", ohlc);
+    mountCandlestickChart("ohlcChartContainer", ohlc, { showLoadButton: true });
+    wireLoadChartDataButton(ticker, range, mySeq);
     if (!noteEl) return;
     const unit = range === "1D" ? "5-minute bar(s)" : "trading day(s)";
     // 2026-10-15 (Chad's item #4): real raw-record disclosure, not just
@@ -454,9 +465,66 @@ async function loadOhlcChart(ticker, range, mySeq) {
     }
   } catch (chartErr) {
     if (mySeq !== _navSeq) return;
-    mountCandlestickChart("ohlcChartContainer", { unavailable: true, reason: { message: chartErr.message } });
+    mountCandlestickChart("ohlcChartContainer", { unavailable: true, reason: { message: chartErr.message } }, { showLoadButton: true });
+    wireLoadChartDataButton(ticker, range, mySeq);
     if (noteEl) noteEl.textContent = "";
   }
+}
+
+// D1 (ux-nav-watchlist-reliability round 9): wires the "Load Chart Data"
+// button rendered by renderChartUnavailable (app.core.js) to the EXISTING
+// authenticated POST /api/ticker/{ticker}/ohlc/refresh route -- no new
+// backend endpoint. Only this explicit, user-triggered click may ever
+// cause a real UW OHLC fetch from the chart panel; ordinary GET/F5/
+// navigation/range-switch always stays on the cache-only GET above.
+// Shows loading / success / partial-data / failure feedback in
+// #loadChartDataStatus, re-renders the chart with the real returned bars
+// on success, and guards against duplicate simultaneous clicks both
+// client-side (_chartLoadInFlight) and via the server's own
+// _ticker_ohlc_refresh_lock (409 on a second concurrent call -- the REAL
+// protection; the client guard just avoids firing a redundant request).
+function wireLoadChartDataButton(ticker, range, mySeq) {
+  const btn = document.getElementById("loadChartDataBtn");
+  if (!btn) return;
+  const statusEl = document.getElementById("loadChartDataStatus");
+  btn.addEventListener("click", async () => {
+    if (_chartLoadInFlight) return;
+    _chartLoadInFlight = true;
+    btn.disabled = true;
+    if (statusEl) statusEl.textContent = "Loading chart data from UW...";
+    try {
+      const ohlc = await apiPost(
+        `/api/ticker/${encodeURIComponent(ticker)}/ohlc/refresh?range=${encodeURIComponent(range)}`,
+        {}
+      );
+      if (mySeq !== _navSeq) return; // user navigated away while this was in flight
+      mountCandlestickChart("ohlcChartContainer", ohlc, { showLoadButton: true });
+      wireLoadChartDataButton(ticker, range, mySeq); // re-wire the button on the freshly-rendered DOM
+      const newStatusEl = document.getElementById("loadChartDataStatus");
+      if (newStatusEl) {
+        if (ohlc.unavailable || !ohlc.candle_count) {
+          newStatusEl.textContent = (ohlc.reason && ohlc.reason.message) || "No chart data available for this ticker.";
+        } else if (ohlc.range_fully_satisfied === false) {
+          newStatusEl.textContent = `Loaded ${ohlc.candle_count} real candle(s) -- partial data, UW does not have the full ${range} range for this ticker.`;
+        } else {
+          newStatusEl.textContent = `Loaded ${ohlc.candle_count} real candle(s).`;
+        }
+      }
+      const noteEl = document.getElementById("chartRangeNote");
+      if (noteEl && ohlc.candle_count) {
+        const kind = range === "1D" ? "5-minute candles (pre/regular/post-market)" : "daily candles";
+        noteEl.textContent = `${range} \u00b7 ${ohlc.candle_count} ${kind} (just loaded)`;
+      }
+    } catch (err) {
+      if (mySeq !== _navSeq) return;
+      if (statusEl && statusEl.isConnected) {
+        statusEl.textContent = `Failed to load chart data: ${err.message}`;
+      }
+      if (btn.isConnected) btn.disabled = false;
+    } finally {
+      _chartLoadInFlight = false;
+    }
+  });
 }
 
 // W2-b (2026-10-16): cache-first Ticker Analysis -- ordinary navigation
