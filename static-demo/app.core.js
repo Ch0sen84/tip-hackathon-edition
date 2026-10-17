@@ -1944,6 +1944,9 @@ const STATE_GLOSS = {
 const TRANSITION_RULE_GLOSS = {
   first_qualifying_gate: "First time this ticker qualified.",
   no_qualifying_evidence_yet: "No qualifying signal detected yet.",
+  // Round 12 (ux-nav-watchlist-reliability): mirrors frontend/app.core.js --
+  // kept in sync with the real app bundle. See that file's comment.
+  no_gate_passed_remains_new: "No qualifying signal detected yet.",
   multi_signal_or_persistence_on_first_reeval: "Two+ signals fired together, or this is at least the 2nd qualifying day.",
   single_signal_reevaluated: "Still only one signal firing on re-evaluation.",
   no_gate_passed_while_building: "No gate passed this scan while still BUILDING.",
@@ -2514,8 +2517,15 @@ function mountCandlestickChart(containerId, ohlc, opts = {}) {
 // Renders ONE raw history entry's full detail row -- used ONLY inside the
 // bounded-height expandable <details> panel below, never directly in the
 // main page flow regardless of how long `entries` is.
+// Round 12 (ux-nav-watchlist-reliability): mirrors frontend/app.core.js's
+// isZeroGateTransitionReason() -- single shared predicate for both
+// zero-gate reason strings, used by all three visible-UI locations below.
+function isZeroGateTransitionReason(reason) {
+  return reason === "no_qualifying_evidence_yet" || reason === "no_gate_passed_remains_new";
+}
+
 function historyEntryGloss(e) {
-  if (e && e.transition_rule === "no_qualifying_evidence_yet") {
+  if (e && isZeroGateTransitionReason(e.transition_rule)) {
     return "no qualifying evidence yet";
   }
   return STATE_GLOSS[e && e.state] || "";
@@ -2636,7 +2646,7 @@ function transitionLabel(previousState, state) {
 // only -- every other transition_rule keeps the backend's own headline
 // untouched, no lifecycle-state/confidence/CONFIRMED logic changed.
 function primaryTickerHeadline(d) {
-  if (d.transition_rule === "no_qualifying_evidence_yet") {
+  if (isZeroGateTransitionReason(d.transition_rule)) {
     return "No qualifying signal detected yet.";
   }
   return d.headline;
@@ -2664,7 +2674,7 @@ function primaryTickerHeadline(d) {
 // threshold change, pure frontend display-layer fix, same as the
 // headline fix it extends.
 function primaryStateGloss(d) {
-  if (d.transition_rule === "no_qualifying_evidence_yet") {
+  if (isZeroGateTransitionReason(d.transition_rule)) {
     return "no qualifying evidence yet";
   }
   return STATE_GLOSS[d.state] || "";

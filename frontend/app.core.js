@@ -1281,7 +1281,21 @@ function renderFeaturedArea(data) {
   const allHighest = data.highest || [];
   const allOther = data.other || [];
   const hasHighest = allHighest.length > 0;
-  const hasOther = allOther.length > 0;
+  // Round 12 (ux-nav-watchlist-reliability) fix: `allOther.length > 0` was
+  // true even when every entry in it is a not_evaluated placeholder (a
+  // watchlist ticker that has never actually been scanned) -- in that
+  // case the old wording below ("...for the tickers tracked this scan")
+  // falsely implied a real scan had run and found noteworthy tickers.
+  // hasGenuineOther is true only when Other Noteworthy actually contains
+  // at least one REAL, evaluated entry (qualifyingEntries() already
+  // excludes not_evaluated placeholders -- same filter used for the
+  // "N qualifying signals" count above).
+  const hasGenuineOther = qualifyingEntries(allOther).length > 0;
+  // Honest counts, reused from radarSummaryCounts() (same
+  // watchlist_size/evaluated_count fields the activity strip and status
+  // line already use) -- never invented, never re-derived.
+  const counts = radarSummaryCounts(data);
+  const nothingEvaluatedYet = counts.evaluatedCount === 0 && counts.watchlistCount > 0;
   const featured = allHighest[0] || null;
 
   const headingEl = document.getElementById("featuredSignalHeading");
@@ -1308,8 +1322,21 @@ function renderFeaturedArea(data) {
   if (breakdownEl) breakdownEl.innerHTML = "";
   if (noticeEl) {
     noticeEl.style.display = "";
-    noticeEl.innerHTML = hasOther
-      ? `<div class="breakdown-panel empty">No ticker currently qualifies for Highest Attention -- see Other Noteworthy below for the tickers tracked this scan.</div>`
+    // Round 12: three genuinely distinct, honestly-derived cases --
+    // never a single wording that overstates what actually happened.
+    //   1. Other Noteworthy has at least one REAL evaluated entry: point
+    //      to it (this is the only case where "see Other Noteworthy
+    //      below" is both true and useful).
+    //   2. Nothing in the watchlist has been evaluated yet
+    //      (evaluated_count === 0, watchlist_size > 0): say so plainly --
+    //      no scan has actually run, so neither "this scan" nor "Other
+    //      Noteworthy" may be referenced.
+    //   3. A real scan ran, evaluated something, and genuinely found zero
+    //      qualifying tickers anywhere: the original, accurate wording.
+    noticeEl.innerHTML = hasGenuineOther
+      ? `<div class="breakdown-panel empty">No ticker currently qualifies for Highest Attention -- see Other Noteworthy below for the ticker(s) evaluated this scan.</div>`
+      : nothingEvaluatedYet
+      ? `<div class="breakdown-panel empty">No tickers in this watchlist have been evaluated yet -- run a scan to populate Market Radar.</div>`
       : `<div class="breakdown-panel empty">No tickers currently qualify for Market Radar attention this scan.</div>`;
   }
 }
@@ -1944,6 +1971,13 @@ const STATE_GLOSS = {
 const TRANSITION_RULE_GLOSS = {
   first_qualifying_gate: "First time this ticker qualified.",
   no_qualifying_evidence_yet: "No qualifying signal detected yet.",
+  // Round 12 (ux-nav-watchlist-reliability): the L1 any_gate_passed guard's
+  // SECOND zero-gate reason string -- a later re-evaluation of an
+  // already-NEW ticker that again found zero qualifying gates. Means the
+  // exact same thing to a reader as no_qualifying_evidence_yet above; see
+  // isZeroGateTransitionReason() below, which is the single shared place
+  // all three visible-UI locations branch on these two reason strings.
+  no_gate_passed_remains_new: "No qualifying signal detected yet.",
   multi_signal_or_persistence_on_first_reeval: "Two+ signals fired together, or this is at least the 2nd qualifying day.",
   single_signal_reevaluated: "Still only one signal firing on re-evaluation.",
   no_gate_passed_while_building: "No gate passed this scan while still BUILDING.",
@@ -2514,8 +2548,26 @@ function mountCandlestickChart(containerId, ohlc, opts = {}) {
 // Renders ONE raw history entry's full detail row -- used ONLY inside the
 // bounded-height expandable <details> panel below, never directly in the
 // main page flow regardless of how long `entries` is.
+// Round 12 (ux-nav-watchlist-reliability): the backend's determine_transition
+// (signal_engine.py, unchanged this round) can emit TWO separate reason
+// strings for a zero-qualifying-gate case: no_qualifying_evidence_yet (the
+// very first evaluation of a ticker) and no_gate_passed_remains_new (the
+// L1 any_gate_passed guard's case -- a LATER re-evaluation of an
+// already-NEW ticker that again found zero gates). Both mean exactly the
+// same thing to a reader -- "nothing is actually qualifying" -- and prior
+// rounds (P0/D2/P3/P5) only ever checked the first string, so the second
+// one fell through to the generic STATE_GLOSS["NEW"] ("just started
+// qualifying") / the backend's raw headline in all three visible
+// locations below. This is the SINGLE shared predicate every one of those
+// locations (primaryTickerHeadline, primaryStateGloss, historyEntryGloss)
+// now branches on, so the "is this a zero-gate case" check is defined
+// exactly once and can never drift between call sites again.
+function isZeroGateTransitionReason(reason) {
+  return reason === "no_qualifying_evidence_yet" || reason === "no_gate_passed_remains_new";
+}
+
 function historyEntryGloss(e) {
-  if (e && e.transition_rule === "no_qualifying_evidence_yet") {
+  if (e && isZeroGateTransitionReason(e.transition_rule)) {
     return "no qualifying evidence yet";
   }
   return STATE_GLOSS[e && e.state] || "";
@@ -2636,7 +2688,7 @@ function transitionLabel(previousState, state) {
 // only -- every other transition_rule keeps the backend's own headline
 // untouched, no lifecycle-state/confidence/CONFIRMED logic changed.
 function primaryTickerHeadline(d) {
-  if (d.transition_rule === "no_qualifying_evidence_yet") {
+  if (isZeroGateTransitionReason(d.transition_rule)) {
     return "No qualifying signal detected yet.";
   }
   return d.headline;
@@ -2664,7 +2716,7 @@ function primaryTickerHeadline(d) {
 // threshold change, pure frontend display-layer fix, same as the
 // headline fix it extends.
 function primaryStateGloss(d) {
-  if (d.transition_rule === "no_qualifying_evidence_yet") {
+  if (isZeroGateTransitionReason(d.transition_rule)) {
     return "no qualifying evidence yet";
   }
   return STATE_GLOSS[d.state] || "";
