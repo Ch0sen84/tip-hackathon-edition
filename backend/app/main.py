@@ -1900,13 +1900,50 @@ def _ticker_analysis_impl(ticker: str, refresh: bool) -> dict:
     # today's/current rule. The catalog already stores that exact value in
     # signal_evaluations.raw_json; enrich the legacy scan-log rows read-only,
     # aligning newest-to-newest so older pre-catalog rows remain untouched.
+    #
+    # Round 13 item 2 fix (real bug, not a frontend mismatch): this
+    # enrichment used to run ONLY `if served_from_cache` -- so an
+    # IMMEDIATE response right after a live refresh (served_from_cache
+    # is False by construction on that path) shipped a `history` array
+    # whose newest entry had NO `transition_rule` field at all, while
+    # the cached GET on the very next F5 read the exact same underlying
+    # catalog row and DID attach it. Two different shapes for the same
+    # real data, purely from this gate -- historyEntryGloss()/
+    # isZeroGateTransitionReason() in app.core.js then correctly fell
+    # through to the generic STATE_GLOSS["NEW"] ("just started
+    # qualifying") wording for a first zero-gate evaluation specifically,
+    # until the user's next reload re-fetched the cache-only path.
+    # `_run_scan` (called above when live_fetch, before this code runs)
+    # already writes this exact scan's row into the catalog as a
+    # best-effort side effect -- by the time we reach this read, the row
+    # genuinely exists there regardless of which path produced `scan`.
+    # Running the SAME read-only enrichment unconditionally closes the
+    # gap with zero risk to the cached path's existing behavior (it is a
+    # strict superset of what already ran there).
     rule_reader = getattr(catalog, "list_signal_evaluation_rules", None)
-    if served_from_cache and callable(rule_reader):
+    if callable(rule_reader):
         catalog_history = rule_reader(ticker)
         if isinstance(catalog_history, list):
             for history_entry, catalog_entry in zip(reversed(history), reversed(catalog_history)):
                 if isinstance(catalog_entry, dict) and history_entry.get("state") == catalog_entry.get("state"):
                     history_entry["transition_rule"] = catalog_entry.get("transition_rule")
+    # Round 13 item 2, second half of the fix: the catalog-based
+    # enrichment above is inherently best-effort (it depends on the
+    # best-effort catalog WRITE -- see _catalog_scan_best_effort --
+    # having actually succeeded and already landed by the time this
+    # read runs). For the ONE entry this request already knows with
+    # total certainty -- the newest history entry, corresponding to
+    # THIS exact `scan` just computed in-memory by signal_engine,
+    # catalog write success or failure entirely aside -- stamp its real
+    # transition_rule directly from `scan` itself, never from a second
+    # round-trip read. This removes the catalog-write dependency for
+    # the specific entry a user looks at immediately after refreshing,
+    # and keeps this route's existing "response is identical whether
+    # ingestion succeeds or is broken" contract intact (test_phase_b_
+    # compatibility.py) -- scan["transition_rule"] is computed the same
+    # way regardless of whether the best-effort catalog write succeeds.
+    if history and history[-1].get("state") == scan.get("state"):
+        history[-1]["transition_rule"] = scan.get("transition_rule")
     return {
         "ticker": ticker,
         "state": scan["state"],
