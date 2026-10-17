@@ -114,6 +114,55 @@ confirmation/confidence logic again):
      Closing that fully would require hashing/fingerprinting the underlying
      evidence per qualifying day and is new infrastructure beyond this
      pass's scope -- flagged for a future decision, not built here.
+
+  6. L1 LIFECYCLE FIX (2026-10-16, Chad-approved): `determine_transition`'s
+     `current_state == "NEW"` branch used to return ("BUILDING",
+     "single_signal_reevaluated") UNCONDITIONALLY whenever `confirmed` was
+     False -- so a second scan of an already-NEW ticker with ZERO
+     qualifying gates on the CURRENT evaluation still promoted NEW ->
+     BUILDING. Fixed: that branch now requires `any_gate_passed` (at least
+     one real gate passing on THIS scan) before promoting, mirroring the
+     guard every other branch in this function already uses (BUILDING
+     keeps/demotes on `any_gate_passed`; CONFIRMED/STABLE demote on it
+     too). A ticker with no qualifying evidence on the current scan now
+     correctly STAYS "NEW" (`no_gate_passed_remains_new`) instead of
+     silently advancing.
+
+     INVESTIGATED AND REJECTED THIS ROUND: a stronger "genuinely NEW
+     evidence vs the SAME observations re-evaluated identically" check
+     (distinguishing a second real dark-pool/options-flow hit from the
+     exact same prints being re-fetched and re-scored). Checked against
+     the actual persistence layer and rejected as NOT safely
+     implementable this round:
+       * `storage.py`'s `ticker_scan_log` stores only (ticker, scan_date,
+         any_gate_passed INTEGER 0/1, state, created_at) per scan -- a
+         single boolean per day, with no gate-level metrics, no
+         observation row ids, and no evidence hash/fingerprint. Nothing
+         persisted identifies WHICH prints/flow-alerts produced a given
+         day's `any_gate_passed=1`, so there is no reliable way today to
+         tell "a different print than yesterday's" from "the same print
+         re-read" using data this app actually stores.
+       * `dark_pool_baseline.py` observations do carry `event_time` and a
+         premium value per row, and `discovery.py` candidates carry a
+         source_date/rank/net_premium snapshot -- but neither is passed
+         into or stored by this state machine today. Fingerprinting them
+         (e.g. hashing event_time+premium per qualifying day into
+         `ticker_scan_log`) is real, buildable, but genuinely NEW
+         schema/plumbing across storage.py, scan_service.py, and the
+         ingestion catalog reads -- not a same-file lifecycle-condition
+         fix, and exactly the kind of invented heuristic Chad asked NOT
+         to ship in its place (guessing from wall-clock-since-last-scan
+         was considered and rejected too, since elapsed time says nothing
+         about whether the evidence itself changed).
+       * Per Chad's explicit instruction, the smallest RELIABLE fix ships
+         instead: `any_gate_passed` on the current scan is a true
+         structural guarantee (computed fresh from this scan's own gate
+         inputs, never inferred/guessed), even though it is coarser than
+         "genuinely new evidence." It correctly blocks the confirmed
+         defect (zero-evidence promotion) without introducing an
+         unreliable signal. The stronger per-evidence-identity check is
+         flagged here as a real follow-up requiring new storage schema,
+         not attempted as a patch in this pass.
 """
 from __future__ import annotations
 
@@ -371,12 +420,35 @@ def determine_transition(current_state: Optional[str], gates: dict,
     confirmed = gates["multi_signal_confirmation"]["passed"]
 
     if current_state is None:
-        return ("NEW", "first_qualifying_gate")
+        # ZERO-GATE LABEL FIX (2026-10-16, Chad-approved, narrowly scoped):
+        # this branch used to return reason "first_qualifying_gate"
+        # unconditionally on a ticker's first evaluation, even when
+        # `any_gate_passed` is False -- i.e. zero gates passed this scan.
+        # The lifecycle STATE "NEW" was always correct here; only the
+        # REASON STRING falsely implied a qualifying gate had actually
+        # fired (confirmed real-world case: ARTNA/MSEX/CZWI on Windows QA
+        # showing zero qualifying gates yet labeled as if qualification
+        # had occurred). Reuses the already-computed `any_gate_passed`
+        # from above -- no recomputation, no new state, no threshold or
+        # confidence changes.
+        if any_gate_passed:
+            return ("NEW", "first_qualifying_gate")
+        return ("NEW", "no_qualifying_evidence_yet")
 
     if current_state == "NEW":
         if confirmed:
             return ("CONFIRMED", "multi_signal_confirmation_two_independent_categories")
-        return ("BUILDING", "single_signal_reevaluated")
+        # L1 FIX (2026-10-16, Chad-approved, narrowly scoped -- see this
+        # module's docstring rule 6 below): this branch used to return
+        # BUILDING unconditionally, so a second scan with ZERO qualifying
+        # gates on the CURRENT evaluation still promoted NEW -> BUILDING.
+        # `any_gate_passed` is a real structural guard against that --
+        # promotion now requires at least one genuine gate to have passed
+        # on THIS scan, matching the guard the BUILDING/CONFIRMED/STABLE
+        # branches below already use for their own demotions.
+        if any_gate_passed:
+            return ("BUILDING", "single_signal_reevaluated")
+        return ("NEW", "no_gate_passed_remains_new")
 
     if current_state in ("BUILDING",):
         if confirmed:

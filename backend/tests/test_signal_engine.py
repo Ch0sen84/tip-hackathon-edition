@@ -195,6 +195,28 @@ class TestDetermineTransition:
         gates = make_gates(dark_pool_anomaly={"passed": True, "metrics": {"ratio": 5.0, "z_score": 1.0, "bootstrap": False}})
         state, rule = se.determine_transition(None, gates, 0, None, None)
         assert state == "NEW"
+        assert rule == "first_qualifying_gate"
+
+    def test_new_ticker_first_eval_with_zero_qualifying_gates_gets_honest_reason(self):
+        """ZERO-GATE LABEL FIX (Chad-approved, 2026-10-16): the confirmed
+        real-world defect -- tickers ARTNA/MSEX/CZWI (Windows QA) showing
+        ZERO qualifying gates on their FIRST evaluation (current_state is
+        None) were still labeled "first_qualifying_gate", a reason string
+        that falsely implied a gate had actually qualified. The lifecycle
+        state is still correctly NEW; only the reason string changes when
+        no gate passed on this first scan."""
+        gates = make_gates()  # nothing passing -- zero qualifying evidence
+        state, rule = se.determine_transition(None, gates, 0, None, None)
+        assert state == "NEW"
+        assert rule == "no_qualifying_evidence_yet"
+
+    def test_new_ticker_first_eval_with_a_qualifying_gate_is_unchanged(self):
+        """The real qualifying path on first evaluation must be completely
+        unchanged by the zero-gate label fix above."""
+        gates = make_gates(dark_pool_anomaly={"passed": True, "metrics": {"ratio": 5.0, "z_score": 4.0, "bootstrap": False}})
+        state, rule = se.determine_transition(None, gates, 0, None, None)
+        assert state == "NEW"
+        assert rule == "first_qualifying_gate"
 
     def test_new_to_building_on_single_signal_reeval(self):
         gates = make_gates(dark_pool_anomaly={"passed": True, "metrics": {"ratio": 2.0, "z_score": 1.0, "bootstrap": False}})
@@ -205,6 +227,56 @@ class TestDetermineTransition:
         gates = make_gates(multi_signal_confirmation={"passed": True, "metrics": {"contributing_gates": ["a", "b"]}})
         state, rule = se.determine_transition("NEW", gates, 1, None, None)
         assert state == "CONFIRMED"
+
+    def test_new_stays_new_on_reevaluation_with_zero_qualifying_gates(self):
+        """L1 FIX (Chad-approved, 2026-10-16): the confirmed defect -- a
+        second scan of a NEW ticker with NO qualifying gate on the CURRENT
+        evaluation (repeated same-day scan, zero new evidence) must NOT
+        promote to BUILDING. Before this fix, determine_transition's NEW
+        branch returned ("BUILDING", "single_signal_reevaluated")
+        unconditionally whenever `confirmed` was False, regardless of
+        whether any gate passed at all this scan."""
+        gates = make_gates()  # nothing passing -- zero qualifying evidence
+        state, rule = se.determine_transition("NEW", gates, 0, None, None)
+        assert state == "NEW"
+        assert rule == "no_gate_passed_remains_new"
+
+    def test_new_promotes_to_building_when_genuinely_new_qualifying_evidence_arrives(self):
+        """The real promotion path must still work: a NEW ticker whose
+        CURRENT scan has a genuinely qualifying single gate (e.g. a fresh
+        dark-pool anomaly) still correctly promotes to BUILDING."""
+        gates = make_gates(dark_pool_anomaly={"passed": True, "metrics": {"ratio": 5.0, "z_score": 4.0, "bootstrap": False}})
+        state, rule = se.determine_transition("NEW", gates, 0, None, None)
+        assert state == "BUILDING"
+        assert rule == "single_signal_reevaluated"
+
+    def test_new_repeated_identical_scan_with_no_evidence_never_drifts_to_building(self):
+        """Simulates multiple repeated same-day re-evaluations (e.g. a
+        polling refresh hitting the cache / re-scoring the same empty
+        result) against a NEW ticker that never actually produced a
+        qualifying gate -- it must stay NEW across every repetition, never
+        drift to BUILDING just from being evaluated more than once."""
+        gates = make_gates()
+        state = "NEW"
+        for _ in range(5):
+            state, rule = se.determine_transition(state, gates, 0, None, None)
+        assert state == "NEW"
+
+    def test_incomplete_historical_coverage_bootstrap_gate_does_not_count_as_qualifying(self):
+        """A dark_pool_anomaly gate that failed specifically because of
+        insufficient/incomplete historical coverage (tier1_bootstrap=True,
+        per dark_pool_baseline.py's `anomaly_qualifies` structural guard)
+        must never be misread as qualifying evidence for the NEW ->
+        BUILDING promotion -- evaluate_gates already sets `passed=False`
+        whenever bootstrap is True (`tier1_hit and not tier1_bootstrap`),
+        so this pins that the state machine correctly treats it as
+        no-qualifying-gate, not as a pass."""
+        gates = make_gates(
+            dark_pool_anomaly={"passed": False, "metrics": {"ratio": None, "z_score": None, "bootstrap": True}},
+        )
+        state, rule = se.determine_transition("NEW", gates, 0, None, None)
+        assert state == "NEW"
+        assert rule == "no_gate_passed_remains_new"
 
     def test_single_gate_does_not_confirm_even_with_two_qualifying_days(self):
         """SIGNAL-INTEGRITY RULE CHANGE: the old `qualifying_days_count >= 2`

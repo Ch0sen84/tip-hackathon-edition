@@ -14,7 +14,20 @@
 // library. navigateToTicker() is the one function both adapters call from
 // a Market Radar "Investigate" click so the user never has to reselect a
 // ticker they already clicked on.
-const TIP_STATE = { currentTicker: null, currentView: "radar" };
+// UX remediation item 4 (2026-10-16): `lastTicker` is a SEPARATE,
+// deliberately-never-cleared-by-plain-navigation memory of "the most
+// recent real ticker the user was looking at", distinct from
+// `currentTicker` (which means "the ticker relevant to the CURRENT
+// view" and is legitimately null on every non-ticker view). Real bug
+// this fixes: navigateToView() below used to null out `currentTicker`
+// the moment the user navigated to any other view, so clicking the
+// "Ticker Analysis" NAV ITEM again afterward (as opposed to browser
+// Back/Forward, which replays the real stored history entry and
+// therefore already worked) landed on a blank "select a ticker"
+// state instead of the ticker the user had actually been analyzing.
+// Only an explicit mode-invalidation (clearTickerView, when the old
+// ticker may not even exist under the new adapter) clears this.
+const TIP_STATE = { currentTicker: null, lastTicker: null, currentView: "radar" };
 
 // --- Phase A: auth setup banner (pure render, no fetch) --------------------
 //
@@ -101,28 +114,50 @@ function renderAuthSetupBanner(variant) {
 // have. This extends (does not replace) the prior session's bare
 // `#ticker=XXX` convention: that exact old format is still recognized on
 // load (see parseNavHash) so old bookmarks/links keep working.
-const NAV_VIEWS = ["radar", "ticker", "settings", "about"];
+// URL-backed navigation fix (2026-10-16): "marketwide" (Market
+// Intelligence) was missing from this list entirely -- a REAL bug,
+// since parseNavHash() silently rejects any view not in NAV_VIEWS,
+// falling back to the default Market Radar view. That meant F5 (or
+// restarting the browser) on Market Intelligence always bounced back
+// to My Watchlist instead of staying put -- unsupported-route handling
+// working "correctly" by accident for a view that WAS supposed to be
+// supported. See applyNavState below for the matching restore branch.
+const NAV_VIEWS = ["radar", "ticker", "settings", "about", "marketwide"];
 
 function parseNavHash(hash) {
   const raw = String(hash || "").replace(/^#/, "");
-  if (!raw) return { view: null, ticker: null };
+  if (!raw) return { view: null, ticker: null, mode: null };
   const params = new URLSearchParams(raw);
   // Legacy format from the prior session: a bare `#ticker=XXX` with no
   // `view=` key at all.
   if (!params.has("view") && params.has("ticker")) {
     const t = params.get("ticker");
-    return { view: "ticker", ticker: t ? t.toUpperCase() : null };
+    return { view: "ticker", ticker: t ? t.toUpperCase() : null, mode: null };
   }
   let view = params.get("view");
   if (!NAV_VIEWS.includes(view)) view = null;
   const ticker = params.get("ticker");
-  return { view, ticker: ticker ? ticker.toUpperCase() : null };
+  // UX round (2026-10-16 round 5), item 2: `mode` only ever means
+  // something on the "radar" view (My Watchlist vs Market Discovery
+  // sub-panel) -- see setRadarMode/applyNavState's "radar" branch.
+  const mode = params.get("mode") === "discovery" ? "discovery" : null;
+  return { view, ticker: ticker ? ticker.toUpperCase() : null, mode };
 }
 
 function buildNavHash(view, ticker) {
   const params = new URLSearchParams();
   params.set("view", view);
   if (view === "ticker" && ticker) params.set("ticker", ticker);
+  // UX round (2026-10-16 round 5), item 2: reads the CURRENT _radarMode
+  // directly (module-level state in this same file, already set by the
+  // time any real navigation runs) rather than threading a new
+  // parameter through every pushNav/replaceNav call site -- so Radar's
+  // own hash always reflects whichever sub-panel is actually showing,
+  // the same way every other view's hash already reflects its own
+  // current state.
+  if (view === "radar" && typeof _radarMode !== "undefined" && _radarMode === "discovery") {
+    params.set("mode", "discovery");
+  }
   return `#${params.toString()}`;
 }
 
@@ -134,6 +169,7 @@ function buildNavHash(view, ticker) {
 function pushNav(view, ticker) {
   TIP_STATE.currentView = view;
   TIP_STATE.currentTicker = ticker || null;
+  if (ticker) TIP_STATE.lastTicker = ticker; // see TIP_STATE's own comment above
   try {
     history.pushState({ view, ticker: ticker || null }, "", buildNavHash(view, ticker));
   } catch (e) {
@@ -144,6 +180,7 @@ function pushNav(view, ticker) {
 function replaceNav(view, ticker) {
   TIP_STATE.currentView = view;
   TIP_STATE.currentTicker = ticker || null;
+  if (ticker) TIP_STATE.lastTicker = ticker; // see TIP_STATE's own comment above
   try {
     history.replaceState({ view, ticker: ticker || null }, "", buildNavHash(view, ticker));
   } catch (e) {
@@ -155,9 +192,21 @@ function replaceNav(view, ticker) {
 // Settings / About). Pushes a new entry by default; pass push:false for
 // the mode-switch-invalidation case, which must REPLACE the current entry
 // rather than add a new one.
+//
+// UX remediation item 4 (2026-10-16): falls back to TIP_STATE.lastTicker
+// when navigating TO "ticker" with nothing more specific already in
+// play (currentTicker is null here on every real-world call to this
+// branch, since it was just nulled by whatever navigateToView call took
+// the user away from Ticker Analysis in the first place) -- this is
+// what makes clicking the "Ticker Analysis" nav item again actually
+// return to the ticker the user was looking at, instead of a blank
+// "select a ticker" state. Browser Back/Forward never hit this path at
+// all (popstate restores the exact stored {view, ticker} from history
+// directly via applyNavState), so this fix is scoped to the nav-item-
+// click case specifically, which is the gap that was actually missing.
 function navigateToView(view, opts = {}) {
   const { push = true } = opts;
-  const ticker = view === "ticker" ? TIP_STATE.currentTicker : null;
+  const ticker = view === "ticker" ? (TIP_STATE.currentTicker || TIP_STATE.lastTicker) : null;
   if (push) pushNav(view, ticker); else replaceNav(view, ticker);
   switchView(view);
 }
@@ -198,6 +247,15 @@ function applyNavState(state, handlers, opts = {}) {
   const setHistory = (view, ticker) => { if (push) pushNav(view, ticker); else replaceNav(view, ticker); };
 
   if (!state || !state.view || state.view === "radar") {
+    // UX round (2026-10-16 round 5), item 2: restore the Market
+    // Discovery/My Watchlist sub-panel from the URL FIRST (persist:
+    // false -- setHistory right below writes the one real history
+    // entry, reading this now-current _radarMode via buildNavHash), so
+    // an F5 refresh/deep-link/Back-Forward onto "radar" lands on
+    // whichever sub-panel was actually showing, not always back to the
+    // My Watchlist default -- same restore-from-URL pattern Market
+    // Intelligence's own "marketwide" branch below already established.
+    setRadarMode((state && state.mode) || "watchlist", { persist: false });
     setHistory("radar", null);
     switchView("radar");
     return;
@@ -205,6 +263,19 @@ function applyNavState(state, handlers, opts = {}) {
   if (state.view === "settings" || state.view === "about") {
     setHistory(state.view, null);
     switchView(state.view);
+    return;
+  }
+  if (state.view === "marketwide") {
+    setHistory("marketwide", null);
+    switchView("marketwide");
+    // URL-backed nav fix: restoring this view from a refresh/deep-link/
+    // Back-Forward/history event must behave EXACTLY like the real nav
+    // button click does (which lazily loads it via initMarketWideRadar,
+    // see app.live.js) -- never a second, parallel load path, and never
+    // a duplicate fetch if it was already loaded this session
+    // (initMarketWideRadar's own _marketWideLoaded guard makes repeat
+    // calls here a no-op, so this is safe to call unconditionally).
+    if (handlers && handlers.onMarketWideRestore) handlers.onMarketWideRestore();
     return;
   }
   // state.view === "ticker"
@@ -268,6 +339,13 @@ function wireHistoryHandling() {
 // one shared, byte-identical file.
 function clearTickerView() {
   TIP_STATE.currentTicker = null;
+  // UX remediation item 4 (2026-10-16): this explicit invalidation path
+  // (a Demo<->Live mode switch) is the one case that SHOULD also wipe
+  // the "return to this ticker" memory -- the old ticker may not even
+  // exist under the new adapter, so there is nothing honest to return
+  // to. Plain navigation to another view must never reach this
+  // function at all (see navigateToView's own comment).
+  TIP_STATE.lastTicker = null;
   setTickerComboValue("");
   const detailEl = document.getElementById("tickerDetail");
   if (detailEl) detailEl.innerHTML = `<div class="empty">Select a ticker to analyze.</div>`;
@@ -500,25 +578,52 @@ function navigateToTicker(ticker, loadTickerDetailFn, opts = {}) {
 // two sibling panels is visible. "watchlist" is the default/unchanged
 // panel; "discovery" is lazily loaded (onDiscoverySelected callback)
 // only the first time it's selected, never pre-fetched on page load.
+//
+// UX round (2026-10-16 round 5), item 2: this sub-view selection used to
+// live ONLY in the module-level _radarMode variable -- invisible to the
+// URL, so an F5 refresh (or a deep link) always bounced back to
+// "watchlist" even if the user had explicitly switched to "Market
+// Discovery". Fixed the EXACT SAME way Market Intelligence's own view
+// was already fixed (see NAV_VIEWS/buildNavHash/parseNavHash/
+// applyNavState's "marketwide" branch, plus that section's own comment
+// explaining the original bug): the sub-mode now rides along in the
+// `#view=radar&mode=discovery` hash, restored on bootstrap/F5/Back-
+// Forward via applyNavState's "radar" branch below, through this one
+// shared setRadarMode() function (never a second, parallel switch-panel
+// implementation for the restore path vs the click path).
 let _radarMode = "watchlist";
+let _radarModeDiscoveryLoaded = false;
+let _onDiscoverySelectedCallback = null;
+
+function setRadarMode(mode, opts = {}) {
+  const { persist = true } = opts;
+  mode = mode === "discovery" ? "discovery" : "watchlist";
+  _radarMode = mode;
+  const toggle = document.getElementById("radarModeToggle");
+  if (toggle) {
+    toggle.querySelectorAll("[data-radar-mode]").forEach((b) => b.classList.toggle("active", b.dataset.radarMode === mode));
+  }
+  const wl = document.getElementById("watchlistRadarSection");
+  const disc = document.getElementById("discoveryRadarSection");
+  if (wl) wl.style.display = mode === "watchlist" ? "" : "none";
+  if (disc) disc.style.display = mode === "discovery" ? "" : "none";
+  if (mode === "discovery" && !_radarModeDiscoveryLoaded) {
+    _radarModeDiscoveryLoaded = true;
+    if (typeof _onDiscoverySelectedCallback === "function") _onDiscoverySelectedCallback();
+  }
+  // A plain sub-view toggle updates the CURRENT history entry in place
+  // (same "replace, never push" convention applyNavState/bootstrap/
+  // popstate restores already use) -- never adds a Back stop just for
+  // flipping between the two Radar panels.
+  if (persist) replaceNav("radar", null);
+}
+
 function wireRadarModeToggle(onDiscoverySelected) {
+  _onDiscoverySelectedCallback = onDiscoverySelected;
   const toggle = document.getElementById("radarModeToggle");
   if (!toggle) return;
-  let discoveryLoaded = false;
   toggle.querySelectorAll("[data-radar-mode]").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      const mode = btn.dataset.radarMode;
-      _radarMode = mode;
-      toggle.querySelectorAll("[data-radar-mode]").forEach((b) => b.classList.toggle("active", b === btn));
-      const wl = document.getElementById("watchlistRadarSection");
-      const disc = document.getElementById("discoveryRadarSection");
-      if (wl) wl.style.display = mode === "watchlist" ? "" : "none";
-      if (disc) disc.style.display = mode === "discovery" ? "" : "none";
-      if (mode === "discovery" && !discoveryLoaded) {
-        discoveryLoaded = true;
-        if (typeof onDiscoverySelected === "function") onDiscoverySelected();
-      }
-    });
+    btn.addEventListener("click", () => setRadarMode(btn.dataset.radarMode));
   });
 }
 
@@ -528,10 +633,14 @@ function wireRadarModeToggle(onDiscoverySelected) {
 // the fetch calls and button wiring, same split as every other
 // render*/wire* pair in this file.
 
+// UX round (2026-10-16), item 5: made understandable without reading
+// docs -- what each mode actually does, framed as an action (never
+// implies this controls the personal watchlist, which has its own
+// separate, manual-only "Refresh Data" action -- see item 9/W2).
 const SCHEDULER_MODE_LABELS = {
-  disabled: "Disabled -- zero background UW calls",
-  dry_run: "Dry run -- discovery + ranking only, no per-ticker evaluation",
-  enabled: "Enabled -- discovery + bounded per-ticker evaluation",
+  disabled: "Disabled -- no scheduled broader-market scans run automatically. Zero background UW calls.",
+  dry_run: "Dry Run -- automatically discovers candidates across the broader market on a schedule, without deeper per-ticker evaluation.",
+  enabled: "Enabled -- automatically discovers candidates AND evaluates the configured top-ranked selections on a schedule.",
 };
 
 // QA remediation D7: the mode TOGGLE BUTTONS below used to render the
@@ -559,16 +668,76 @@ function renderSchedulerControls(status) {
   const pauseNote = status.pause_reason
     ? `<div class="muted" style="color:#b45309">Paused: ${esc(status.pause_reason)}</div>`
     : "";
+  // UX remediation item 4 (2026-10-16): the old "Run Once now" button
+  // (disabled whenever mode === "disabled") is REMOVED entirely here --
+  // it was a now-contradictory UI remnant left over from before the
+  // Run Once decoupling round: a user staring at a disabled "Run Once
+  // now" button right next to two perfectly enabled "Discover Once" /
+  // "Discover & Evaluate Once" buttons that do the equivalent job while
+  // Disabled looked like a bug, not a deliberate second control. The
+  // decoupled buttons (renderRunOnceDepthActions below) are now the
+  // ONLY one-time-run UI; `runningNow` is still needed so those buttons
+  // correctly disable while a cycle is in progress.
+  const runningNow = !!status.cycle_in_progress;
+  const topN = status.top_n_configured ?? status.top_n ?? "n/a";
   return `
     <div class="radar-mode-toggle" id="schedulerModeToggle">${buttons}</div>
     <div class="muted" style="margin-top:6px">${esc(SCHEDULER_MODE_LABELS[status.mode] || status.mode)}</div>
+    <div class="muted" style="margin-top:2px;font-size:12px">
+      This controls <strong>broader market discovery</strong> only -- your personal watchlist has its own
+      separate, manual-only <strong>Refresh Data</strong> action on My Watchlist, never this scheduler.
+    </div>
     <div class="muted" style="font-size:12px;margin-top:4px">
-      Last run: ${esc(status.last_run_finished_at || "never")} &middot;
-      Next run: ${esc(status.next_run_at || "n/a")} &middot;
+      Last run: ${esc(status.last_run_finished_at && typeof formatTimestampFull === "function" ? formatTimestampFull(status.last_run_finished_at) : (status.last_run_finished_at || "never"))} &middot;
+      Next run: ${esc(status.next_run_at && typeof formatTimestampFull === "function" ? formatTimestampFull(status.next_run_at) : (status.next_run_at || "n/a"))} &middot;
       Candidates evaluated last cycle: ${status.last_cycle_candidates_evaluated ?? "n/a"} &middot;
-      Freshness window: ${Math.round((status.freshness_window_s || 0) / 60)}m
+      Freshness window: ${Math.round((status.freshness_window_s || 0) / 60)}m &middot;
+      Top-N configured: ${esc(String(topN))}
     </div>
     ${pauseNote}
+    ${renderRunOnceDepthActions(status, runningNow, topN)}
+  `;
+}
+
+// Final remediation round (2026-10-16): the actual fix for "Run Once
+// currently requires arming Dry Run/Enabled first". These two buttons
+// call the NEW backend depth-based one-time path
+// (POST /api/scheduler/run-once with an explicit `depth`), which is
+// fully decoupled from the mode toggle above -- they work (and are the
+// ONLY way to run a one-time scan) while mode stays Disabled, and work
+// identically regardless of whatever mode is currently selected.
+// Deliberately rendered as its OWN bordered card with a "ONE-TIME"
+// .tag badge, visually and structurally separate from
+// .radar-mode-toggle above it, so a user cannot mistake clicking one
+// of these for turning on recurring scheduling -- that mode toggle is
+// untouched, unmodified, and still the only thing that writes a
+// recurring mode.
+function renderRunOnceDepthActions(status, runningNow, topN) {
+  const modeShort = esc(schedulerModeShortLabel(status.mode));
+  return `
+    <div class="card" id="runOnceActionsCard" style="margin-top:14px;padding:12px 14px;gap:8px;border-color:var(--accent2)">
+      <div class="card-head" style="margin-bottom:0">
+        <span class="tag" style="color:var(--accent)">ONE-TIME SCAN</span>
+        <span class="muted" style="font-size:11.5px">Independent of the recurring mode above -- works even while it's <strong>${modeShort}</strong>, and never changes it</span>
+      </div>
+      <div class="muted" style="font-size:12px">
+        Run a single market-wide scan right now without enabling recurring background collection. The recurring
+        mode stays exactly as set (currently <strong>${modeShort}</strong>) before, during, and after either action below.
+      </div>
+      <div class="settings-row" style="gap:10px;align-items:flex-start">
+        <button class="btn run-once-depth-btn" id="discoverOnceBtn" data-depth="discovery_only" ${runningNow ? "disabled" : ""}>
+          Discover Once
+        </button>
+        <span class="muted" style="font-size:11.5px;max-width:230px">Runs one market screener cycle, catalogs discovered candidates, then stops. No per-ticker evaluation.</span>
+      </div>
+      <div class="settings-row" style="gap:10px;align-items:flex-start;margin-top:2px">
+        <button class="btn run-once-depth-btn" id="discoverEvaluateOnceBtn" data-depth="discovery_plus_evaluation" ${runningNow ? "disabled" : ""}>
+          Discover &amp; Evaluate Once
+        </button>
+        <span class="muted" style="font-size:11.5px;max-width:230px">Runs one market screener cycle, then evaluates the top <strong>${esc(String(topN))}</strong> ranked candidates (configured top-N), then stops.</span>
+      </div>
+      <div id="runOnceDepthProgress" class="muted" style="font-size:12px;min-height:16px"></div>
+    </div>
   `;
 }
 
@@ -578,20 +747,150 @@ const FRESHNESS_LABELS = {
   unevaluated: "Unevaluated",
 };
 
+// UX round (2026-10-16 round 5), item 1: "Why TIP surfaced this" --
+// REAL discovery-pipeline fields only (see backend/app/core/discovery.py's
+// normalize_discovery_candidate, the ONLY place this raw_json shape is
+// produced), never a fabricated number or evidence string. Each field is
+// rendered in one of exactly two visually/textually distinct states:
+//   * missing/None ("not captured by the screener for this snapshot") --
+//     the field genuinely was never reported -- styled with the SAME
+//     .px-unavailable convention fmtPriceLine() already established
+//     (italic, muted) so "unavailable" means the same thing everywhere
+//     in this app, never a second invented look.
+//   * present, including a real 0 ("checked and found nothing", e.g.
+//     put_volume: 0) -- rendered as a normal, non-italic value, exactly
+//     like any other real number -- a genuine zero must never look the
+//     same as "we don't know".
+// D3 (ux-nav-watchlist-reliability round 9): this used to hand-roll its
+// own `$${...toLocaleString()}` formatting, which (unlike the rest of
+// the app) never abbreviated magnitude and, worse, put the sign INSIDE
+// the "$" for a negative net_premium (raw "$-89,231,250" instead of the
+// established, already-fixed "\u2212$89.2M" pattern -- see fmtMoney()'s
+// own module comment for the full prior writeup of that exact bug class).
+// Market Discovery's row/table already use fmtMoney() for this same
+// net_premium field (lines below, renderDiscoveryCandidateRow); this is
+// the one remaining display path that wasn't using it. Extends the
+// existing helper rather than inventing a second formatter.
+const WHY_SURFACED_FIELDS = [
+  { key: "net_premium", label: "Net premium", fmt: (v) => fmtMoney(Number(v)) ?? "$0" },
+  { key: "call_volume", label: "Call volume", fmt: (v) => Number(v).toLocaleString() },
+  { key: "put_volume", label: "Put volume", fmt: (v) => Number(v).toLocaleString() },
+  { key: "iv_rank", label: "IV rank", fmt: (v) => Number(v).toFixed(1) },
+  { key: "change_percent", label: "1D change", fmt: (v) => fmtPct(v) },
+];
+
+function renderWhySurfacedBlock(candidate) {
+  const raw = candidate.raw;
+  if (raw == null) {
+    // The whole raw_json is missing (no discovery record cataloged at
+    // all for this candidate) -- distinct from any one field being
+    // missing; say so plainly rather than rendering five empty fields.
+    return `<div class="why-surfaced muted" style="font-size:11.5px;margin-top:4px">
+      <strong>Why TIP surfaced this:</strong>
+      <span class="px-unavailable">no discovery details were captured for this snapshot</span>
+    </div>`;
+  }
+  const parts = WHY_SURFACED_FIELDS.map((f) => {
+    const v = raw[f.key];
+    if (v === null || v === undefined) {
+      return `<span title="Not captured by the screener for this snapshot">${esc(f.label)}: `
+        + `<span class="px-unavailable">not captured</span></span>`;
+    }
+    return `<span>${esc(f.label)}: <strong>${esc(f.fmt(v))}</strong></span>`;
+  }).join(" &middot; ");
+  const sourceDateNote = raw.source_date
+    ? ` <span class="muted" style="font-size:11px">(screener date: ${esc(raw.source_date)})</span>`
+    : "";
+  return `<div class="why-surfaced" style="font-size:11.5px;margin-top:4px">
+    <strong>Why TIP surfaced this:</strong> ${parts}${sourceDateNote}
+  </div>`;
+}
+
 function renderMarketWideCandidateRow(candidate) {
   const badgeClass = `freshness-badge freshness-${candidate.freshness}`;
   const evalState = candidate.evaluation
     ? `${esc(candidate.evaluation.state || "n/a")} (${esc(candidate.evaluation.confidence || "n/a")})`
     : "no evaluation yet";
-  const ageNote =
-    candidate.age_s != null ? `${Math.round(candidate.age_s / 60)}m old` : "never evaluated";
+  // UX round (2026-10-16), item 6: human-readable ET + relative time via
+  // the new centralized frontend/timefmt.js, instead of a raw age-in-
+  // minutes computed from age_s -- "Not evaluated" when there's genuinely
+  // no cataloged evaluation at all (never a fabricated "0m old").
+  const retrievedAt = candidate.evaluation ? candidate.evaluation.retrieved_at : null;
+  const ageNote = typeof formatRelative === "function" ? formatRelative(retrievedAt) : (candidate.age_s != null ? `${Math.round(candidate.age_s / 60)}m old` : "never evaluated");
+  // UX round (2026-10-16 round 5), item 1: "View Details" -- reuses the
+  // EXACT SAME data-investigate-ticker attribute + wireInvestigateButtons
+  // wiring Market Radar's own Investigate buttons already use (see
+  // wireInvestigateButtons below), so it opens Ticker Analysis through
+  // the identical, already-tested URL-backed ticker-context mechanism --
+  // never a second, parallel navigation path invented for this view.
+  //
+  // UX remediation item 4 (2026-10-16): a market-wide/index row (e.g.
+  // SPXW, the same real is_index field renderDiscoveryCandidateRow
+  // already checks -- never a second, independently-guessed detection)
+  // cannot be sent through the per-ticker Ticker Analysis pipeline at
+  // all, so "View Details" must not be offered for it -- matches the
+  // discovery table's existing "Evaluate not supported (index/
+  // derivative)" treatment rather than inventing a second convention.
+  const isIndexRow = !!(candidate.raw && candidate.raw.is_index);
+  const viewDetailsAction = isIndexRow
+    ? `<span class="muted" title="Index/derivative instruments are not supported by the per-ticker evaluation pipeline yet">Not supported (index/derivative)</span>`
+    : `<button class="btn-link btn-investigate" data-investigate-ticker="${esc(candidate.ticker)}" aria-label="View Details for ${esc(candidate.ticker)} in Ticker Analysis">View Details &rarr;</button>`;
   return `
-    <div class="candidate-row" data-ticker="${esc(candidate.ticker)}">
-      <span class="ticker">${esc(candidate.ticker)}</span>
-      <span class="${badgeClass}">${esc(FRESHNESS_LABELS[candidate.freshness] || candidate.freshness)}</span>
-      <span class="muted">${evalState}</span>
-      <span class="muted" style="font-size:11px">${ageNote}</span>
+    <div class="candidate-row market-wide-row" data-ticker="${esc(candidate.ticker)}">
+      <div class="market-wide-row-main">
+        <span class="ticker">${esc(candidate.ticker)}</span>
+        <span class="${badgeClass}">${esc(FRESHNESS_LABELS[candidate.freshness] || candidate.freshness)}</span>
+        <span class="muted">${evalState}</span>
+        <span class="muted" style="font-size:11px" title="${esc(typeof formatTimestampET === "function" ? formatTimestampET(retrievedAt) : "")}">${esc(ageNote)}</span>
+        ${viewDetailsAction}
+      </div>
+      ${renderWhySurfacedBlock(candidate)}
     </div>
+  `;
+}
+
+// UX round (2026-10-16), item 4: compact discovered/evaluated/awaiting
+// summary, SCOPED TO THE ACTIVE DISCOVERY SNAPSHOT ONLY (never a
+// lifetime total across every snapshot ever cataloged) -- that scope is
+// made explicit in the rendered text itself ("this scan"), computed
+// purely from the one GET /api/radar/market-wide response already
+// fetched (candidate_count_in_snapshot = discovered this scan; each
+// returned candidate's `freshness` -- "current"/"stale" both mean a
+// real evaluation exists; "unevaluated" means it doesn't yet).
+// Also carries the ONE honest, current-scheduler-mode-aware line this
+// page must never get wrong: it must NEVER imply continuous scanning
+// is happening if the scheduler is actually Disabled right now.
+function renderMarketWideSummary(data, status) {
+  const discovered = data.candidate_count_in_snapshot ?? (data.candidates || []).length;
+  const shown = (data.candidates || []).length;
+  const evaluated = (data.candidates || []).filter((c) => c.freshness === "current" || c.freshness === "stale").length;
+  const awaiting = Math.max(0, shown - evaluated);
+  // UX round (2026-10-16 round 5), item 3: was a raw ISO-with-microseconds
+  // string shown straight from the API response -- the one shared
+  // frontend/timefmt.js formatter now renders it the same human-readable
+  // way every other trader-facing timestamp in this app already is.
+  const asOf = data.snapshot_at
+    ? `as of ${esc(typeof formatTimestampFull === "function" ? formatTimestampFull(data.snapshot_at) : data.snapshot_at)}`
+    : "no scan yet";
+  const truncationNote = data.rows_truncated_note
+    ? `<div class="muted" style="font-size:12px;margin-top:3px">${esc(data.rows_truncated_note)}</div>`
+    : "";
+  const modeNote = !status
+    ? ""
+    : status.mode === "disabled"
+    ? "The scheduler is currently Disabled -- this reflects the last scan that was run (manually or before Disabled was selected), not an ongoing scan."
+    : status.mode === "dry_run"
+    ? "The scheduler is in Dry Run -- it keeps discovering new candidates automatically, but does not evaluate them further."
+    : "The scheduler is Enabled -- it keeps discovering and evaluating candidates automatically.";
+  return `
+    <div class="summary-strip" style="display:flex;gap:16px;flex-wrap:wrap;align-items:baseline">
+      <span><strong>${discovered}</strong> discovered <span class="muted">(this scan)</span></span>
+      <span><strong>${evaluated}</strong> evaluated <span class="muted">(of ${shown} shown)</span></span>
+      <span><strong>${awaiting}</strong> awaiting evaluation</span>
+      <span class="muted">${esc(asOf)}</span>
+    </div>
+    <div class="muted" style="font-size:12px;margin-top:3px">${esc(modeNote)}</div>
+    ${truncationNote}
   `;
 }
 
@@ -602,8 +901,9 @@ function renderMarketWideRadar(data) {
   }
   const rows = data.candidates.map(renderMarketWideCandidateRow).join("");
   const coverage = data.coverage_note ? `<p class="muted" style="font-size:12px">${esc(data.coverage_note)}</p>` : "";
+  const snapshotLabel = typeof formatTimestampFull === "function" ? formatTimestampFull(data.snapshot_at) : (data.snapshot_at || "n/a");
   return `
-    <div class="muted" style="font-size:12px">Snapshot at ${esc(data.snapshot_at || "n/a")}</div>
+    <div class="muted" style="font-size:12px">Snapshot: ${esc(snapshotLabel)}</div>
     <div class="candidate-list">${rows}</div>
     ${coverage}
   `;
@@ -686,6 +986,40 @@ function fmtChangeCell(px) {
 // Breakdown panel (click-through, renderSignalBreakdown, unchanged) and
 // in Ticker Analysis's full 4-way classification -- just not duplicated
 // inline on every card in the grid.
+// D4/D5 (ux-nav-watchlist-reliability round 9): a watchlist entry with no
+// real lifecycle record at all (entry.state is null/undefined -- see
+// backend/app/main.py's _radar_impl fix, which no longer fakes this to
+// "NEW") must render an honest "Not evaluated" badge -- "NEW" is a real
+// signal_engine lifecycle state that implies an evaluation actually
+// happened, and must never be shown for a ticker that has never been
+// scanned. `entry.not_evaluated` (also set by the backend fix above) is
+// the more explicit signal when present; falling back to `!entry.state`
+// covers the same real condition for any entry that didn't go through
+// that specific code path.
+function isNotEvaluated(entry) {
+  return !!entry.not_evaluated || !entry.state;
+}
+// Round 13 item 1: a genuinely-evaluated zero-qualifying-gate entry
+// (backend `zero_gate: true`, or any entry whose real transition_rule
+// is one of the two zero-gate reasons -- same shared predicate used
+// everywhere else, isZeroGateTransitionReason, defined below) must be
+// visibly distinguishable from BOTH a never-evaluated placeholder
+// (isNotEvaluated above) and a genuinely qualifying entry -- the three
+// states this fix is required to keep distinct and renderable.
+function isZeroGateEntry(entry) {
+  return !isNotEvaluated(entry) && (!!entry.zero_gate || isZeroGateTransitionReason(entry.transition_rule));
+}
+function stateTagHtml(entry) {
+  if (isNotEvaluated(entry)) {
+    return `<span class="tag state-unevaluated" title="This ticker has never been evaluated -- no real signal-detection scan has run for it yet.">Not evaluated</span>`;
+  }
+  const tag = `<span class="tag state-${esc(entry.state)}">${esc(entry.state)}</span>`;
+  if (isZeroGateEntry(entry)) {
+    return `${tag} <span class="muted zero-gate-note" title="Evaluated this scan -- zero qualifying gates passed, not a qualifying/noteworthy signal.">(no qualifying signal)</span>`;
+  }
+  return tag;
+}
+
 function renderCard(entry) {
   const px = entry.price || {};
   return `
@@ -696,7 +1030,7 @@ function renderCard(entry) {
       </div>
       <div class="tags">
         <span class="tag">${esc(entry.label)}</span>
-        <span class="tag state-${esc(entry.state)}">${esc(entry.state || "")}</span>
+        ${stateTagHtml(entry)}
         <span class="tag">confidence: ${esc(entry.confidence)}</span>
       </div>
       <div class="read card-headline">${esc(entry.headline)}</div>
@@ -727,17 +1061,48 @@ function renderFamilyLabel(entry) {
 // Ticker Analysis's header card (renderTickerDetail) and the Featured
 // Signal hero card (renderFeaturedSignal), neither of which repeats
 // per-row.
+// P1 (ux-nav-watchlist-reliability round 10): a never-evaluated
+// placeholder row has no `last_evaluated_at` -- formatTimestampFull /
+// formatTimestampET (frontend/timefmt.js, loaded before this file in
+// both index.html and static-demo/index.html) already return the
+// honest "Not evaluated" string for null/undefined input, so this is a
+// direct passthrough, never a second ad-hoc fallback string.
+function fmtLastEvaluatedCell(entry) {
+  if (typeof formatTimestampFull !== "function") return esc(entry.last_evaluated_at || "Not evaluated");
+  return esc(formatTimestampFull(entry.last_evaluated_at));
+}
+// Round 14 item 1: the My Watchlist table's headline column used to
+// render `entry.headline` unconditionally -- for an entry Round 13
+// correctly made visible again (`isZeroGateEntry`, evaluated this scan
+// but zero qualifying gates passed), the backend's generic
+// tip_evidence.headline() text (e.g. "Unusual activity") still reads as
+// if something qualifying fired, directly contradicting the state
+// tag's own already-honest "(no qualifying signal)" note right next to
+// it in the State column on the SAME row. Reuses the exact same
+// isZeroGateEntry predicate stateTagHtml already branches on (never a
+// second/drifting check) -- a genuinely qualifying entry's headline is
+// returned completely untouched, and a never-evaluated placeholder's
+// honest "Not yet evaluated" headline is also untouched (isZeroGateEntry
+// already excludes not_evaluated entries internally).
+function rowHeadlineText(entry) {
+  if (isZeroGateEntry(entry)) {
+    return "No qualifying signal detected.";
+  }
+  return entry.headline;
+}
+
 function renderRow(entry) {
   const px = entry.price || {};
   return `
     <tr data-ticker="${esc(entry.ticker)}">
       <td><strong>${esc(entry.ticker)}</strong></td>
-      <td><span class="tag state-${esc(entry.state)}">${esc(entry.state || "")}</span></td>
-      <td>${esc(entry.confidence)}</td>
+      <td>${stateTagHtml(entry)}</td>
+      <td>${isNotEvaluated(entry) ? `<span class="muted">n/a</span>` : esc(entry.confidence)}</td>
       <td class="col-family">${renderFamilyLabel(entry)}</td>
       <td class="col-price">${fmtPriceCell(px)}</td>
       <td class="col-chg">${fmtChangeCell(px)}</td>
-      <td class="col-headline">${esc(entry.headline)}</td>
+      <td class="col-headline">${esc(rowHeadlineText(entry))}</td>
+      <td class="col-lastEval">${fmtLastEvaluatedCell(entry)}</td>
       <td><button class="btn-link btn-investigate" data-investigate-ticker="${esc(entry.ticker)}">Investigate &rarr;</button></td>
     </tr>`;
 }
@@ -745,12 +1110,46 @@ function renderRow(entry) {
 // Activity-summary strip above the grid. Built purely from fields the
 // /api/radar response (and its static-demo capture) already has:
 // scanned, highest.length, other.length -- no new backend fields.
+// D4/D5 (ux-nav-watchlist-reliability round 9): `data.other` can now
+// contain never-evaluated placeholder entries (not_evaluated: true) --
+// these must never count toward "highest attention"/"other noteworthy"
+// (both are genuinely-qualifying categories) or toward any "N qualifying
+// signals" total. Filters are presentation-only; nothing fed into these
+// counts changes what present()/tip_evidence actually classified.
+// Round 13 item 1: `data.other` can ALSO now contain genuinely-evaluated
+// zero-qualifying-gate entries (`zero_gate: true`, backend/app/main.py's
+// _radar_impl -- previously these were silently dropped from the
+// response entirely, not just from this count; see that file's comment
+// for the real route-level bug). Same rule applies: "evaluated, found
+// nothing" is never a qualifying/noteworthy signal either, so it is
+// excluded from this count exactly like not_evaluated already is --
+// while still being rendered as a real, visible, distinctly-labeled row
+// (see stateTagHtml below), never silently dropped from the table.
+function qualifyingEntries(list) {
+  return (list || []).filter((e) => !e.not_evaluated && !e.zero_gate);
+}
+
+function radarSummaryCounts(data) {
+  const watchlistCount = data.watchlist_size != null ? data.watchlist_size : data.scanned;
+  const evaluatedCount = data.evaluated_count != null ? data.evaluated_count : data.scanned;
+  const highestCount = qualifyingEntries(data.highest).length;
+  const otherNoteworthyCount = qualifyingEntries(data.other).length;
+  return { watchlistCount, evaluatedCount, qualifyingCount: highestCount + otherNoteworthyCount, otherNoteworthyCount };
+}
+
+function renderRadarStatus(data) {
+  const c = radarSummaryCounts(data);
+  return `watchlist: ${c.watchlistCount} ticker(s) \u00b7 ${c.evaluatedCount} evaluated \u00b7 ${c.qualifyingCount} qualifying \u00b7 ${c.otherNoteworthyCount} other noteworthy \u00b7 last scanned ${formatAgo(data.last_scan_at)}`;
+}
+
 function renderActivitySummary(data) {
+  const c = radarSummaryCounts(data);
   return `
     <div class="activity-strip">
-      <div class="activity-stat"><span class="activity-num">${esc(data.scanned)}</span><span class="activity-label">tickers scanned</span></div>
-      <div class="activity-stat"><span class="activity-num accent-bull">${esc((data.highest || []).length)}</span><span class="activity-label">highest attention</span></div>
-      <div class="activity-stat"><span class="activity-num">${esc((data.other || []).length)}</span><span class="activity-label">other noteworthy</span></div>
+      <div class="activity-stat"><span class="activity-num">${esc(c.watchlistCount)}</span><span class="activity-label">tickers in watchlist</span></div>
+      <div class="activity-stat"><span class="activity-num">${esc(c.evaluatedCount)}</span><span class="activity-label">evaluated</span></div>
+      <div class="activity-stat"><span class="activity-num accent-bull">${esc(c.qualifyingCount)}</span><span class="activity-label">qualifying signals</span></div>
+      <div class="activity-stat"><span class="activity-num">${esc(c.otherNoteworthyCount)}</span><span class="activity-label">other noteworthy</span></div>
     </div>`;
 }
 
@@ -925,7 +1324,21 @@ function renderFeaturedArea(data) {
   const allHighest = data.highest || [];
   const allOther = data.other || [];
   const hasHighest = allHighest.length > 0;
-  const hasOther = allOther.length > 0;
+  // Round 12 (ux-nav-watchlist-reliability) fix: `allOther.length > 0` was
+  // true even when every entry in it is a not_evaluated placeholder (a
+  // watchlist ticker that has never actually been scanned) -- in that
+  // case the old wording below ("...for the tickers tracked this scan")
+  // falsely implied a real scan had run and found noteworthy tickers.
+  // hasGenuineOther is true only when Other Noteworthy actually contains
+  // at least one REAL, evaluated entry (qualifyingEntries() already
+  // excludes not_evaluated placeholders -- same filter used for the
+  // "N qualifying signals" count above).
+  const hasGenuineOther = qualifyingEntries(allOther).length > 0;
+  // Honest counts, reused from radarSummaryCounts() (same
+  // watchlist_size/evaluated_count fields the activity strip and status
+  // line already use) -- never invented, never re-derived.
+  const counts = radarSummaryCounts(data);
+  const nothingEvaluatedYet = counts.evaluatedCount === 0 && counts.watchlistCount > 0;
   const featured = allHighest[0] || null;
 
   const headingEl = document.getElementById("featuredSignalHeading");
@@ -952,8 +1365,21 @@ function renderFeaturedArea(data) {
   if (breakdownEl) breakdownEl.innerHTML = "";
   if (noticeEl) {
     noticeEl.style.display = "";
-    noticeEl.innerHTML = hasOther
-      ? `<div class="breakdown-panel empty">No ticker currently qualifies for Highest Attention -- see Other Noteworthy below for the tickers tracked this scan.</div>`
+    // Round 12: three genuinely distinct, honestly-derived cases --
+    // never a single wording that overstates what actually happened.
+    //   1. Other Noteworthy has at least one REAL evaluated entry: point
+    //      to it (this is the only case where "see Other Noteworthy
+    //      below" is both true and useful).
+    //   2. Nothing in the watchlist has been evaluated yet
+    //      (evaluated_count === 0, watchlist_size > 0): say so plainly --
+    //      no scan has actually run, so neither "this scan" nor "Other
+    //      Noteworthy" may be referenced.
+    //   3. A real scan ran, evaluated something, and genuinely found zero
+    //      qualifying tickers anywhere: the original, accurate wording.
+    noticeEl.innerHTML = hasGenuineOther
+      ? `<div class="breakdown-panel empty">No ticker currently qualifies for Highest Attention -- see Other Noteworthy below for the ticker(s) evaluated this scan.</div>`
+      : nothingEvaluatedYet
+      ? `<div class="breakdown-panel empty">No tickers in this watchlist have been evaluated yet -- run a scan to populate Market Radar.</div>`
       : `<div class="breakdown-panel empty">No tickers currently qualify for Market Radar attention this scan.</div>`;
   }
 }
@@ -961,41 +1387,132 @@ function renderFeaturedArea(data) {
 function renderRadarLists(data, filters, loadTickerDetailFn) {
   const familyFilter = (filters && filters.family) || "";
   const stateFilter = (filters && filters.state) || "";
-  const allHighest = data.highest || [];
-  const allOther = data.other || [];
-  const featured = allHighest[0] || null;
-  const restOfHighest = allHighest.slice(1);
-  const filteredRest = filterRadarEntries(restOfHighest, familyFilter, stateFilter);
-  const filteredOther = filterRadarEntries(allOther, familyFilter, stateFilter);
+  // P1 fix (ux-nav-watchlist-reliability round 10): the round-9 D4/D5 fix
+  // made the BACKEND stop dropping never-evaluated watchlist tickers
+  // (they now arrive in data.other with not_evaluated:true, a real
+  // state, and an honest headline), but this renderer then immediately
+  // undid that by running qualifyingEntries() (a `!e.not_evaluated`
+  // filter) over the RENDER lists too -- every never-evaluated ticker
+  // was computed server-side, shipped over the wire, and then silently
+  // thrown away right here before a single <tr>/<div class="card"> was
+  // ever built for it. That is the exact regression Claude's real-Chrome
+  // retest caught: the backend was correct, the frontend row-rendering
+  // loop was not.
+  //
+  // Fix: qualifyingEntries() is now used ONLY for the things that are
+  // genuinely about qualification -- which ticker is "featured", and the
+  // "N qualifying signal(s)" count below. The actual DOM lists that get
+  // rendered (highestGridEl / otherGridEl / #otherTable tbody) are built
+  // from the FULL, unfiltered-by-qualification entry lists, so every
+  // watchlist ticker -- evaluated or not -- gets a real row. Highest
+  // Attention never receives not_evaluated placeholders from the backend
+  // (see backend/app/main.py's never_evaluated_tickers loop, which only
+  // ever appends to `other`), so allHighestDisplay only matters for
+  // defensiveness; allOtherDisplay is where this bug actually lived.
+  const qualifyingHighest = qualifyingEntries(data.highest);
+  const qualifyingOther = qualifyingEntries(data.other);
+  const allHighestDisplay = data.highest || [];
+  const allOtherDisplay = data.other || [];
+  const featured = qualifyingHighest[0] || null;
+  // The featured entry (if any) is always drawn from the qualifying set
+  // and rendered separately (renderFeaturedSignal), so it must not also
+  // appear a second time in the grid below it -- filter it out of the
+  // DISPLAY list by ticker, not by re-deriving from the qualifying list
+  // (which would silently re-introduce the dropped-row bug).
+  const restOfHighestDisplay = featured
+    ? allHighestDisplay.filter((e) => e.ticker !== featured.ticker)
+    : allHighestDisplay;
+  const filteredRest = filterRadarEntries(restOfHighestDisplay, familyFilter, stateFilter);
+  const filteredOther = filterRadarEntries(allOtherDisplay, familyFilter, stateFilter);
 
   const highestGridEl = document.getElementById("highestGrid");
   if (highestGridEl) highestGridEl.innerHTML = filteredRest.map(renderCard).join("") || "";
   // 2026-10-15 fix: when ZERO tickers genuinely qualify for Highest
-  // Attention (allHighest.length === 0, not merely filtered down to zero),
-  // Featured Signal's own honest "No featured signal right now" message
-  // already covers this tier -- a second, bare "Highest Attention" heading
-  // sitting over an empty grid right below it was redundant and looked
-  // broken, not like one compact empty state. Hide the whole redundant
-  // heading+grid section in that specific case; a filter-induced zero
-  // (allHighest.length > 0 but filteredRest is empty) still shows the
-  // heading normally since there IS a featured entry above it.
+  // Attention (qualifyingHighest.length === 0, not merely filtered down
+  // to zero), Featured Signal's own honest "No featured signal right
+  // now" message already covers this tier -- a second, bare "Highest
+  // Attention" heading sitting over an empty grid right below it was
+  // redundant and looked broken, not like one compact empty state. Hide
+  // the whole redundant heading+grid section in that specific case; a
+  // filter-induced zero (qualifyingHighest.length > 0 but filteredRest
+  // is empty) still shows the heading normally since there IS a
+  // featured entry above it.
   const highestSectionEl = document.getElementById("highestAttentionSection");
-  if (highestSectionEl) highestSectionEl.style.display = allHighest.length === 0 ? "none" : "";
+  if (highestSectionEl) highestSectionEl.style.display = qualifyingHighest.length === 0 ? "none" : "";
   const otherGridEl = document.getElementById("otherGrid");
   if (otherGridEl) otherGridEl.innerHTML = filteredOther.map(renderCard).join("") || "";
   // Other Noteworthy's table is now the primary (visible) presentation,
   // so it must respect the active filter the same way the grid does --
-  // filteredOther, not the full unfiltered allOther.
+  // filteredOther, not the full unfiltered allOtherDisplay. filteredOther
+  // is now drawn from allOtherDisplay (ALL entries), not qualifyingOther,
+  // so never-evaluated tickers genuinely render a row here.
+  //
+  // Round 14 item 3: filteredOther is a flat mix of three genuinely
+  // different kinds of entry (genuinely qualifying, evaluated-zero-gate,
+  // never-evaluated) rendered one after another with no visual grouping
+  // at all -- the ONLY place a reader could tell them apart was each
+  // row's own State-column badge. The "Other Noteworthy" heading above
+  // this table reports the genuinely-qualifying count (see
+  // otherNoteworthyCount below), but ALL THREE kinds render as rows in
+  // this one table beneath it -- a real count/row mismatch (e.g.
+  // heading says 4, table shows 6). Fix: split into three sub-groups,
+  // each with its OWN labeled header row + its OWN count computed from
+  // (and therefore always exactly matching) the rows actually rendered
+  // under it this render pass -- never from a separately-tracked/
+  // possibly-stale counter. This does NOT hide the zero-gate/never-
+  // evaluated rows (that would reintroduce the Round 13 regression this
+  // whole initiative exists to fix) -- every row from filteredOther
+  // still renders, just grouped. A group with zero rows this pass
+  // renders no header at all, so there is never a heading sitting over
+  // zero rows.
+  const otherQualifyingRows = filteredOther.filter((e) => !e.not_evaluated && !e.zero_gate);
+  const otherZeroGateRows = filteredOther.filter((e) => e.zero_gate);
+  const otherNotEvaluatedRows = filteredOther.filter((e) => e.not_evaluated);
+  function otherGroupHeaderRow(label, count) {
+    return `<tr class="radar-group-header-row"><td colspan="9" class="radar-group-header">${esc(label)} (${count})</td></tr>`;
+  }
   const tbody = document.querySelector("#otherTable tbody");
-  if (tbody) tbody.innerHTML = filteredOther.map(renderRow).join("");
+  if (tbody) {
+    const groups = [];
+    if (otherQualifyingRows.length) groups.push(otherQualifyingRows.map(renderRow).join(""));
+    if (otherZeroGateRows.length) {
+      groups.push(otherGroupHeaderRow("No Qualifying Signal", otherZeroGateRows.length));
+      groups.push(otherZeroGateRows.map(renderRow).join(""));
+    }
+    if (otherNotEvaluatedRows.length) {
+      groups.push(otherGroupHeaderRow("Not Evaluated", otherNotEvaluatedRows.length));
+      groups.push(otherNotEvaluatedRows.map(renderRow).join(""));
+    }
+    tbody.innerHTML = groups.join("");
+  }
+  // The static "Other Noteworthy" <h2> heading itself gets its own
+  // accurate count, kept in permanent lockstep with
+  // otherQualifyingRows.length above -- the exact same number of rows
+  // actually rendered as plain (non-grouped) rows at the top of the
+  // table this render pass, under every filter state, never a
+  // separately-derived figure that could drift from what's rendered.
+  const otherHeadingCountEl = document.getElementById("otherNoteworthyCount");
+  if (otherHeadingCountEl) otherHeadingCountEl.textContent = ` (${otherQualifyingRows.length})`;
 
   // Counts: "qualifying" (highest+other, i.e. tip_evidence.qualifies()
   // entries) is always kept distinct from "scanned" (every synthetic
   // scenario including non-qualifying controls like NADA/DRFT) -- never
-  // blur the two. When a filter is active, also show how many of the
-  // qualifying set are currently shown.
-  const totalQualifying = allHighest.length + allOther.length;
-  const totalShown = (featured ? 1 : 0) + filteredRest.length + filteredOther.length;
+  // blur the two, and never let never-evaluated placeholder rows inflate
+  // it either (qualifyingHighest/qualifyingOther still exclude them, same
+  // as before this fix). Rows actually rendered are tracked separately
+  // (totalShownAll) so the empty-state logic reflects reality -- a
+  // watchlist that's 100% never-evaluated now correctly shows its rows
+  // instead of "No tickers qualify right now." over an empty table.
+  const totalQualifying = qualifyingHighest.length + qualifyingOther.length;
+  // Round 13 item 1: this count must exclude the SAME two non-qualifying
+  // kinds qualifyingEntries() already excludes (not_evaluated AND the
+  // new zero_gate case) -- otherwise a genuinely-evaluated zero-gate
+  // ticker would inflate "N qualifying signal(s) shown" even though it
+  // is deliberately never counted as qualifying anywhere else on this
+  // page (radarSummaryCounts/the activity strip above).
+  const nonQualifyingShown = filteredOther.filter((e) => e.not_evaluated || e.zero_gate).length;
+  const totalShownQualifying = (featured ? 1 : 0) + filteredRest.length + (filteredOther.length - nonQualifyingShown);
+  const totalShownAll = (featured ? 1 : 0) + filteredRest.length + filteredOther.length;
   const countsEl = document.getElementById("radarFilterCounts");
   if (countsEl) {
     // REAL BUG FIX (2026-10-15, Priority 4): this literally said
@@ -1003,18 +1520,18 @@ function renderRadarLists(data, filters, loadTickerDetailFn) {
     // scenarios at all -- just real watchlist tickers. Mode-aware wording,
     // guarded against ReferenceError in contexts (e.g. static-demo) where
     // _currentMode is never declared.
-    const isLive = typeof _currentMode !== "undefined" && _currentMode === "live";
-    const scannedUnit = isLive ? "ticker(s) scanned" : "scenario(s) scanned (including non-qualifying controls)";
+    const c = radarSummaryCounts(data);
+    const notEvalSuffix = nonQualifyingShown > 0 ? ` (+ ${nonQualifyingShown} not yet evaluated / zero-gate)` : "";
     countsEl.textContent = (familyFilter || stateFilter)
-      ? `Showing ${totalShown} of ${totalQualifying} qualifying signal(s) after filters \u2014 ${data.scanned} ${scannedUnit}`
-      : `${totalQualifying} qualifying signal(s) shown \u2014 ${data.scanned} ${scannedUnit}`;
+      ? `Showing ${totalShownQualifying} of ${totalQualifying} qualifying signal(s) after filters${notEvalSuffix} \u2014 ${c.evaluatedCount} evaluated of ${c.watchlistCount} watchlist ticker(s)`
+      : `${totalQualifying} qualifying signal(s) shown${notEvalSuffix} \u2014 ${c.evaluatedCount} evaluated of ${c.watchlistCount} watchlist ticker(s)`;
   }
   const radarEmptyEl = document.getElementById("radarEmpty");
   if (radarEmptyEl) {
-    radarEmptyEl.textContent = (familyFilter || stateFilter) && totalQualifying > 0 && totalShown === 0
-      ? "No qualifying signals match the current filters."
+    radarEmptyEl.textContent = (familyFilter || stateFilter) && (totalQualifying > 0 || allOtherDisplay.length > 0) && totalShownAll === 0
+      ? "No signals match the current filters."
       : "No tickers qualify right now.";
-    radarEmptyEl.style.display = (totalShown === 0) ? "block" : "none";
+    radarEmptyEl.style.display = (totalShownAll === 0) ? "block" : "none";
   }
 
   wireInvestigateButtons(loadTickerDetailFn);
@@ -1022,7 +1539,7 @@ function renderRadarLists(data, filters, loadTickerDetailFn) {
     card.addEventListener("click", (ev) => {
       if (ev.target.closest("[data-investigate-ticker]")) return;
       const t = card.dataset.ticker;
-      const entry = [...allHighest, ...allOther].find((e) => e.ticker === t);
+      const entry = [...allHighestDisplay, ...allOtherDisplay].find((e) => e.ticker === t);
       if (entry) {
         const slot = document.getElementById("breakdownSlot");
         if (slot) slot.innerHTML = renderSignalBreakdown(entry);
@@ -1190,7 +1707,12 @@ function renderDiscoveryCandidateList(candidates, meta) {
   // "data as of" (UW's source date, rendered per-row above) are
   // deliberately two distinct, separately-labeled values -- see Chad's
   // item #8; this line is never implied to be the market-data date.
-  const snapshotTxt = meta && meta.snapshot_at ? `Fetched at: ${esc(meta.snapshot_at)}` : "";
+  // UX round (2026-10-16 round 5), item 3: same timefmt.js formatter as
+  // every other trader-facing timestamp -- this used to render the raw
+  // ISO-with-microseconds string straight from the API.
+  const snapshotTxt = meta && meta.snapshot_at
+    ? `Fetched at: ${esc(typeof formatTimestampFull === "function" ? formatTimestampFull(meta.snapshot_at) : meta.snapshot_at)}`
+    : "";
   const countTxt = meta ? `${esc(meta.count)} candidate(s) &middot; ranked by net premium magnitude` : "";
   // Priority 5 fix (2026-10-15 round 3): this used to say "used N screener
   // request(s)" unconditionally -- in Demo Mode (meta.source ===
@@ -1542,6 +2064,14 @@ const STATE_GLOSS = {
 
 const TRANSITION_RULE_GLOSS = {
   first_qualifying_gate: "First time this ticker qualified.",
+  no_qualifying_evidence_yet: "No qualifying signal detected yet.",
+  // Round 12 (ux-nav-watchlist-reliability): the L1 any_gate_passed guard's
+  // SECOND zero-gate reason string -- a later re-evaluation of an
+  // already-NEW ticker that again found zero qualifying gates. Means the
+  // exact same thing to a reader as no_qualifying_evidence_yet above; see
+  // isZeroGateTransitionReason() below, which is the single shared place
+  // all three visible-UI locations branch on these two reason strings.
+  no_gate_passed_remains_new: "No qualifying signal detected yet.",
   multi_signal_or_persistence_on_first_reeval: "Two+ signals fired together, or this is at least the 2nd qualifying day.",
   single_signal_reevaluated: "Still only one signal firing on re-evaluation.",
   no_gate_passed_while_building: "No gate passed this scan while still BUILDING.",
@@ -1638,10 +2168,17 @@ const EVIDENCE_PAGE_SIZE = 20;
 
 // REAL BUG FIX (2026-10-15, Chad's live-mode item #11): negative amounts
 // previously rendered as "$-78.7M" (minus sign stuck inside the dollar
-// sign) instead of standard "-$78.7M" (ASCII minus, since this file
-// already uses plain ASCII elsewhere for copy/paste-ability, e.g. in the
-// evidence table) -- the sign now applies to the whole formatted string,
-// never inside the "$".
+// sign) instead of standard "-$78.7M" -- the sign now applies to the
+// whole formatted string, never inside the "$".
+//
+// UX remediation item 4 (2026-10-16): that ASCII hyphen-minus ("-") still
+// reads ambiguously next to a currency symbol (easily mistaken for a
+// hyphen/dash rather than a minus, and some terminals/fonts render it
+// shorter than a true minus glyph) -- switched to the proper Unicode
+// MINUS SIGN (U+2212, "\u2212") per Chad's explicit requirement
+// ("-$89.2M" -> "\u2212$89.2M"). Still plain-text/copy-paste-safe (a
+// normal Unicode codepoint, not an image/icon), just the typographically
+// correct minus glyph instead of a bare hyphen standing in for one.
 function fmtMoney(v) {
   if (v == null) return null;
   const neg = v < 0;
@@ -1650,7 +2187,7 @@ function fmtMoney(v) {
   if (abs >= 1e6) body = `$${(abs / 1e6).toFixed(1)}M`;
   else if (abs >= 1e3) body = `$${(abs / 1e3).toFixed(0)}K`;
   else body = `$${Math.round(abs)}`;
-  return neg ? `-${body}` : body;
+  return neg ? `\u2212${body}` : body;
 }
 
 // REAL BUG FIX (2026-10-15, Chad's live-mode item #12): display-only
@@ -1897,23 +2434,37 @@ function mountActivityTimeline(containerId, allEvents) {
   }
 }
 
-function renderChartUnavailable(reason) {
+// D1 (ux-nav-watchlist-reliability round 9): honest empty-cache state +
+// an obvious "Load Chart Data" action, rather than a dead-end message.
+// `opts.showLoadButton` is true only when the caller (app.live.js, a real
+// backend) has a real authenticated POST /api/ticker/{t}/ohlc/refresh to
+// wire the button to -- the static demo (zero backend) never sets it, so
+// it still gets the plain honest message with no button that would 404.
+// This function still makes zero fetch() calls itself (the click handler
+// is wired by the caller after this HTML lands in the DOM), consistent
+// with the rest of this file's "no fetch() here" rule.
+function renderChartUnavailable(reason, opts = {}) {
   const detail = reason && reason.message ? reason.message
     : reason && reason.status ? `UW status: ${reason.status}`
     : "No OHLC data available for this ticker in the current mode.";
-  return `<div class="chart-unavailable">Chart data unavailable &mdash; ${esc(detail)}</div>`;
+  const btn = opts.showLoadButton
+    ? `<div style="margin-top:10px"><button id="loadChartDataBtn" type="button" class="btn-refresh">Load Chart Data</button>
+        <div id="loadChartDataStatus" class="muted" style="margin-top:6px;font-size:11px"></div></div>`
+    : "";
+  return `<div class="chart-unavailable">No chart data cached yet for this ticker &mdash; ${esc(detail)}${btn}</div>`;
 }
 
 // Mounts (or re-renders, if called again) a candlestick chart with
 // evidence markers into the DOM node with id `containerId`. `ohlc` is the
 // exact shape returned by /api/ticker/{t}/ohlc (live) or
 // data/ohlc/{t}.json (static demo) -- see backend/app/core/candles.py.
-function mountCandlestickChart(containerId, ohlc) {
+// `opts.showLoadButton`: see renderChartUnavailable above.
+function mountCandlestickChart(containerId, ohlc, opts = {}) {
   const root = document.getElementById(containerId);
   if (!root) return;
 
   if (!ohlc || ohlc.unavailable || !ohlc.candles || !ohlc.candles.length) {
-    root.innerHTML = renderChartUnavailable(ohlc ? ohlc.reason : null);
+    root.innerHTML = renderChartUnavailable(ohlc ? ohlc.reason : null, opts);
     return;
   }
   if (typeof LightweightCharts === "undefined") {
@@ -2091,8 +2642,33 @@ function mountCandlestickChart(containerId, ohlc) {
 // Renders ONE raw history entry's full detail row -- used ONLY inside the
 // bounded-height expandable <details> panel below, never directly in the
 // main page flow regardless of how long `entries` is.
+// Round 12 (ux-nav-watchlist-reliability): the backend's determine_transition
+// (signal_engine.py, unchanged this round) can emit TWO separate reason
+// strings for a zero-qualifying-gate case: no_qualifying_evidence_yet (the
+// very first evaluation of a ticker) and no_gate_passed_remains_new (the
+// L1 any_gate_passed guard's case -- a LATER re-evaluation of an
+// already-NEW ticker that again found zero gates). Both mean exactly the
+// same thing to a reader -- "nothing is actually qualifying" -- and prior
+// rounds (P0/D2/P3/P5) only ever checked the first string, so the second
+// one fell through to the generic STATE_GLOSS["NEW"] ("just started
+// qualifying") / the backend's raw headline in all three visible
+// locations below. This is the SINGLE shared predicate every one of those
+// locations (primaryTickerHeadline, primaryStateGloss, historyEntryGloss)
+// now branches on, so the "is this a zero-gate case" check is defined
+// exactly once and can never drift between call sites again.
+function isZeroGateTransitionReason(reason) {
+  return reason === "no_qualifying_evidence_yet" || reason === "no_gate_passed_remains_new";
+}
+
+function historyEntryGloss(e) {
+  if (e && isZeroGateTransitionReason(e.transition_rule)) {
+    return "no qualifying evidence yet";
+  }
+  return STATE_GLOSS[e && e.state] || "";
+}
+
 function renderRawHistoryStep(e, i, entries) {
-  const gloss = STATE_GLOSS[e.state] || "";
+  const gloss = historyEntryGloss(e);
   const prev = i > 0 ? entries[i - 1].state : null;
   const changed = prev && prev !== e.state;
   return `
@@ -2130,7 +2706,7 @@ function renderLifecycleTimeline(history, currentState) {
   }
   if (entries.length === 1) {
     const e = entries[0];
-    const gloss = STATE_GLOSS[e.state] || "";
+    const gloss = historyEntryGloss(e);
     return `
       <div class="card timeline-card">
         <div class="card-head"><strong>Signal Lifecycle</strong>
@@ -2185,30 +2761,144 @@ function renderLifecycleTimeline(history, currentState) {
 // fix requested here -- a scan that left the state unchanged shows
 // "Status: Still X" instead of the confusing "Transition: X -> X". Purely
 // presentation: does not touch what previous_state/state actually are.
+// Round 14 item 2 follow-on: when this ticker has genuinely never been
+// evaluated, BOTH previousState and state are honestly null/undefined
+// (see backend/app/main.py's _not_evaluated_ticker_analysis_response
+// fix) -- without this guard the first branch below would render the
+// literal, nonsensical string "Initial detection: null". Never invents
+// a state; just states plainly that there is none yet.
 function transitionLabel(previousState, state) {
+  if (!state) return "No evaluation recorded yet.";
   if (!previousState) return `Initial detection: ${state}`;
   if (previousState === state) return `Status: Still ${state}`;
   return `Transition: ${previousState} \u2192 ${state}`;
 }
 
+// D2 (ux-nav-watchlist-reliability round 9): the backend's honest
+// no_qualifying_evidence_yet reason string (from signal_engine's
+// determine_transition, unchanged this round) was reaching the
+// TRANSITION_RULE_GLOSS map and being correctly glossed, but that gloss
+// was only ever read inside the bottom "Developer / Debug" <details>
+// panel (renderRawDataSummary) -- the PRIMARY visible headline in the
+// header card still showed the backend's generic tip_evidence.headline()
+// text (e.g. "Unusual activity") alongside the state-gloss tag's "(just
+// started qualifying)", which together read as if qualification had
+// happened. This computes the actual primary-visible headline, genuinely
+// branching on d.transition_rule (not guessing from d.state), and is
+// used in place of the raw backend headline for this one specific case
+// only -- every other transition_rule keeps the backend's own headline
+// untouched, no lifecycle-state/confidence/CONFIRMED logic changed.
+function primaryTickerHeadline(d) {
+  if (isZeroGateTransitionReason(d.transition_rule)) {
+    return "No qualifying signal detected yet.";
+  }
+  return d.headline;
+}
+
+// P3 fix (ux-nav-watchlist-reliability round 10): a SECOND, separate
+// display location for the same zero-gate dishonesty the headline fix
+// (primaryTickerHeadline above) already fixed two rounds ago. This
+// badge/pill sits right next to the state tag in the header card
+// (renderTickerDetail below) and used to be `STATE_GLOSS[d.state]`
+// unconditionally -- keyed ONLY off the lifecycle state, never the
+// transition reason. signal_engine.py's determine_transition can
+// return state=NEW for TWO genuinely different reasons (see its
+// `current_state is None` branch): any_gate_passed=True ->
+// transition_rule="first_qualifying_gate" (a real qualifying signal
+// just fired), or any_gate_passed=False ->
+// transition_rule="no_qualifying_evidence_yet" (zero gates passed --
+// nothing is actually qualifying). STATE_GLOSS["NEW"] is "just started
+// qualifying", which is only true for the first case; for the second,
+// zero-gate case it directly contradicts the already-fixed headline
+// right above it ("No qualifying signal detected yet.") on the exact
+// same page. Mirrors primaryTickerHeadline's own branch on
+// d.transition_rule (never on state alone) so the two visible strings
+// can never disagree again -- no signal_engine.py/lifecycle-state/
+// threshold change, pure frontend display-layer fix, same as the
+// headline fix it extends.
+function primaryStateGloss(d) {
+  if (isZeroGateTransitionReason(d.transition_rule)) {
+    return "no qualifying evidence yet";
+  }
+  return STATE_GLOSS[d.state] || "";
+}
+
+// Round 13 item 3: a THIRD, previously-unfound display location for the
+// same zero-gate dishonesty primaryTickerHeadline/primaryStateGloss
+// already fixed two/three rounds ago -- this one is the results/
+// activity-summary line directly below the primary headline in the
+// Ticker Analysis header card (renderTickerDetail below), which used to
+// render the backend's raw tip_evidence.current_read() narrative
+// unconditionally (e.g. "Unusual activity; stock little changed." for
+// ARTNA/MSEX with zero qualifying gates -- a backend-generated but
+// genuinely misleading sentence for this specific case, same class of
+// bug as the headline fix, just a different generator function and a
+// different call site). Reuses the EXISTING shared
+// isZeroGateTransitionReason predicate (no new/fourth check) -- when
+// true, substitutes one honest, neutral sentence; every other
+// transition_rule keeps the backend's own current_read untouched, same
+// pattern as primaryTickerHeadline/primaryStateGloss. Pure frontend
+// text-generation fix -- no signal_engine.py/lifecycle-state change.
+function primaryCurrentRead(d) {
+  if (isZeroGateTransitionReason(d.transition_rule)) {
+    return "No qualifying signal detected -- this scan found zero qualifying gates for this ticker.";
+  }
+  return d.current_read;
+}
+
+// Round 14 item 2: a never-evaluated ticker (no cataloged evaluation at
+// all -- backend/app/main.py's _not_evaluated_ticker_analysis_response,
+// now fixed to report `state: null`/`not_evaluated: true` instead of
+// faking `state: "NEW"`) must not render the lifecycle state badge at
+// all -- "NEW (just started qualifying)" directly contradicted this
+// same header card's own "Not yet evaluated" freshness text for the
+// exact same ticker. Distinct from the zero-gate case (primaryStateGloss
+// above): that is a ticker genuinely evaluated this scan with zero
+// qualifying gates, which keeps its real state tag plus the honest
+// "(no qualifying evidence yet)" gloss -- never evaluated at all is a
+// THIRD, different state that gets its own neutral badge, reusing the
+// SAME isNotEvaluated predicate the Market Radar grid's stateTagHtml
+// already uses, never a fourth ad-hoc check.
+function primaryStateBadgeHtml(d) {
+  if (isNotEvaluated(d)) {
+    return `<span class="tag state-unevaluated" title="This ticker has never been evaluated -- no real signal-detection scan has run for it yet.">Not evaluated</span>`;
+  }
+  const stateGloss = primaryStateGloss(d);
+  return `<span class="tag state-${esc(d.state)}">${esc(d.state)}</span>${stateGloss ? ` <span class="muted state-gloss">(${esc(stateGloss)})</span>` : ""}`;
+}
+
 function renderTickerDetail(d) {
   const gatesHtml = renderGateGroups(d.gates);
-  const stateGloss = STATE_GLOSS[d.state] || "";
   const ruleGloss = TRANSITION_RULE_GLOSS[d.transition_rule] || "internal rule identifier";
+  const primaryHeadline = primaryTickerHeadline(d);
   const timelineHtml = renderLifecycleTimeline(d.history, d.state);
+  // W2-b (2026-10-16): honest cache-vs-fresh disclosure, same freshness-
+  // badge pattern already established for My Watchlist -- reuses
+  // frontend/timefmt.js, never a raw ISO string. `served_from_cache`/
+  // `eval_freshness`/`last_evaluated_at` only exist on a real
+  // LiveUWAdapter response; Demo Mode responses omit them (always
+  // fresh by construction), so this block degrades to nothing there.
+  const hasFreshnessInfo = d.eval_freshness !== undefined && d.eval_freshness !== null;
+  const freshnessHtml = hasFreshnessInfo
+    ? `<div class="tags">
+        <span class="tag freshness-${esc(d.eval_freshness)}">${esc(FRESHNESS_LABELS[d.eval_freshness] || d.eval_freshness)}</span>
+        <span class="muted">${d.last_evaluated_at && typeof formatTimestampET === "function" ? `Last evaluated: ${esc(formatTimestampET(d.last_evaluated_at))}` : "Not yet evaluated"}</span>
+        <button id="tickerRefreshBtn" type="button" class="btn-refresh" title="Re-runs signal detection (the gates/state above) for this ticker only. Does NOT refresh the price chart -- use the chart panel's own Load Chart Data / range buttons for that.">Refresh this ticker (signal only)</button>
+      </div>`
+    : "";
   return `
     <div class="card ticker-header-card">
       <div class="card-head"><span class="tk tk-lg">${esc(d.ticker)}</span>
-        <span class="tag state-${esc(d.state)}">${esc(d.state)}</span>
-        ${stateGloss ? `<span class="muted state-gloss">(${esc(stateGloss)})</span>` : ""}
+        ${primaryStateBadgeHtml(d)}
       </div>
+      ${freshnessHtml}
       <div class="tags">
         <span class="tag">confidence: ${esc(d.confidence)}</span>
         <span class="tag">${esc(d.signal_type)}</span>
         <span class="tag">qualifying days: ${d.qualifying_days_count}</span>
       </div>
-      <div class="read">${esc(d.headline)}</div>
-      <div class="read">${esc(d.current_read)}</div>
+      <div class="read primary-headline" id="tickerPrimaryHeadline">${esc(primaryHeadline)}</div>
+      <div class="read">${esc(primaryCurrentRead(d))}</div>
       <div class="read">${esc(transitionLabel(d.previous_state, d.state))}</div>
       <div class="read">Confidence reason: ${esc(d.confidence_reason)}</div>
     </div>
@@ -2738,7 +3428,7 @@ function renderSettingsView(d) {
 // Market Radar right now" were the same thing. They are not -- this is
 // the SAVED configuration that becomes active watchlist scanning only
 // once you switch to Live Mode in Settings.
-function renderWatchlistEditor(d) {
+function renderWatchlistEditor(d, opts = {}) {
   const publicDemo = !!d.public_demo;
   if (publicDemo) return "";
   const watchlist = d.watchlist || { tickers: [], max_size: 20 };
@@ -2751,8 +3441,24 @@ function renderWatchlistEditor(d) {
         your Live-Mode watchlist configuration now so it's ready the moment you switch to Live Mode in Settings --
         it has no effect on what Demo Mode's Market Radar displays.</p>`
     : "";
+  // W1 FIX (real bug: add a ticker, immediately click its new chip's x
+  // remove button -- nothing happens; a refresh "fixes" it): this
+  // <details> was rebuilt from scratch via wlRoot.innerHTML on EVERY
+  // add/remove save (see loadSettings() in app.live.js), which, with no
+  // `open` attribute in this template, silently collapsed the editor
+  // back closed every single time regardless of whether the user had
+  // it expanded -- so a click on the just-rendered remove button that
+  // landed a moment after that re-render hit a now-hidden/closed
+  // <details>, not the control the user saw. The fix is for the CALLER
+  // to read the current <details>'s real open/closed state BEFORE
+  // replacing the DOM and pass it back in here as `opts.open`, so the
+  // editor's expand/collapse state survives every save, exactly like a
+  // real production-grade editor (never collapses itself out from under
+  // an in-progress interaction). See initWatchlistEditor()/app.live.js's
+  // render call site for where `opts.open` is captured and passed.
+  const openAttr = opts.open ? " open" : "";
   return `
-    <details class="settings-card watchlist-editor-compact" id="watchlistEditorCard">
+    <details class="settings-card watchlist-editor-compact" id="watchlistEditorCard"${openAttr}>
       <summary class="watchlist-editor-summary">
         <strong>My Watchlist</strong>
         <span class="muted">${count}/${watchlist.max_size} tickers${count ? " \u2014 " + esc(preview) : " (" + preview + ")"}${isDemo ? " \u00b7 saved for Live Mode" : ""}</span>

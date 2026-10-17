@@ -24,7 +24,7 @@ const BASE = process.argv[2] || "http://127.0.0.1:8899";
 
 // --- minimal DOM stub (same shape as test_manual_bugfixes.mjs) ---------
 class FakeEl {
-  constructor(id) { this.id = id; this._html = ""; this._value = ""; this._style = {}; this.listeners = {}; }
+  constructor(id) { this.id = id; this._html = ""; this._value = ""; this._style = {}; this.listeners = {}; this.dataset = {}; }
   set innerHTML(v) { this._html = v; }
   get innerHTML() { return this._html; }
   set value(v) { this._value = v; }
@@ -158,7 +158,7 @@ async function main() {
     [
       "navigateToView", "navigateToTicker", "TIP_STATE", "parseNavHash",
       "loadRadar", "loadTickerDetail", "setMode", "loadSettings",
-      "wireHistoryHandling", "applyNavState",
+      "wireHistoryHandling", "applyNavState", "setRadarMode",
     ],
   );
 
@@ -214,6 +214,25 @@ async function main() {
     assert.equal(app.TIP_STATE.currentView, "settings");
   });
 
+  console.log(`\n=== UX remediation item 4: nav-item click back to Ticker Analysis preserves the ticker ===`);
+  // The real gap this item fixes: NOT Back/Forward (already proven
+  // above, since that replays the real stored history entry) -- clicking
+  // the "Ticker Analysis" NAV ITEM again after navigating away via OTHER
+  // nav-item clicks, which is a distinct code path (navigateToView with
+  // no explicit ticker argument).
+  app.navigateToView("radar");
+  await app.navigateToTicker("NADA", app.loadTickerDetail);
+  app.navigateToView("settings"); // away via nav-item click, not Back
+  check("navigating away via a nav-item click nulls currentTicker (view-scoped state, expected)", () => {
+    assert.equal(app.TIP_STATE.currentTicker, null);
+  });
+  app.navigateToView("radar"); // another unrelated view in between
+  app.navigateToView("ticker"); // nav-item click back to Ticker Analysis, no explicit ticker
+  check("clicking the Ticker Analysis nav item again restores the real last ticker (NADA), not a blank state", () => {
+    assert.equal(app.TIP_STATE.currentTicker, "NADA");
+    assert.ok(global.location.hash.includes("ticker=NADA"), global.location.hash);
+  });
+
   console.log(`\n=== Refresh preserves current view + ticker ===`);
   // "Refresh" = re-running applyNavState from the CURRENT location.hash,
   // exactly what bootstrap() does on a real page load -- it must NOT
@@ -246,7 +265,12 @@ async function main() {
   console.log(`\n=== Legacy bare #ticker=XXX hash still works ===`);
   const legacyState = app.parseNavHash("#ticker=DRFT");
   check("legacy format parses as view=ticker", () => {
-    assert.deepEqual(legacyState, { view: "ticker", ticker: "DRFT" });
+    // UX round (2026-10-16 round 5), item 2: parseNavHash now also
+    // reports `mode` (My Watchlist vs Market Discovery sub-panel,
+    // only ever meaningful on view="radar") on every return path, so a
+    // legacy ticker-only hash's `mode` is honestly null here, not
+    // omitted -- a real, intentional shape addition, not a regression.
+    assert.deepEqual(legacyState, { view: "ticker", ticker: "DRFT", mode: null });
   });
 
   console.log(`\n=== Invalid ticker in URL falls back gracefully ===`);
@@ -282,6 +306,36 @@ async function main() {
     // entry, so Back goes straight to that earlier plain radar entry, never
     // back into ticker=FLUX.
     assert.ok(!global.location.hash.includes("ticker=FLUX"), global.location.hash);
+  });
+
+  console.log(`\n=== UX round (2026-10-16 round 5), item 2: Discovery sub-view survives F5 ===`);
+  // Simulate switching to the Market Discovery sub-panel (as the real
+  // toggle button's click handler does via setRadarMode), capture the
+  // resulting hash (what an F5 refresh would re-parse), then simulate a
+  // fresh load exactly like the earlier "refresh preserves ticker" check
+  // above does.
+  app.setRadarMode("discovery");
+  check("switching to Discovery mode is reflected in the URL hash", () => {
+    assert.ok(global.location.hash.includes("mode=discovery"), global.location.hash);
+  });
+  const hashAtDiscoveryRefreshTime = global.location.hash;
+  const discoveryRefreshState = app.parseNavHash(hashAtDiscoveryRefreshTime);
+  check("parseNavHash reports mode=discovery from that hash", () => {
+    assert.equal(discoveryRefreshState.mode, "discovery");
+  });
+  app.setRadarMode("watchlist", { persist: false }); // simulate a fresh load's default before restore runs
+  app.applyNavState(discoveryRefreshState, global.window.TIP_NAV_HANDLERS, { push: false });
+  check("restoring that hash lands back on the Discovery sub-panel, not the My Watchlist default", () => {
+    assert.equal(el("discoveryRadarSection").style.display, "");
+    assert.equal(el("watchlistRadarSection").style.display, "none");
+  });
+  // Switching back to watchlist must drop `mode` from the hash entirely
+  // (watchlist is the unmarked default -- never an explicit `mode=watchlist`
+  // the way `mode=discovery` is explicit, matching the rest of this hash
+  // scheme's convention of only encoding non-default state).
+  app.setRadarMode("watchlist");
+  check("switching back to My Watchlist removes mode from the hash", () => {
+    assert.ok(!global.location.hash.includes("mode="), global.location.hash);
   });
 
   console.log(`\n${passed} check(s) passed.`);

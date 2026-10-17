@@ -17,6 +17,17 @@ def _catalog(tmp_path):
     return IngestionCatalog(str(tmp_path / "catalog.db"))
 
 
+
+
+def test_signal_evaluation_history_exposes_each_stored_transition_rule_read_only(tmp_path):
+    cat = _catalog(tmp_path)
+    cat.catalog_signal_evaluation("NVDA", {"state": "NEW", "confidence": "low", "transition_rule": "no_qualifying_evidence_yet"}, retrieved_at="2026-10-14T12:00:00Z")
+    cat.catalog_signal_evaluation("NVDA", {"state": "BUILDING", "confidence": "medium", "transition_rule": "new_independent_signal"}, retrieved_at="2026-10-15T12:00:00Z")
+    assert [e["transition_rule"] for e in cat.list_signal_evaluation_rules("NVDA")] == [
+        "no_qualifying_evidence_yet", "new_independent_signal"
+    ]
+
+
 def test_catalog_options_flow_dedupes_by_explicit_id(tmp_path):
     cat = _catalog(tmp_path)
     alert = {"id": "abc123", "created_at": "2026-10-15T14:00:00Z", "total_premium": 1_000_000}

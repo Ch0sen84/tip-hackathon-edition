@@ -226,6 +226,68 @@ class IngestionCatalog:
             conn.commit()
         return inserted
 
+    # --- S1-b fix (2026-10-16): read-only cache accessors for the OHLC
+    # route's GET path -- mirror catalog_price_bars/catalog_options_flow_
+    # observations/catalog_darkpool_observations exactly (same tables,
+    # same shapes), so GET /api/ticker/{ticker}/ohlc can be made
+    # structurally read-only without inventing a second storage layer.
+    # These never write anything.
+
+    def get_cached_price_bars(self, ticker: str, timeframe: str, limit: Optional[int] = None) -> list[dict]:
+        """Real cataloged candles for (ticker, timeframe), chronological
+        (ASC). When more than `limit` rows exist, returns the most
+        RECENT `limit` (mirrors how a live fetch's own `limit` behaves --
+        "give me the most recent N bars"), never an arbitrary slice."""
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT event_time, open, high, low, close, volume FROM price_bars "
+                "WHERE ticker = ? AND timeframe = ? ORDER BY event_time ASC",
+                (ticker, timeframe),
+            ).fetchall()
+        bars = [
+            {"t": r[0], "o": r[1], "h": r[2], "l": r[3], "c": r[4], "v": r[5]}
+            for r in rows
+        ]
+        if limit is not None and len(bars) > limit:
+            bars = bars[-limit:]
+        return bars
+
+    def get_cached_flow_observations(self, ticker: str) -> list[dict]:
+        """Every real cataloged options-flow-alert raw_json for `ticker`,
+        deserialized back to the exact normalized dict shape
+        catalog_options_flow_observations was given -- the same shape
+        `build_markers` already consumes from a live fetch."""
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT raw_json FROM options_flow_observations WHERE ticker = ? ORDER BY event_time ASC",
+                (ticker,),
+            ).fetchall()
+        return [json.loads(r[0]) for r in rows if r[0]]
+
+    def get_cached_darkpool_observations(self, ticker: str) -> list[dict]:
+        """Every real cataloged dark-pool-trade raw_json for `ticker`,
+        same shape contract as get_cached_flow_observations above."""
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT raw_json FROM darkpool_observations WHERE ticker = ? ORDER BY event_time ASC",
+                (ticker,),
+            ).fetchall()
+        return [json.loads(r[0]) for r in rows if r[0]]
+
+    def get_price_bars_cached_at(self, ticker: str, timeframe: str) -> Optional[str]:
+        """Most recent REAL retrieved_at among this ticker/timeframe's
+        cataloged price bars -- lets a cache-only response honestly
+        disclose how stale its chart data is, instead of ever implying
+        the read itself refreshed anything (see should_refetch's
+        docstring for the sibling freshness-decision use of this same
+        column; this is a plain disclosure read, not a refetch decision)."""
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT MAX(retrieved_at) FROM price_bars WHERE ticker = ? AND timeframe = ?",
+                (ticker, timeframe),
+            ).fetchone()
+        return row[0] if row and row[0] else None
+
     def catalog_discovery_snapshot(
         self, filters: dict, candidates: Iterable[dict], snapshot_at: str,
         kind: str = ON_DEMAND,
@@ -526,6 +588,31 @@ class IngestionCatalog:
     # separate source-tracking column needed. See
     # core/scheduler_freshness.py for the classification built on top of
     # this.
+
+    def list_signal_evaluation_rules(self, ticker: str) -> list[dict]:
+        """Read historical display metadata from existing evaluation JSON.
+
+        This is read-only: no schema or stored record is modified. The catalog
+        already persists each scan's exact transition_rule in raw_json.
+        """
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT event_time, state, raw_json FROM signal_evaluations "
+                "WHERE ticker = ? ORDER BY retrieved_at ASC, id ASC",
+                (ticker,),
+            ).fetchall()
+        result = []
+        for event_time, state, raw_json in rows:
+            try:
+                raw = json.loads(raw_json) if raw_json else {}
+            except (json.JSONDecodeError, TypeError):
+                raw = {}
+            result.append({
+                "event_time": event_time,
+                "state": state,
+                "transition_rule": raw.get("transition_rule"),
+            })
+        return result
 
     def get_latest_signal_evaluation(self, ticker: str) -> Optional[dict]:
         with self._conn() as conn:

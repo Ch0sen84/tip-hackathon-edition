@@ -26,12 +26,70 @@ async function check_async(name, fn) {
 }
 
 function loadCoreOnly() {
+  // formatTimestampFull/formatTimestampET/formatRelative live in the
+  // separate, shared frontend/timefmt.js (loaded before app.core.js in
+  // every real page, see index.html) -- loaded here too so the render
+  // functions under test see the exact same globals they do in the
+  // browser, not a second/duplicate formatter.
+  const timefmtSrc = fs.readFileSync(fileURLToPath(new URL("./timefmt.js", import.meta.url)), "utf8");
   const coreSrc = fs.readFileSync(fileURLToPath(new URL("./app.core.js", import.meta.url)), "utf8");
-  (0, eval)(coreSrc + `
+  (0, eval)(timefmtSrc + coreSrc + `
 globalThis.__exports = {
-  renderSchedulerControls, renderMarketWideCandidateRow, renderMarketWideRadar,
+  renderSchedulerControls, renderMarketWideCandidateRow, renderMarketWideRadar, renderWhySurfacedBlock,
+  formatTimestampFull,
 };`);
   return globalThis.__exports;
+}
+
+// UX round (2026-10-16 round 5), item 1: the new "View Details" action +
+// "Why TIP surfaced this" evidence block on each Market Intelligence row.
+console.log("\n=== renderMarketWideCandidateRow: View Details + Why Surfaced (item 1) ===");
+{
+  const { renderMarketWideCandidateRow, renderWhySurfacedBlock } = loadCoreOnly();
+  check("row renders a View Details action wired to the SAME data-investigate-ticker attribute Market Radar uses", () => {
+    const html = renderMarketWideCandidateRow({ ticker: "NVDA", freshness: "current", evaluation: null, age_s: null, raw: null });
+    assert.match(html, /data-investigate-ticker="NVDA"/);
+    assert.match(html, /View Details/);
+  });
+  check("Why Surfaced: a real net_premium/call_volume/etc. value renders as itself, not a placeholder", () => {
+    const html = renderWhySurfacedBlock({ raw: { net_premium: 5_000_000, call_volume: 1200, put_volume: 300, iv_rank: 62.4, change_percent: 3.1, source_date: "2026-10-16" } });
+    assert.match(html, /Net premium/);
+    // D3 fix (ux-nav-watchlist-reliability round 9): Net premium now
+    // uses the SAME fmtMoney() helper as the rest of the app (abbreviated
+    // magnitude + proper Unicode minus for negatives), not a raw
+    // unabbreviated "$5,000,000" -- see fmtMoney()'s own module comment
+    // and test_d3_why_surfaced_money.mjs for the full writeup of the
+    // real negative-premium display bug this closes.
+    assert.match(html, /\$5\.0M/);
+    assert.doesNotMatch(html, /\$5,000,000/);
+    assert.doesNotMatch(html, /not captured/);
+  });
+  check("Why Surfaced: a genuinely real ZERO value (checked, found nothing) renders as '0', never blank/placeholder", () => {
+    const html = renderWhySurfacedBlock({ raw: { net_premium: 0, call_volume: 0, put_volume: 0, iv_rank: null, change_percent: null } });
+    // put_volume: 0 is a REAL checked-and-found-zero value -- must render
+    // the actual digit, not the "not captured" wording used for a truly
+    // missing field.
+    assert.match(html, /Put volume: <strong>0<\/strong>/);
+  });
+  check("Why Surfaced: a missing/None field renders VISIBLY DIFFERENT text+class than a real zero", () => {
+    const html = renderWhySurfacedBlock({ raw: { net_premium: null, call_volume: 10, put_volume: 0, iv_rank: null, change_percent: null } });
+    assert.match(html, /px-unavailable">not captured/); // net_premium: missing -> distinct class+wording
+    assert.match(html, /Put volume: <strong>0<\/strong>/); // put_volume: real zero -> plain value, no px-unavailable class
+  });
+  check("Why Surfaced: entirely absent raw_json is itself distinct wording from any per-field placeholder", () => {
+    const html = renderWhySurfacedBlock({ raw: null });
+    assert.match(html, /no discovery details were captured for this snapshot/);
+  });
+}
+
+console.log("\n=== Market Intelligence timestamp cleanup (item 3) ===");
+{
+  const { formatTimestampFull } = loadCoreOnly();
+  check("formatTimestampFull never renders a raw ISO-with-microseconds string", () => {
+    const out = formatTimestampFull("2026-10-16T14:53:37.980307+00:00");
+    assert.doesNotMatch(out, /980307/);
+    assert.doesNotMatch(out, /^\d{4}-\d{2}-\d{2}T/);
+  });
 }
 
 console.log("\n=== renderSchedulerControls ===");
@@ -79,6 +137,23 @@ console.log("\n=== renderMarketWideCandidateRow / renderMarketWideRadar ===");
     const html = renderMarketWideCandidateRow({ ticker: "SPY", freshness: "unevaluated", evaluation: null, age_s: null });
     assert.match(html, /freshness-badge freshness-unevaluated/);
     assert.match(html, /no evaluation yet/);
+  });
+  check("UX remediation item 4: an index/derivative row suppresses View Details", () => {
+    const html = renderMarketWideCandidateRow({
+      ticker: "SPXW", freshness: "unevaluated", evaluation: null, age_s: null,
+      raw: { is_index: true },
+    });
+    assert.doesNotMatch(html, /data-investigate-ticker="SPXW"/);
+    assert.doesNotMatch(html, /View Details/);
+    assert.match(html, /Not supported \(index\/derivative\)/);
+  });
+  check("UX remediation item 4: a non-index row still shows View Details as before", () => {
+    const html = renderMarketWideCandidateRow({
+      ticker: "NVDA", freshness: "unevaluated", evaluation: null, age_s: null,
+      raw: { is_index: false },
+    });
+    assert.match(html, /data-investigate-ticker="NVDA"/);
+    assert.match(html, /View Details/);
   });
   check("empty candidate list renders an honest note, never fabricated rows", () => {
     const html = renderMarketWideRadar({ candidates: [], note: "No discovery snapshot cataloged yet." });

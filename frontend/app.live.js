@@ -334,11 +334,9 @@ async function loadRadar() {
     // never implies broader-market discovery that isn't happening, and
     // states plainly when this scan actually ran (persisted server-side,
     // survives container recreation -- see settings_store.record_scan()).
-    const scopeLabel = data.scan_scope === "watchlist" ? "watchlist scan" : data.scan_scope || "scan";
-    statusEl.textContent =
-      `${scopeLabel}: ${data.scanned} ticker(s) · ${data.highest.length} highest attention · ` +
-      `${data.other.length} other · last scanned ${formatAgo(data.last_scan_at)}`;
+    statusEl.textContent = renderRadarStatus(data);
     document.getElementById("activityStrip").innerHTML = renderActivitySummary(data);
+    updateRadarRefreshDataButtonVisibility();
 
     // 2026-10-15 fix: renderFeaturedArea() (app.core.js) now owns the
     // Featured Signal heading + hero/breakdown grid + compact-notice
@@ -422,13 +420,23 @@ function setChartRange(range) {
 // discloses when UW doesn't have that much real history for this
 // ticker (range_fully_satisfied/available_span_days) instead of ever
 // implying full coverage it doesn't have.
+// D1 (ux-nav-watchlist-reliability round 9): guards against duplicate
+// simultaneous "Load Chart Data" clicks client-side; the server-side
+// _ticker_ohlc_refresh_lock (409 on a second concurrent call) is the REAL
+// protection, this is just a fast, cheap UX guard so a double-click
+// doesn't even issue a second request.
+let _chartLoadInFlight = false;
+
 async function loadOhlcChart(ticker, range, mySeq) {
   const noteEl = document.getElementById("chartRangeNote");
   try {
+    // S1-b-compliant: this is the cache-only GET -- zero outbound UW
+    // calls, zero writes, called on every ordinary load/F5/navigation/
+    // range click. It must NEVER be upgraded to the refresh route here.
     const ohlc = await apiGet(`/api/ticker/${encodeURIComponent(ticker)}/ohlc?range=${encodeURIComponent(range)}`);
     if (mySeq !== _navSeq) return;
-    mountCandlestickChart("ohlcChartContainer", ohlc);
-    if (!noteEl) return;
+    mountCandlestickChart("ohlcChartContainer", ohlc, { showLoadButton: true });
+    if (!noteEl) { wireLoadChartDataButton(ticker, range, mySeq); return; }
     const unit = range === "1D" ? "5-minute bar(s)" : "trading day(s)";
     // 2026-10-15 (Chad's item #4): real raw-record disclosure, not just
     // the final candle count -- lets you verify (not just trust) the
@@ -438,12 +446,32 @@ async function loadOhlcChart(ticker, range, mySeq) {
         `${ohlc.regular_session_records_retained} retained]`
       : "";
     if (ohlc.unavailable || !ohlc.candle_count) {
-      noteEl.textContent = "";
+      noteEl.innerHTML = "";
     } else if (ohlc.range_fully_satisfied === false) {
-      noteEl.textContent =
-        `${range} requested \u00b7 only ${ohlc.candle_count} ${unit} of real history available` +
-        `${range !== "1D" && ohlc.available_span_days != null ? ` (~${ohlc.available_span_days} calendar days)` : ""} -- ` +
-        `showing everything UW has for ${esc(ticker)}, not padded to the full requested range.${rawNote}`;
+      // P2 fix (ux-nav-watchlist-reliability round 10): the real bug
+      // Claude's retest found -- this GET is cache-only (see
+      // _ticker_ohlc_impl's S1-b comment), so it has verified NOTHING
+      // about what UW itself could provide upstream; the previous
+      // wording ("showing everything UW has for TICKER") asserted an
+      // upstream fact this read never checked. Rephrased to say exactly
+      // what IS verified (what's cached locally, with its own real
+      // date bounds) versus what is NOT verified (whether UW has more
+      // -- that can only be learned by actually calling the protected
+      // refresh route), and a real "Load more" action that calls that
+      // SAME existing POST /api/ticker/{ticker}/ohlc/refresh route
+      // (never a new endpoint, never a silent/automatic fetch).
+      const spanNote = (range !== "1D" && ohlc.available_span_days != null)
+        ? ` spanning ~${ohlc.available_span_days} calendar day(s)`
+        : "";
+      const boundsNote = (ohlc.earliest_candle && ohlc.latest_candle)
+        ? ` (${esc(String(ohlc.earliest_candle))} \u2192 ${esc(String(ohlc.latest_candle))})`
+        : "";
+      noteEl.innerHTML =
+        `<span>${esc(range)} requested \u00b7 only ${ohlc.candle_count} ${unit} cached locally${spanNote}${boundsNote} -- ` +
+        `this is what's cached, not a confirmed upstream limit for ${esc(ticker)}; UW may have more.${esc(rawNote)}</span>` +
+        `<div style="margin-top:6px"><button id="loadMoreChartDataBtn" type="button" class="btn-refresh">` +
+        `Load more (fetch real ${esc(range)} data from UW)</button>` +
+        `<div id="loadMoreChartDataStatus" class="muted" style="margin-top:6px;font-size:11px"></div></div>`;
     } else {
       const negNote = ohlc.negative_volume_bars_clamped
         ? ` \u00b7 ${ohlc.negative_volume_bars_clamped} bar(s) had an upstream negative-volume artifact (clamped to 0 for display)`
@@ -451,21 +479,162 @@ async function loadOhlcChart(ticker, range, mySeq) {
       const kind = range === "1D" ? "5-minute candles (pre/regular/post-market)" : "daily candles";
       noteEl.textContent = `${range} \u00b7 ${ohlc.candle_count} ${kind}${negNote}${rawNote}`;
     }
+    wireLoadChartDataButton(ticker, range, mySeq);
+    wireLoadMoreChartDataButton(ticker, range, mySeq);
   } catch (chartErr) {
     if (mySeq !== _navSeq) return;
-    mountCandlestickChart("ohlcChartContainer", { unavailable: true, reason: { message: chartErr.message } });
-    if (noteEl) noteEl.textContent = "";
+    mountCandlestickChart("ohlcChartContainer", { unavailable: true, reason: { message: chartErr.message } }, { showLoadButton: true });
+    wireLoadChartDataButton(ticker, range, mySeq);
+    if (noteEl) noteEl.innerHTML = "";
   }
 }
 
-async function loadTickerDetail(ticker) {
+// D1 (ux-nav-watchlist-reliability round 9): wires the "Load Chart Data"
+// button rendered by renderChartUnavailable (app.core.js) to the EXISTING
+// authenticated POST /api/ticker/{ticker}/ohlc/refresh route -- no new
+// backend endpoint. Only this explicit, user-triggered click may ever
+// cause a real UW OHLC fetch from the chart panel; ordinary GET/F5/
+// navigation/range-switch always stays on the cache-only GET above.
+// Shows loading / success / partial-data / failure feedback in
+// #loadChartDataStatus, re-renders the chart with the real returned bars
+// on success, and guards against duplicate simultaneous clicks both
+// client-side (_chartLoadInFlight) and via the server's own
+// _ticker_ohlc_refresh_lock (409 on a second concurrent call -- the REAL
+// protection; the client guard just avoids firing a redundant request).
+function wireLoadChartDataButton(ticker, range, mySeq) {
+  const btn = document.getElementById("loadChartDataBtn");
+  if (!btn) return;
+  const statusEl = document.getElementById("loadChartDataStatus");
+  btn.addEventListener("click", async () => {
+    if (_chartLoadInFlight) return;
+    _chartLoadInFlight = true;
+    btn.disabled = true;
+    if (statusEl) statusEl.textContent = "Loading chart data from UW...";
+    try {
+      const ohlc = await apiPost(
+        `/api/ticker/${encodeURIComponent(ticker)}/ohlc/refresh?range=${encodeURIComponent(range)}`,
+        {}
+      );
+      if (mySeq !== _navSeq) return; // user navigated away while this was in flight
+      mountCandlestickChart("ohlcChartContainer", ohlc, { showLoadButton: true });
+      wireLoadChartDataButton(ticker, range, mySeq); // re-wire the button on the freshly-rendered DOM
+      const newStatusEl = document.getElementById("loadChartDataStatus");
+      if (newStatusEl) {
+        if (ohlc.unavailable || !ohlc.candle_count) {
+          newStatusEl.textContent = (ohlc.reason && ohlc.reason.message) || "No chart data available for this ticker.";
+        } else if (ohlc.range_fully_satisfied === false) {
+          newStatusEl.textContent = `Loaded ${ohlc.candle_count} real candle(s) -- partial data, UW does not have the full ${range} range for this ticker.`;
+        } else {
+          newStatusEl.textContent = `Loaded ${ohlc.candle_count} real candle(s).`;
+        }
+      }
+      const noteEl = document.getElementById("chartRangeNote");
+      if (noteEl && ohlc.candle_count) {
+        const kind = range === "1D" ? "5-minute candles (pre/regular/post-market)" : "daily candles";
+        noteEl.textContent = `${range} \u00b7 ${ohlc.candle_count} ${kind} (just loaded)`;
+      }
+    } catch (err) {
+      if (mySeq !== _navSeq) return;
+      if (statusEl && statusEl.isConnected) {
+        statusEl.textContent = `Failed to load chart data: ${err.message}`;
+      }
+      if (btn.isConnected) btn.disabled = false;
+    } finally {
+      _chartLoadInFlight = false;
+    }
+  });
+}
+
+// P2 fix (ux-nav-watchlist-reliability round 10): the "Load more" action
+// for the PARTIAL-coverage case -- #otherwise non-empty chart already
+// rendered, range_fully_satisfied is honestly false, chartRangeNote
+// explains that only what's cached locally was verified. This wires
+// that note's own button to the EXACT SAME authenticated
+// POST /api/ticker/{ticker}/ohlc/refresh route wireLoadChartDataButton
+// already uses (never a new endpoint) -- a real, explicit, user-
+// triggered action is the only thing that may turn "not confirmed
+// upstream" into a verified answer. Same client-side duplicate-click
+// guard (_chartLoadInFlight) and the same server-side
+// _ticker_ohlc_refresh_lock as the sibling button.
+function wireLoadMoreChartDataButton(ticker, range, mySeq) {
+  const btn = document.getElementById("loadMoreChartDataBtn");
+  if (!btn) return;
+  const statusEl = document.getElementById("loadMoreChartDataStatus");
+  btn.addEventListener("click", async () => {
+    if (_chartLoadInFlight) return;
+    _chartLoadInFlight = true;
+    btn.disabled = true;
+    if (statusEl) statusEl.textContent = `Fetching real ${range} data from UW...`;
+    try {
+      const ohlc = await apiPost(
+        `/api/ticker/${encodeURIComponent(ticker)}/ohlc/refresh?range=${encodeURIComponent(range)}`,
+        {}
+      );
+      if (mySeq !== _navSeq) return; // user navigated away while this was in flight
+      mountCandlestickChart("ohlcChartContainer", ohlc, { showLoadButton: true });
+      const noteEl = document.getElementById("chartRangeNote");
+      if (noteEl) {
+        if (ohlc.unavailable || !ohlc.candle_count) {
+          noteEl.innerHTML = "";
+        } else if (ohlc.range_fully_satisfied === false) {
+          // Now a GENUINELY verified upstream limit -- a real live
+          // call just ran and UW still didn't have the full range, so
+          // this claim (unlike the cache-only wording above) is
+          // honestly backed by the fetch that just happened.
+          noteEl.textContent =
+            `${range} \u00b7 ${ohlc.candle_count} real candle(s) loaded -- UW does not have the full ${range} range for ${esc(ticker)} (verified by this fetch).`;
+        } else {
+          const kind = range === "1D" ? "5-minute candles (pre/regular/post-market)" : "daily candles";
+          noteEl.textContent = `${range} \u00b7 ${ohlc.candle_count} ${kind} (just loaded)`;
+        }
+      }
+      wireLoadChartDataButton(ticker, range, mySeq);
+      wireLoadMoreChartDataButton(ticker, range, mySeq);
+    } catch (err) {
+      if (mySeq !== _navSeq) return;
+      if (statusEl && statusEl.isConnected) {
+        statusEl.textContent = `Failed to load more chart data: ${err.message}`;
+      }
+      if (btn.isConnected) btn.disabled = false;
+    } finally {
+      _chartLoadInFlight = false;
+    }
+  });
+}
+
+// W2-b (2026-10-16): cache-first Ticker Analysis -- ordinary navigation
+// (open/F5/Back/direct-link) calls this with refresh=false (the
+// default), which hits the now-cache-only GET /api/ticker/{ticker} and
+// makes zero live UW calls / writes no new evaluation. An explicit user
+// action (the "Refresh" button wired below, or Market Discovery's
+// "Evaluate in TIP") passes refresh=true, which calls the new,
+// authenticated POST /api/ticker/{ticker}/refresh -- the SOLE path that
+// performs a real scan for this page, deliberately separate from the
+// watchlist's own Refresh Data control (different scope: one ticker vs
+// the whole watchlist).
+async function loadTickerDetail(ticker, { refresh = false } = {}) {
   const mySeq = ++_navSeq;
   const el = document.getElementById("tickerDetail");
-  el.innerHTML = `<div class="empty">Loading ${esc(ticker)}...</div>`;
+  el.innerHTML = `<div class="empty">${refresh ? "Refreshing" : "Loading"} ${esc(ticker)}...</div>`;
   try {
-    const d = await apiGet(`/api/ticker/${encodeURIComponent(ticker)}`);
+    const d = refresh
+      ? await apiPost(`/api/ticker/${encodeURIComponent(ticker)}/refresh`, {})
+      : await apiGet(`/api/ticker/${encodeURIComponent(ticker)}`);
     if (mySeq !== _navSeq) return; // superseded by a newer ticker/mode switch
     el.innerHTML = renderTickerDetail(d);
+    const refreshBtn = document.getElementById("tickerRefreshBtn");
+    if (refreshBtn) {
+      refreshBtn.addEventListener("click", async () => {
+        refreshBtn.disabled = true;
+        try {
+          await loadTickerDetail(ticker, { refresh: true });
+        } finally {
+          // loadTickerDetail re-renders the whole panel on success (new
+          // button instance), so this only matters on the error path.
+          if (refreshBtn.isConnected) refreshBtn.disabled = false;
+        }
+      });
+    }
     const range = getChartRange();
     const rangeRow = document.getElementById("chartRangeRow");
     if (rangeRow) {
@@ -667,11 +836,15 @@ async function runDiscoveryScan() {
     // matching fix in renderDiscoveryCandidateList() for the same bug in
     // the per-scan summary line below the table.
     const isSyntheticSource = data.source === "synthetic_discovery_fixture";
+    // UX round (2026-10-16 round 5), item 3: same shared timefmt.js
+    // formatter as every other trader-facing timestamp -- this used to
+    // interpolate the raw ISO-with-microseconds snapshot_at string.
+    const snapshotNote = typeof formatTimestampFull === "function" ? formatTimestampFull(data.snapshot_at) : (data.snapshot_at || "n/a");
     statusEl.textContent = data.unavailable
       ? `Screener unavailable: ${(data.reason && data.reason.message) || "see Settings/UW key"}`
       : isSyntheticSource
-        ? `Scan complete (synthetic demo data, no real UW API call) \u00b7 snapshot ${data.snapshot_at || "n/a"}`
-        : `Scan complete \u2014 used ${data.screener_requests_used} screener request(s) \u00b7 snapshot ${data.snapshot_at || "n/a"}`;
+        ? `Scan complete (synthetic demo data, no real UW API call) \u00b7 snapshot ${snapshotNote}`
+        : `Scan complete \u2014 used ${data.screener_requests_used} screener request(s) \u00b7 snapshot ${snapshotNote}`;
     listEl.innerHTML = renderDiscoveryCandidateList(data.candidates, data);
     wireDiscoveryEvaluateButtons();
   } catch (err) {
@@ -705,7 +878,10 @@ async function evaluateDiscoveryCandidate(ticker) {
   _discoveryStates[ticker] = "evaluating";
   rerenderDiscoveryList();
   try {
-    await navigateToTicker(ticker, loadTickerDetail);
+    // W2-b: "Evaluate in TIP" must genuinely perform a real evaluation
+    // (that's its whole purpose) -- GET is cache-first now, so this
+    // passes refresh=true to use the explicit POST refresh route.
+    await navigateToTicker(ticker, (t) => loadTickerDetail(t, { refresh: true }));
     _discoveryStates[ticker] = "evaluated";
   } catch (err) {
     _discoveryStates[ticker] = "candidate";
@@ -746,7 +922,16 @@ async function loadSettings() {
     // after every add/remove save, see initWatchlistEditor() below).
     const wlRoot = document.getElementById("radarWatchlistEditor");
     if (wlRoot) {
-      wlRoot.innerHTML = renderWatchlistEditor(d);
+      // W1 FIX: capture whether the editor was genuinely open BEFORE
+      // destroying/rebuilding it, so an add/remove save never silently
+      // collapses an editor the user had expanded -- see
+      // renderWatchlistEditor()'s docstring in app.core.js for the full
+      // root-cause explanation (a closed <details> after an in-flight
+      // save is what made the just-added ticker's remove button appear
+      // to do "nothing" immediately after adding it).
+      const existingDetails = wlRoot.querySelector("details");
+      const wasOpen = existingDetails ? existingDetails.open : false;
+      wlRoot.innerHTML = renderWatchlistEditor(d, { open: wasOpen });
       initWatchlistEditor();
     }
     return d;
@@ -827,6 +1012,19 @@ function initWatchlistEditor() {
     if (!raw) return;
     if (!/^[A-Z]{1,5}(\.[A-Z])?$/.test(raw)) {
       statusEl.textContent = `"${raw}" doesn't look like a valid ticker symbol.`;
+      return;
+    }
+    // Reliability round (2026-10-16), item 5: adding a ticker already on
+    // the watchlist used to be a silent no-op from the user's point of
+    // view -- the `Set` below already deduped it (so no duplicate chip
+    // ever rendered), the input cleared as if something happened, and
+    // saveWatchlist() still fired a real PUT that persisted an
+    // unchanged list. Nothing distinguished "added" from "already had
+    // it" from "nothing happened." Give clear, specific feedback and
+    // skip the network round-trip entirely for the genuine no-op case.
+    if (currentTickers().includes(raw)) {
+      statusEl.textContent = `"${raw}" is already on your watchlist.`;
+      addInput.value = "";
       return;
     }
     const updated = Array.from(new Set([...currentTickers(), raw]));
@@ -1029,9 +1227,29 @@ async function loadMarketWideRadar() {
     if (controlsEl) {
       controlsEl.innerHTML = renderSchedulerControls(status);
       wireSchedulerModeToggle();
+      // UX remediation item 4 (2026-10-16): the legacy "Run Once now"
+      // button/wiring (schedulerRunOnceBtn/runSchedulerOnce) is removed
+      // -- renderSchedulerControls() no longer renders that element at
+      // all, see its docstring. The two decoupled one-time actions --
+      // same wiring pattern as the legacy button above (fresh element
+      // lookup every render, since controlsEl.innerHTML was just
+      // replaced), each posting its own fixed `depth` value.
+      const discoverOnceBtn = document.getElementById("discoverOnceBtn");
+      if (discoverOnceBtn) discoverOnceBtn.addEventListener("click", () => runOneTimeDepthAction("discovery_only"));
+      const discoverEvaluateOnceBtn = document.getElementById("discoverEvaluateOnceBtn");
+      if (discoverEvaluateOnceBtn) {
+        discoverEvaluateOnceBtn.addEventListener("click", () => runOneTimeDepthAction("discovery_plus_evaluation"));
+      }
     }
     const data = await apiGetAuthed("/api/radar/market-wide");
     if (listEl) listEl.innerHTML = renderMarketWideRadar(data);
+    // UX round (2026-10-16 round 5), item 1: wires each row's new "View
+    // Details" button through the EXACT SAME wireInvestigateButtons/
+    // navigateToTicker path Market Radar's own Investigate buttons use
+    // (see app.core.js) -- never a second, parallel click handler.
+    wireInvestigateButtons(loadTickerDetail);
+    const summaryEl = document.getElementById("marketWideSummary");
+    if (summaryEl) summaryEl.innerHTML = renderMarketWideSummary(data, status);
     if (statusEl) statusEl.textContent = "";
   } catch (err) {
     if (statusEl) statusEl.textContent = `Failed to load Market-wide Radar: ${err.message}`;
@@ -1055,6 +1273,83 @@ function wireSchedulerModeToggle() {
   });
 }
 
+// UX remediation item 4 (2026-10-16): the legacy runSchedulerOnce()
+// function (which wired the now-removed "Run Once now" button to
+// POST /api/scheduler/run-once with no explicit `depth`) is removed
+// entirely along with that button -- runOneTimeDepthAction() below is
+// now the ONLY one-time-run action, calling the SAME backend route
+// with an explicit depth. The backend route itself is unchanged (it
+// still accepts a request with no `depth` for any other caller) --
+// only this frontend's own now-orphaned legacy caller is removed.
+
+// Final remediation round (2026-10-16): client-side guard for the two
+// decoupled one-time actions -- belt-and-suspenders alongside the
+// server-side lease/lock rejection (the REAL protection), same pattern
+// _watchlistRefreshInFlight already establishes below for W2's Refresh
+// Data action. Shared across BOTH depth buttons (not per-button) since
+// the backend's single in-process cycle lock means only one of these
+// two actions can genuinely be running at a time anyway.
+let _runOnceDepthInFlight = false;
+
+async function runOneTimeDepthAction(depth) {
+  if (_runOnceDepthInFlight) return; // a duplicate click while a request is already in flight is a silent no-op
+  const discoverBtn = document.getElementById("discoverOnceBtn");
+  const evalBtn = document.getElementById("discoverEvaluateOnceBtn");
+  const progressEl = document.getElementById("runOnceDepthProgress");
+  _runOnceDepthInFlight = true;
+  [discoverBtn, evalBtn].forEach((b) => {
+    if (b) b.disabled = true;
+  });
+  const activeBtn = depth === "discovery_only" ? discoverBtn : evalBtn;
+  const originalLabel = activeBtn ? activeBtn.textContent : "";
+  if (activeBtn) {
+    activeBtn.textContent = depth === "discovery_only" ? "Discovering..." : "Discovering & evaluating...";
+  }
+  if (progressEl) {
+    progressEl.textContent = depth === "discovery_only"
+      ? "Running a one-time market screener scan (discovery only, no per-ticker evaluation)..."
+      : "Running a one-time market screener scan, then evaluating the configured top-ranked candidates...";
+    progressEl.style.color = "";
+  }
+  let finalMessage = "";
+  let isError = false;
+  try {
+    const result = await apiPost("/api/scheduler/run-once", { depth });
+    const modeLabel = typeof schedulerModeShortLabel === "function" ? schedulerModeShortLabel(result.mode) : result.mode;
+    if (depth === "discovery_only") {
+      finalMessage = `Discover Once complete -- candidates discovered and cataloged. Recurring mode unchanged (still ${modeLabel}).`;
+    } else {
+      const n = result.candidates_evaluated ?? 0;
+      finalMessage = `Discover & Evaluate Once complete -- ${n} candidate(s) evaluated. Recurring mode unchanged (still ${modeLabel}).`;
+    }
+  } catch (err) {
+    // The shared lease/lock 409 rejection (a second one-time request, or
+    // a genuinely concurrent recurring cycle) and any other failure both
+    // land here with a real, specific message -- never a silent no-op.
+    isError = true;
+    const actionLabel = depth === "discovery_only" ? "Discover Once" : "Discover & Evaluate Once";
+    finalMessage = `${actionLabel} failed: ${err.message}`;
+  } finally {
+    _runOnceDepthInFlight = false;
+    if (activeBtn) activeBtn.textContent = originalLabel;
+  }
+  // Refresh scheduler status + the candidate list from the real backend
+  // (same full reload the legacy Run Once button triggers) BEFORE
+  // writing the completion/error message -- loadMarketWideRadar()
+  // rebuilds #schedulerControls' entire innerHTML from a fresh
+  // renderSchedulerControls() call, which would otherwise wipe out a
+  // message set before this reload almost instantly (a real flash-and-
+  // vanish risk the UI requirements explicitly call out). Writing the
+  // message AFTER the reload, into the freshly-rendered node, is what
+  // makes it actually stick on screen long enough to read.
+  await loadMarketWideRadar();
+  const freshProgressEl = document.getElementById("runOnceDepthProgress");
+  if (freshProgressEl) {
+    freshProgressEl.textContent = finalMessage;
+    freshProgressEl.style.color = isError ? "#b45309" : "";
+  }
+}
+
 function initMarketWideRadar() {
   if (_marketWideLoaded) return;
   _marketWideLoaded = true;
@@ -1066,6 +1361,65 @@ document.querySelectorAll(".nav-item").forEach((b) => {
   if (b.dataset.view === "marketwide") b.addEventListener("click", initMarketWideRadar);
 });
 document.getElementById("refreshRadar").addEventListener("click", loadRadar);
+
+// W2 (item 9): the ONE explicit "go get real fresh data" action for the
+// personal watchlist -- everything else (page load, "refresh view"
+// above, nav back, auth-state-change, history restoration) only ever
+// reads cached/catalog data via GET /api/radar (see main.py's cache-
+// first fix). Structurally separate from the market-wide scheduler's
+// Run Once (different trigger, different scope -- watchlist vs
+// broader-market) -- sharing only the same uw_concurrency gate and
+// catalog tables server-side, never a second pipeline here either.
+let _watchlistRefreshInFlight = false;
+async function refreshWatchlistData() {
+  if (_watchlistRefreshInFlight) return; // belt-and-suspenders client-side guard; server-side lock is authoritative
+  const btn = document.getElementById("refreshWatchlistDataBtn");
+  const statusEl = document.getElementById("refreshWatchlistDataStatus");
+  _watchlistRefreshInFlight = true;
+  if (btn) { btn.disabled = true; btn.textContent = "Refreshing..."; }
+  if (statusEl) statusEl.textContent = "Fetching fresh data from Unusual Whales...";
+  try {
+    await apiPost("/api/radar/refresh", {});
+    // The POST has already performed and persisted exactly one evaluation
+    // per watchlist ticker. Re-read through the existing cache-only GET so
+    // Last Evaluated comes from the committed catalog rows; this is not a
+    // second evaluation and makes zero additional UW calls.
+    const data = await apiGet("/api/radar");
+    _lastRadarData = data;
+    renderFeaturedArea(data);
+    setupRadarFiltersAndRender(data, loadTickerDetail);
+    document.getElementById("activityStrip").innerHTML = renderActivitySummary(data);
+    const radarStatusEl = document.getElementById("radarStatus");
+    if (radarStatusEl) {
+      radarStatusEl.textContent = renderRadarStatus(data);
+    }
+    if (statusEl) statusEl.textContent = "Refreshed.";
+  } catch (err) {
+    // The server's duplicate-refresh 409 and any other failure both
+    // surface here with a real, specific message -- never a silent
+    // no-op on a double-click.
+    if (statusEl) statusEl.textContent = `Refresh failed: ${err.message}`;
+  } finally {
+    _watchlistRefreshInFlight = false;
+    if (btn) { btn.disabled = false; btn.textContent = "Refresh Data"; }
+  }
+}
+
+// updateRadarRefreshDataButtonVisibility: called every time loadRadar()
+// runs (after loadSettings() has had a chance to set _currentMode from
+// the real /api/settings response) -- NOT just once at script-eval
+// time, when _currentMode is still its "demo" module-level default
+// regardless of the real current mode. Demo Mode's synthetic scan has
+// no live-call cost to avoid, so this action is hidden there entirely
+// rather than showing a button that would be misleadingly identical to
+// "refresh view" (both end up doing the exact same thing in Demo Mode
+// under the hood).
+function updateRadarRefreshDataButtonVisibility() {
+  const btn = document.getElementById("refreshWatchlistDataBtn");
+  if (btn) btn.style.display = _currentMode === "live" ? "" : "none";
+}
+const _refreshWatchlistDataBtnEl = document.getElementById("refreshWatchlistDataBtn");
+if (_refreshWatchlistDataBtnEl) _refreshWatchlistDataBtnEl.addEventListener("click", refreshWatchlistData);
 // Unified ticker combobox (2026-10-14, replaces the old separate
 // <select> + manual-entry <input>): initTickerCombo() (app.core.js)
 // wires the one input's typing/suggestions/keyboard-nav/Analyze-click,
@@ -1118,6 +1472,13 @@ window.TIP_NAV_HANDLERS = {
   // way the Analyze button's click handler already does -- otherwise a
   // ticker outside TIP_LIVE_WATCHLIST worked once, then broke on refresh.
   isArbitraryTickerAllowed: () => _currentMode === "live",
+  // URL-backed nav fix: refresh/deep-link/Back-Forward restoration of
+  // Market Intelligence calls through this SAME lazy-load entry point
+  // the nav button's click listener uses -- initMarketWideRadar's own
+  // _marketWideLoaded guard makes this a safe no-op if it was already
+  // loaded this session, so restoring from history never issues a
+  // duplicate fetch beyond what a normal fresh load of this view would.
+  onMarketWideRestore: initMarketWideRadar,
 };
 wireHistoryHandling();
 (async function bootstrap() {

@@ -84,9 +84,14 @@ def test_manual_discover_then_evaluate_then_shows_on_market_wide_radar(app_main,
     by_ticker_before = {c["ticker"]: c for c in mw_resp_before_eval.json()["candidates"]}
     assert by_ticker_before[ticker]["freshness"] == "unevaluated"
 
-    # 3. "Evaluate in TIP" -- the existing GET /api/ticker/{ticker} route,
-    # same one a watchlist scan already uses (never a second pipeline).
-    eval_resp = client.get(f"/api/ticker/{ticker}")
+    # 3. "Evaluate in TIP" -- W2-b (2026-10-16): GET /api/ticker/{ticker}
+    # is now cache-first and would NOT perform a real evaluation for a
+    # never-before-scanned candidate, so "Evaluate in TIP" now uses the
+    # explicit POST /api/ticker/{ticker}/refresh action instead -- same
+    # underlying _run_scan/_catalog_scan_best_effort pipeline a watchlist
+    # scan already uses, never a second pipeline, just reached via the
+    # explicit-trigger route rather than a plain GET.
+    eval_resp = client.post(f"/api/ticker/{ticker}/refresh")
     assert eval_resp.status_code == 200
 
     # 4. Market-wide Radar now shows it as a freshly-evaluated, CURRENT

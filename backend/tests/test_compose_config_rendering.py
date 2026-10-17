@@ -36,6 +36,23 @@ COMPOSE_PATH = Path(__file__).resolve().parents[2] / "docker-compose.yml"
 
 _VAR_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(:-(?P<default>[^}]*))?\}")
 
+# Reliability round (2026-10-16), item 5: a runtime image built without
+# docker-compose.yml copied in (e.g. a slim production image that only
+# ships backend/ + frontend/) must make this whole file SKIP with a clear
+# reason, never fail/error. Previously every test here called
+# render_compose() -> COMPOSE_PATH.read_text(), which raises an unhandled
+# FileNotFoundError inside the test body -- pytest reports that as a
+# confusing ERROR (not a clean, intentional SKIP), indistinguishable from
+# a real regression at a glance. This is scoped narrowly to a clean skip
+# only, per Chad's explicit instruction this round -- NOT a deeper
+# packaging fix (e.g. always shipping docker-compose.yml into the image).
+pytestmark = pytest.mark.skipif(
+    not COMPOSE_PATH.exists(),
+    reason=f"docker-compose.yml not present at {COMPOSE_PATH} in this runtime image -- "
+    "Compose-config-rendering tests (T2/B1/B2 regression guards) require the real repo-root "
+    "compose file and cannot run against a build that doesn't ship it.",
+)
+
 
 def render_compose(env: Optional[Dict[str, str]] = None) -> dict:
     """Render docker-compose.yml's `${VAR}` / `${VAR:-default}` forms

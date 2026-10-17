@@ -170,8 +170,38 @@ nav#nav .ic { font-size: 13px; width: 16px; text-align: center; opacity: .7; }
    horizontal overflow/clipping on every view at mobile width. min(...)
    has no floor, so it actually shrinks below 1200px when the viewport
    is narrower than that. */
-.main { padding: 18px 20px 60px; max-width: min(1680px, 100%); width: 100%; margin: 0 auto; box-sizing: border-box; }
+/* D3 fix (ux-nav-watchlist-reliability round 9): real CDP measurement at
+   2560x1440 found a 320px empty right gutter (544px left, split mostly
+   by the fixed sidebar) with content capped at the old 1680px -- visibly
+   excessive on a large/ultra-wide desktop monitor, the exact "centered
+   desktop rows and excessive empty gutters" defect reported. Raised to
+   1880px (still well short of claiming full-bleed; production TIP's own
+   row/table convention is denser but this app's grid breakpoints were
+   tuned around ~1680px card/table widths, so a full re-layout is left
+   out of scope this round -- see this round's final report). Re-measured
+   at 1920x1080 and 390x844: no overflow/clipping introduced at either. */
+.main { padding: 18px 20px 60px; max-width: min(1880px, 100%); width: 100%; margin: 0 auto; box-sizing: border-box; }
 @media (max-width: 600px) { .main { padding: 14px 14px 50px; } }
+/* P4 fix (ux-nav-watchlist-reliability round 10): the round-9 bump above
+   (1680px -> 1880px) was genuinely insufficient -- real CDP measurement
+   at 2560x1440 still showed Market Intelligence's rows sitting in a
+   228px gutter on EACH side (456px of a 2560px-wide monitor unused),
+   because .main's shared 1880px cap applies to every view alike and a
+   2560px screen simply has more room than that cap allows. Production
+   TIP's own equivalent container (~/.hermes/scripts/uw/webapp/frontend/
+   index.html's plain `main { width:100%; ... }`, no max-width cap at
+   all) establishes the real reference convention: information-dense
+   desktop views should use the full available width, not be
+   artificially centered under a fixed cap.
+   Scoped narrowly to Market Intelligence ONLY (via :has(), standard in
+   every real desktop/mobile browser Chad tests against) -- every other
+   view (My Watchlist, Ticker Analysis, Settings, About) keeps the
+   EXACT existing 1880px cap/centering completely unchanged; this is a
+   gutter-width fix for one view, not a global redesign. Raised to
+   production's own 2400px reference figure (.ms-insp-inner), not an
+   unbounded full-bleed claim this app's row markup was never measured
+   against. */
+.main:has(#view-marketwide.active) { max-width: min(2400px, 100%); }
 .view { display: none; }
 .view.active { display: block; }
 
@@ -286,6 +316,16 @@ nav#nav .ic { font-size: 13px; width: 16px; text-align: center; opacity: .7; }
 .col-price, .col-chg { white-space: nowrap; }
 @media (max-width: 860px) { .col-family { display: none; } }
 @media (max-width: 760px) { .col-chg { display: none; } }
+
+/* Round 14 item 3: sub-group header rows inside the Other Noteworthy
+   table -- distinguishes the genuinely-qualifying rows (no header, sit
+   directly under the "Other Noteworthy" heading) from the evaluated-
+   zero-gate group ("No Qualifying Signal") and the never-evaluated
+   group ("Not Evaluated"), each labeled with its own accurate count
+   computed by renderRadarLists() from the rows actually rendered under
+   it. Deliberately plain/muted -- a section divider, not a data row. */
+.radar-group-header-row td { background: var(--panel2); }
+.radar-group-header { font-size: 10.5px; font-weight: 600; text-transform: uppercase; letter-spacing: .4px; color: var(--muted); }
 @media (max-width: 560px) { .col-headline { display: none; } }
 
 .empty { color: var(--muted); padding: 30px 16px; text-align: center; font-size: 13px; }
@@ -295,6 +335,31 @@ nav#nav .ic { font-size: 13px; width: 16px; text-align: center; opacity: .7; }
    unevaluated is scannable at a glance across a long candidate list. */
 .candidate-row { display: grid; grid-template-columns: 90px 110px 1fr 90px; align-items: center; gap: 10px; padding: 8px 6px; border-bottom: 1px solid var(--border); font-size: 13px; }
 .candidate-row .ticker { font-weight: 600; }
+/* UX round (2026-10-16 round 5), item 1: Market Intelligence's row
+   (.market-wide-row, also carries the plain .candidate-row class for
+   its existing border/padding/font-size) now has exactly TWO direct
+   children (.market-wide-row-main + the new .why-surfaced block) --
+   .candidate-row's 4-column grid above would otherwise silently
+   squeeze those two children into its first two fixed-width columns
+   (90px/110px), found via a real CDP measurement at 390px (the "Why
+   TIP surfaced this" block measured 110px wide, clipped to a sliver,
+   not an overflow). Overriding BOTH the parent's display (plain
+   stacked flex, not grid) and giving the real field row its own
+   flex-wrap layout fixes this without touching .candidate-row itself,
+   so Market Radar's own freshness rows (still plain .candidate-row,
+   4 real columns) are completely unaffected. */
+.market-wide-row { display: flex; flex-direction: column; align-items: stretch; gap: 3px; }
+/* UX remediation item 4 (2026-10-16): tighter, strictly left-aligned,
+   more information-dense row to better match production TIP's own
+   row convention (read read-only from ~/.hermes/scripts/uw/webapp/ for
+   reference per this item's instructions) -- a density/alignment
+   tweak only, not a redesign: same fields, same classes, same flex-wrap
+   fallback for narrow viewports (unchanged from the prior round's real
+   mobile-width CDP fix), just tighter gap/padding and an explicit
+   text-align:left so nothing can inherit a centered/justified default
+   from an ancestor. */
+.market-wide-row-main { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-start; gap: 8px; text-align: left; }
+.market-wide-row-main > * { text-align: left; }
 .freshness-badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; text-align: center; }
 .freshness-badge.freshness-current { background: #dcfce7; color: #166534; }
 .freshness-badge.freshness-stale { background: #fef3c7; color: #92400e; }
@@ -473,6 +538,11 @@ pre.raw { background: var(--panel3); padding: 12px; border-radius: 8px; overflow
    buttons, no footer note -- while leaving the >=980px desktop sidebar
    layout (and the existing 980px tablet breakpoint above) completely
    unchanged. */
+/* UX round (2026-10-16 round 5), item 4: the hidden-by-default short nav
+   label (see frontend/index.html's About button) -- only ever shown at
+   the same narrow breakpoint below, never on desktop/tablet. */
+.nav-label-short { display: none; }
+
 @media (max-width: 480px) {
   .brand-block { padding: 8px 12px; }
   .brand-block .brand-product,
@@ -483,6 +553,41 @@ pre.raw { background: var(--panel3); padding: 12px; border-radius: 8px; overflow
   nav#nav .nav-group-label { display: none; }
   nav#nav button { padding: 6px 8px; font-size: 11.5px; }
   .sidebar-foot { display: none; }
+  /* UX round (2026-10-16 round 5), item 4 real-browser finding: at
+     exactly 390px, the long "About / Beyond the Hackathon" label alone
+     forced the whole nav onto a 3rd wrapped row (measured via CDP:
+     nav height went from ~70px with the short label to ~106px with the
+     full one), pushing all real content down ~20% of an 844px mobile
+     viewport before anything else was visible. Swapping to the short
+     label here (full label hidden) lets it share a row with another
+     nav button instead -- the ONLY mobile-nav change beyond the
+     existing, untouched QA-D7 rules just above. */
+  .nav-label-full { display: none; }
+  .nav-label-short { display: inline; }
+
+  /* UX round (2026-10-16 round 5), item 4 real-browser finding: Market
+     Discovery's "Evaluate" action is the LAST column of a table with
+     min-width:640px (.discovery-table) inside an overflow-x:auto
+     wrapper -- at 390px that pushes the Evaluate button to roughly
+     x=690-845 (measured via CDP getBoundingClientRect), entirely off
+     an 844px-tall/390px-wide viewport's visible area unless the user
+     discovers and performs a horizontal scroll most mobile traders
+     never would -- genuinely clipped/inaccessible, not just visually
+     cramped. Fix: swap to the pre-existing, already-styled flex-wrap
+     card-row presentation (.discovery-candidate-list/-row) that this
+     exact same data already renders into (kept in the DOM for test-
+     harness compat, see renderDiscoveryCandidateList's own comment) --
+     it has no fixed min-width, wraps every field including Evaluate
+     onto its own line as needed, so nothing is ever off-screen. Table
+     stays the unchanged, real presentation at every wider width (and in
+     static-demo, which has no Market Discovery view to begin with). */
+  .discovery-table-wrap { display: none; }
+  /* .discovery-candidate-list's real display:flex override lives in its
+     own @media block further down this file, AFTER the unconditional
+     `.discovery-candidate-list { display: none; }` rule (same selector
+     specificity -- source order decides the winner, and that
+     unconditional rule is physically later in this file than this
+     block, so it would otherwise win even inside this narrower query). */
 }
 
 /* --- Investigate with AI -------------------------------------------- */
@@ -594,6 +699,19 @@ pre.raw { background: var(--panel3); padding: 12px; border-radius: 8px; overflow
 .discovery-table tr:hover td { background: var(--panel2); }
 
 .discovery-candidate-list { display: none; }
+/* UX round (2026-10-16 round 5), item 4: at the same ~390px breakpoint
+   as the rest of this file's mobile rules, swap FROM the table (whose
+   fixed min-width pushes the Evaluate action off-screen -- see the
+   .discovery-table-wrap rule in the max-width:480px block above) TO
+   this already-existing flex-wrap row presentation, which has no fixed
+   min-width and wraps every field (Evaluate included) onto its own
+   line as needed so nothing is ever clipped/inaccessible. Placed here,
+   AFTER the unconditional `display: none` above, so it actually wins
+   the cascade at this width (same selector specificity -- source order
+   decides the tie). */
+@media (max-width: 480px) {
+  .discovery-candidate-list { display: flex; flex-direction: column; gap: 10px; }
+}
 .discovery-candidate-row {
   display: flex; flex-wrap: wrap; align-items: center; gap: 14px;
   border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--panel); padding: 10px 14px;

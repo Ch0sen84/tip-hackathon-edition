@@ -30,15 +30,26 @@ const lib = loadReal(
 );
 
 console.log("\n=== fmtMoney: negative-sign placement (item #11) ===");
-check("negative amount renders as -$X, never $-X", () => {
-  assert.equal(lib.fmtMoney(-78_700_000), "-$78.7M");
+// UX remediation item 4 (2026-10-16): upgraded from a bare ASCII
+// hyphen-minus to the proper Unicode MINUS SIGN (U+2212) per Chad's
+// explicit requirement ("-$89.2M" -> real minus, not a hyphen
+// misrendering/missing sign). These checks assert the EXACT glyph,
+// not just "some sign is present", so a regression back to a plain
+// hyphen would be caught.
+const MINUS = "\u2212";
+check("negative amount renders with the real Unicode minus sign, never $-X", () => {
+  assert.equal(lib.fmtMoney(-78_700_000), `${MINUS}$78.7M`);
   assert.ok(!lib.fmtMoney(-78_700_000).includes("$-"));
+  assert.ok(!lib.fmtMoney(-78_700_000).startsWith("-")); // never a bare ASCII hyphen either
 });
-check("positive amount unaffected", () => {
+check("positive amount unaffected (no sign at all)", () => {
   assert.equal(lib.fmtMoney(78_700_000), "$78.7M");
 });
-check("small negative amount", () => {
-  assert.equal(lib.fmtMoney(-500), "-$500");
+check("small negative amount uses the same real minus sign", () => {
+  assert.equal(lib.fmtMoney(-500), `${MINUS}$500`);
+});
+check("a different real negative magnitude (89.2M) renders exactly as specified", () => {
+  assert.equal(lib.fmtMoney(-89_200_000), `${MINUS}$89.2M`);
 });
 check("null stays null", () => {
   assert.equal(lib.fmtMoney(null), null);

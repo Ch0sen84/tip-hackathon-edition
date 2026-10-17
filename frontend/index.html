@@ -37,12 +37,29 @@
     </div>
     <nav id="nav">
       <div class="nav-group-label">Workspace</div>
-      <button class="nav-item active" data-view="radar"><span class="ic">&#9673;</span>Market Radar</button>
+      <!-- UX/Nav round (2026-10-16): "Market Radar" vs "Market-wide Radar"
+           was flagged as too-similar/confusing -- labels only renamed
+           here (data-view/route ids below are UNCHANGED: "radar" and
+           "marketwide" still resolve exactly as before, so no existing
+           deep link/bookmark breaks). "My Watchlist" matches the name
+           this view's own mode-toggle button already uses internally
+           (see the radar-mode-toggle below); "Market Intelligence"
+           distinguishes the scheduler-driven, evaluated-candidate view
+           from "Market Discovery" (the raw, zero-evaluation screener
+           panel inside My Watchlist/radar). -->
+      <button class="nav-item active" data-view="radar"><span class="ic">&#9673;</span>My Watchlist</button>
       <button class="nav-item" data-view="ticker"><span class="ic">&#128269;</span>Ticker Analysis</button>
-      <button class="nav-item" data-view="marketwide"><span class="ic">&#127760;</span>Market-wide Radar</button>
+      <button class="nav-item" data-view="marketwide"><span class="ic">&#127760;</span>Market Intelligence</button>
       <div class="nav-group-label">App</div>
       <button class="nav-item" data-view="settings"><span class="ic">&#9881;</span>Settings</button>
-      <button class="nav-item" data-view="about"><span class="ic">&#8505;</span>About / Beyond the Hackathon</button>
+      <!-- UX round (2026-10-16 round 5), item 4: this label's full length
+           was, by itself, what forced the nav onto a 3rd wrapped row at
+           ~390px mobile width (one of Chad's named mobile-overflow
+           items) -- wrapping the long/short text in their own spans lets
+           the CSS media query below swap to the short form at narrow
+           widths with zero JS, same compact-nav intent as the existing
+           QA-D7 mobile rules just above this file's media query. -->
+      <button class="nav-item" data-view="about"><span class="ic">&#8505;</span><span class="nav-label-full">About / Beyond the Hackathon</span><span class="nav-label-short">About</span></button>
     </nav>
     <div class="sidebar-foot">Standalone hackathon build.<br>Demo mode: synthetic data.<br>Live mode: your own UW key.</div>
   </aside>
@@ -68,7 +85,17 @@
       <div id="radarWatchlistEditor"></div>
       <div class="status-strip">
         <span id="radarStatus">Loading Market Radar...</span>
-        <button class="btn-link" id="refreshRadar">refresh</button>
+        <button class="btn-link" id="refreshRadar">refresh view</button>
+        <!-- W2 (item 9): explicit manual action -- the ONLY thing that
+             triggers a real live UW fetch for the watchlist. Ordinary
+             loads/refreshes/nav above use "refresh view" (re-reads
+             whatever's already cached/displayed, zero UW cost); THIS
+             button is the one real "go get fresh data" action, wired
+             in app.live.js's refreshWatchlistData(). Hidden entirely in
+             Demo Mode (no live-call cost to avoid there -- see
+             wireRadarRefreshDataButton()). -->
+        <button class="btn" id="refreshWatchlistDataBtn" style="margin-left:8px">Refresh Data</button>
+        <span id="refreshWatchlistDataStatus" class="muted" style="margin-left:8px;font-size:12px"></span>
       </div>
 
       <div id="activityStrip"></div>
@@ -115,7 +142,11 @@
             <div class="attn-grid" id="highestGrid"></div>
           </div>
 
-          <h2 class="section-title eyebrow">Other Noteworthy</h2>
+          <!-- Round 14 item 3: the count span is kept accurate by
+               renderRadarLists() -- always the exact number of rows
+               actually rendered as plain (non-grouped) rows in the
+               table below, under any filter state. -->
+          <h2 class="section-title eyebrow">Other Noteworthy<span id="otherNoteworthyCount"></span></h2>
           <!-- Production-style compact DATA TABLE is now the primary
              presentation for Other Noteworthy (matches production's own
              "Other Noteworthy is a table, not a card grid" pattern) --
@@ -136,6 +167,7 @@
                   <th class="col-price">Price</th>
                   <th class="col-chg">1D Change</th>
                   <th class="col-headline">Headline</th>
+                  <th class="col-lastEval">Last evaluated</th>
                   <th></th>
                 </tr>
               </thead>
@@ -171,12 +203,25 @@
          app.live.js's initMarketWideRadar()), same pattern as Market
          Discovery's lazy-load above. -->
     <section id="view-marketwide" class="view">
-      <h2 class="section-title eyebrow">Market-wide Radar</h2>
+      <h2 class="section-title eyebrow">Market Intelligence</h2>
+      <!-- UX round (2026-10-16), item 4: rewritten for an actual trader,
+           not implementation-detail language. Explains (a) where
+           tickers come from, (b) why off-watchlist names appear,
+           (c) evaluated vs not, (d) how evidence updates, (e) what to
+           do next. The honest scheduler-mode disclosure is INSIDE
+           #marketWideSummary (rendered by renderMarketWideSummary() in
+           app.live.js from the real, current /api/scheduler/status --
+           never a static claim here that could go stale/dishonest if
+           the scheduler is Disabled). -->
       <p class="muted" style="margin-top:-6px">
-        Background discovery + bounded evaluation, built on the same screener and evaluation pipeline
-        Market Discovery and Ticker Analysis already use -- never a second pipeline. See the coverage
-        note below each run for exactly what this reflects.
+        TIP identifies opportunities across the broader market -- not just your watchlist -- by evaluating
+        unusual options activity and dark-pool trading, then tracks those opportunities as new evidence
+        becomes available. A stock can appear here even if it isn't on your <a class="tlink" onclick="navigateToView('radar')">My Watchlist</a>.
+        Each candidate below shows whether it has genuinely been evaluated yet (Current / Stale / Not evaluated)
+        and when that evaluation last happened -- never a live fetch just from viewing this page. Use
+        <strong>Ticker Analysis</strong> to dig into any one of them.
       </p>
+      <div id="marketWideSummary" class="muted" style="margin:6px 0 4px"></div>
       <div id="schedulerControls"></div>
       <div id="marketWideStatus" class="muted" style="margin:8px 0"></div>
       <div id="marketWideCandidateList"></div>
@@ -240,6 +285,7 @@
   </div>
 
 <script src="lightweight-charts.js"></script>
+<script src="timefmt.js"></script>
 <script src="app.core.js"></script>
 <script src="app.live.js"></script>
 </body>
