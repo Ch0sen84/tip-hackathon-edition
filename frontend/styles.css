@@ -182,6 +182,26 @@ nav#nav .ic { font-size: 13px; width: 16px; text-align: center; opacity: .7; }
    at 1920x1080 and 390x844: no overflow/clipping introduced at either. */
 .main { padding: 18px 20px 60px; max-width: min(1880px, 100%); width: 100%; margin: 0 auto; box-sizing: border-box; }
 @media (max-width: 600px) { .main { padding: 14px 14px 50px; } }
+/* P4 fix (ux-nav-watchlist-reliability round 10): the round-9 bump above
+   (1680px -> 1880px) was genuinely insufficient -- real CDP measurement
+   at 2560x1440 still showed Market Intelligence's rows sitting in a
+   228px gutter on EACH side (456px of a 2560px-wide monitor unused),
+   because .main's shared 1880px cap applies to every view alike and a
+   2560px screen simply has more room than that cap allows. Production
+   TIP's own equivalent container (~/.hermes/scripts/uw/webapp/frontend/
+   index.html's plain `main { width:100%; ... }`, no max-width cap at
+   all) establishes the real reference convention: information-dense
+   desktop views should use the full available width, not be
+   artificially centered under a fixed cap.
+   Scoped narrowly to Market Intelligence ONLY (via :has(), standard in
+   every real desktop/mobile browser Chad tests against) -- every other
+   view (My Watchlist, Ticker Analysis, Settings, About) keeps the
+   EXACT existing 1880px cap/centering completely unchanged; this is a
+   gutter-width fix for one view, not a global redesign. Raised to
+   production's own 2400px reference figure (.ms-insp-inner), not an
+   unbounded full-bleed claim this app's row markup was never measured
+   against. */
+.main:has(#view-marketwide.active) { max-width: min(2400px, 100%); }
 .view { display: none; }
 .view.active { display: block; }
 
