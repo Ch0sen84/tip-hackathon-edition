@@ -1047,6 +1047,16 @@ function renderFamilyLabel(entry) {
 // Ticker Analysis's header card (renderTickerDetail) and the Featured
 // Signal hero card (renderFeaturedSignal), neither of which repeats
 // per-row.
+// P1 (ux-nav-watchlist-reliability round 10): a never-evaluated
+// placeholder row has no `last_evaluated_at` -- formatTimestampFull /
+// formatTimestampET (frontend/timefmt.js, loaded before this file in
+// both index.html and static-demo/index.html) already return the
+// honest "Not evaluated" string for null/undefined input, so this is a
+// direct passthrough, never a second ad-hoc fallback string.
+function fmtLastEvaluatedCell(entry) {
+  if (typeof formatTimestampFull !== "function") return esc(entry.last_evaluated_at || "Not evaluated");
+  return esc(formatTimestampFull(entry.last_evaluated_at));
+}
 function renderRow(entry) {
   const px = entry.price || {};
   return `
@@ -1058,6 +1068,7 @@ function renderRow(entry) {
       <td class="col-price">${fmtPriceCell(px)}</td>
       <td class="col-chg">${fmtChangeCell(px)}</td>
       <td class="col-headline">${esc(entry.headline)}</td>
+      <td class="col-lastEval">${fmtLastEvaluatedCell(entry)}</td>
       <td><button class="btn-link btn-investigate" data-investigate-ticker="${esc(entry.ticker)}">Investigate &rarr;</button></td>
     </tr>`;
 }
@@ -1301,45 +1312,81 @@ function renderFeaturedArea(data) {
 function renderRadarLists(data, filters, loadTickerDetailFn) {
   const familyFilter = (filters && filters.family) || "";
   const stateFilter = (filters && filters.state) || "";
-  // D4/D5 fix: never-evaluated placeholder entries (not_evaluated: true)
-  // must not be rendered as cards/rows alongside genuinely qualifying
-  // entries, and must not inflate totalQualifying below -- see
-  // qualifyingEntries()'s module comment.
-  const allHighest = qualifyingEntries(data.highest);
-  const allOther = qualifyingEntries(data.other);
-  const featured = allHighest[0] || null;
-  const restOfHighest = allHighest.slice(1);
-  const filteredRest = filterRadarEntries(restOfHighest, familyFilter, stateFilter);
-  const filteredOther = filterRadarEntries(allOther, familyFilter, stateFilter);
+  // P1 fix (ux-nav-watchlist-reliability round 10): the round-9 D4/D5 fix
+  // made the BACKEND stop dropping never-evaluated watchlist tickers
+  // (they now arrive in data.other with not_evaluated:true, a real
+  // state, and an honest headline), but this renderer then immediately
+  // undid that by running qualifyingEntries() (a `!e.not_evaluated`
+  // filter) over the RENDER lists too -- every never-evaluated ticker
+  // was computed server-side, shipped over the wire, and then silently
+  // thrown away right here before a single <tr>/<div class="card"> was
+  // ever built for it. That is the exact regression Claude's real-Chrome
+  // retest caught: the backend was correct, the frontend row-rendering
+  // loop was not.
+  //
+  // Fix: qualifyingEntries() is now used ONLY for the things that are
+  // genuinely about qualification -- which ticker is "featured", and the
+  // "N qualifying signal(s)" count below. The actual DOM lists that get
+  // rendered (highestGridEl / otherGridEl / #otherTable tbody) are built
+  // from the FULL, unfiltered-by-qualification entry lists, so every
+  // watchlist ticker -- evaluated or not -- gets a real row. Highest
+  // Attention never receives not_evaluated placeholders from the backend
+  // (see backend/app/main.py's never_evaluated_tickers loop, which only
+  // ever appends to `other`), so allHighestDisplay only matters for
+  // defensiveness; allOtherDisplay is where this bug actually lived.
+  const qualifyingHighest = qualifyingEntries(data.highest);
+  const qualifyingOther = qualifyingEntries(data.other);
+  const allHighestDisplay = data.highest || [];
+  const allOtherDisplay = data.other || [];
+  const featured = qualifyingHighest[0] || null;
+  // The featured entry (if any) is always drawn from the qualifying set
+  // and rendered separately (renderFeaturedSignal), so it must not also
+  // appear a second time in the grid below it -- filter it out of the
+  // DISPLAY list by ticker, not by re-deriving from the qualifying list
+  // (which would silently re-introduce the dropped-row bug).
+  const restOfHighestDisplay = featured
+    ? allHighestDisplay.filter((e) => e.ticker !== featured.ticker)
+    : allHighestDisplay;
+  const filteredRest = filterRadarEntries(restOfHighestDisplay, familyFilter, stateFilter);
+  const filteredOther = filterRadarEntries(allOtherDisplay, familyFilter, stateFilter);
 
   const highestGridEl = document.getElementById("highestGrid");
   if (highestGridEl) highestGridEl.innerHTML = filteredRest.map(renderCard).join("") || "";
   // 2026-10-15 fix: when ZERO tickers genuinely qualify for Highest
-  // Attention (allHighest.length === 0, not merely filtered down to zero),
-  // Featured Signal's own honest "No featured signal right now" message
-  // already covers this tier -- a second, bare "Highest Attention" heading
-  // sitting over an empty grid right below it was redundant and looked
-  // broken, not like one compact empty state. Hide the whole redundant
-  // heading+grid section in that specific case; a filter-induced zero
-  // (allHighest.length > 0 but filteredRest is empty) still shows the
-  // heading normally since there IS a featured entry above it.
+  // Attention (qualifyingHighest.length === 0, not merely filtered down
+  // to zero), Featured Signal's own honest "No featured signal right
+  // now" message already covers this tier -- a second, bare "Highest
+  // Attention" heading sitting over an empty grid right below it was
+  // redundant and looked broken, not like one compact empty state. Hide
+  // the whole redundant heading+grid section in that specific case; a
+  // filter-induced zero (qualifyingHighest.length > 0 but filteredRest
+  // is empty) still shows the heading normally since there IS a
+  // featured entry above it.
   const highestSectionEl = document.getElementById("highestAttentionSection");
-  if (highestSectionEl) highestSectionEl.style.display = allHighest.length === 0 ? "none" : "";
+  if (highestSectionEl) highestSectionEl.style.display = qualifyingHighest.length === 0 ? "none" : "";
   const otherGridEl = document.getElementById("otherGrid");
   if (otherGridEl) otherGridEl.innerHTML = filteredOther.map(renderCard).join("") || "";
   // Other Noteworthy's table is now the primary (visible) presentation,
   // so it must respect the active filter the same way the grid does --
-  // filteredOther, not the full unfiltered allOther.
+  // filteredOther, not the full unfiltered allOtherDisplay. filteredOther
+  // is now drawn from allOtherDisplay (ALL entries), not qualifyingOther,
+  // so never-evaluated tickers genuinely render a row here.
   const tbody = document.querySelector("#otherTable tbody");
   if (tbody) tbody.innerHTML = filteredOther.map(renderRow).join("");
 
   // Counts: "qualifying" (highest+other, i.e. tip_evidence.qualifies()
   // entries) is always kept distinct from "scanned" (every synthetic
   // scenario including non-qualifying controls like NADA/DRFT) -- never
-  // blur the two. When a filter is active, also show how many of the
-  // qualifying set are currently shown.
-  const totalQualifying = allHighest.length + allOther.length;
-  const totalShown = (featured ? 1 : 0) + filteredRest.length + filteredOther.length;
+  // blur the two, and never let never-evaluated placeholder rows inflate
+  // it either (qualifyingHighest/qualifyingOther still exclude them, same
+  // as before this fix). Rows actually rendered are tracked separately
+  // (totalShownAll) so the empty-state logic reflects reality -- a
+  // watchlist that's 100% never-evaluated now correctly shows its rows
+  // instead of "No tickers qualify right now." over an empty table.
+  const totalQualifying = qualifyingHighest.length + qualifyingOther.length;
+  const notEvaluatedShown = filteredOther.filter((e) => e.not_evaluated).length;
+  const totalShownQualifying = (featured ? 1 : 0) + filteredRest.length + (filteredOther.length - notEvaluatedShown);
+  const totalShownAll = (featured ? 1 : 0) + filteredRest.length + filteredOther.length;
   const countsEl = document.getElementById("radarFilterCounts");
   if (countsEl) {
     // REAL BUG FIX (2026-10-15, Priority 4): this literally said
@@ -1349,16 +1396,17 @@ function renderRadarLists(data, filters, loadTickerDetailFn) {
     // _currentMode is never declared.
     const isLive = typeof _currentMode !== "undefined" && _currentMode === "live";
     const scannedUnit = isLive ? "ticker(s) scanned" : "scenario(s) scanned (including non-qualifying controls)";
+    const notEvalSuffix = notEvaluatedShown > 0 ? ` (+ ${notEvaluatedShown} not yet evaluated)` : "";
     countsEl.textContent = (familyFilter || stateFilter)
-      ? `Showing ${totalShown} of ${totalQualifying} qualifying signal(s) after filters \u2014 ${data.scanned} ${scannedUnit}`
-      : `${totalQualifying} qualifying signal(s) shown \u2014 ${data.scanned} ${scannedUnit}`;
+      ? `Showing ${totalShownQualifying} of ${totalQualifying} qualifying signal(s) after filters${notEvalSuffix} \u2014 ${data.scanned} ${scannedUnit}`
+      : `${totalQualifying} qualifying signal(s) shown${notEvalSuffix} \u2014 ${data.scanned} ${scannedUnit}`;
   }
   const radarEmptyEl = document.getElementById("radarEmpty");
   if (radarEmptyEl) {
-    radarEmptyEl.textContent = (familyFilter || stateFilter) && totalQualifying > 0 && totalShown === 0
-      ? "No qualifying signals match the current filters."
+    radarEmptyEl.textContent = (familyFilter || stateFilter) && (totalQualifying > 0 || allOtherDisplay.length > 0) && totalShownAll === 0
+      ? "No signals match the current filters."
       : "No tickers qualify right now.";
-    radarEmptyEl.style.display = (totalShown === 0) ? "block" : "none";
+    radarEmptyEl.style.display = (totalShownAll === 0) ? "block" : "none";
   }
 
   wireInvestigateButtons(loadTickerDetailFn);
@@ -1366,7 +1414,7 @@ function renderRadarLists(data, filters, loadTickerDetailFn) {
     card.addEventListener("click", (ev) => {
       if (ev.target.closest("[data-investigate-ticker]")) return;
       const t = card.dataset.ticker;
-      const entry = [...allHighest, ...allOther].find((e) => e.ticker === t);
+      const entry = [...allHighestDisplay, ...allOtherDisplay].find((e) => e.ticker === t);
       if (entry) {
         const slot = document.getElementById("breakdownSlot");
         if (slot) slot.innerHTML = renderSignalBreakdown(entry);
