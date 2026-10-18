@@ -84,23 +84,73 @@ def _event_date_for_bar(event_time) -> Optional[date]:
         return None
 
 
-def _bar_is_final(event_time, retrieved_at: Optional[str]) -> bool:
-    """chart-data-integrity-fixes (2026-10-18, Issue 2): True only when
-    this bar's real NYSE trading session had GENUINELY closed (per
-    trading_calendar.session_end_utc -- ET/DST-aware, the same real
-    calendar this codebase already trusts server-side) at the moment
-    this fetch happened (`retrieved_at`). A bar fetched mid-session is
-    not final; a bar fetched any time after that real session's close is
+# R8-2 INVESTIGATION FINDING (chart-data-integrity-fixes round 9,
+# 2026-10-18), stated plainly per this round's requirement to report
+# honestly either way: UW's real `/api/stock/{ticker}/ohlc/{size}`
+# response DOES carry a per-row `market_time` field (confirmed live,
+# see `backend/app/core/candles.py`'s own module docstring, gotcha #3 --
+# values "pr"/"r"/"po" for pre-market/regular/post-market). This
+# codebase already uses it (`select_regular_session_bars`) to pick the
+# correct SESSION-TYPE row out of up to 3 UW returns per calendar date.
+#
+# HOWEVER: `market_time` is a session-type CLASSIFIER, not a
+# completeness/finality signal. UW can and does return an `"r"`
+# (regular-session) row for a date whose regular session is still
+# actively in progress (intraday), with OHLC/volume that keep changing
+# on every subsequent poll until the session genuinely ends -- there is
+# no separate flag anywhere in the real response (confirmed against the
+# documented OpenAPI schema and this adapter's own live-verified field
+# list) that says "this particular row's data has finished
+# consolidating." So the honest answer is: NO, UW does not expose a
+# reliable SOURCE-based completeness signal for daily OHLC bars. The
+# only thing this codebase can observe is its OWN fetch wall-clock time
+# relative to the real NYSE session close (which `market_time` plays no
+# role in beyond confirming "r" is the regular-session row).
+#
+# POLICY IMPLEMENTED (since no source signal exists): fetch-time-based
+# finality, as before, PLUS a conservative grace period after the real
+# session close -- never an instantaneous "fetched at/after close ->
+# final" edge. NYSE/SIP/FINRA allow late trade reporting and exchange
+# corrections for a window after the closing cross; a bar fetched in
+# the first few minutes after 4:00pm (or 1:00pm on an early-close day --
+# trading_calendar.session_end_utc already returns the CORRECT close
+# for either case, so this grace period applies uniformly to both) is
+# at real, documented risk of still missing late prints. This grace
+# period is a HEURISTIC, documented as such, not a guarantee -- see
+# DAILY_BAR_FINALITY_GRACE_SECONDS below for the exact value and
+# rationale, and `catalog_price_bars`'s own updated docstring for how a
+# genuine correction arriving AFTER a bar has already been marked final
+# is still honored (never a new permanent-lock trap).
+DAILY_BAR_FINALITY_GRACE_SECONDS = 20 * 60  # 20 minutes past the real session close
+
+
+def _bar_is_final(
+    event_time, retrieved_at: Optional[str],
+    grace_period_s: float = DAILY_BAR_FINALITY_GRACE_SECONDS,
+) -> bool:
+    """chart-data-integrity-fixes (2026-10-18, Issue 2; widened round 9,
+    R8-2): True only when this bar's real NYSE trading session had
+    GENUINELY closed (per trading_calendar.session_end_utc -- ET/DST-
+    aware and early-close-aware, the same real calendar this codebase
+    already trusts server-side) AT LEAST `grace_period_s` seconds before
+    the moment this fetch happened (`retrieved_at`). A bar fetched
+    mid-session, or within the grace window right after close, is not
+    final; a bar fetched comfortably after that real session's close is
     treated as final.
 
     This is a PROXY, not a guarantee UW's own upstream data is done
-    revising at that instant -- see `catalog_price_bars`'s docstring and
-    this round's FINAL REPORT for the genuine limitation (UW's OHLC
-    endpoint exposes no explicit "this bar is final" flag of its own).
-    Always returns False (never-final / unknown) rather than guessing
-    True on any parse failure -- a False result is always SAFE here: it
-    only means "a later fetch is still allowed to replace this bar,"
-    never "this bar is wrong.\""""
+    revising at that instant -- see the module note above this function
+    (R8-2's honest finding: UW's OHLC response has no real completeness
+    flag, only a session-TYPE classifier) and `catalog_price_bars`'s
+    docstring for how a correction landing even after this grace period
+    is still accepted, never permanently blocked. Always returns False
+    (never-final / unknown) rather than guessing True on any parse
+    failure, and returns False for any date with no real trading session
+    (weekend/holiday -- `session_end_utc` returns None, there is no
+    close to have genuinely passed) -- a False result is always SAFE
+    here: it only means "a later fetch is still allowed to replace this
+    bar," never "this bar is wrong."
+    """
     trading_date = _event_date_for_bar(event_time)
     if trading_date is None:
         return False
@@ -110,7 +160,7 @@ def _bar_is_final(event_time, retrieved_at: Optional[str]) -> bool:
     close_utc = session_end_utc(trading_date)
     if close_utc is None:  # weekend/holiday -- not a real session, can't assess finality this way
         return False
-    return fetched_at >= close_utc
+    return (fetched_at - close_utc).total_seconds() >= grace_period_s
 
 
 def _bars_content_equal(a: dict, b: dict) -> bool:
@@ -312,9 +362,6 @@ class IngestionCatalog:
         Directional safety (never regress a good bar to a worse one):
           - No existing pointer for this date -> always insert + point
             (first real value seen for that date).
-          - Existing pointer's bar already confirmed FINAL (see
-            `_bar_is_final`) -> always skipped, permanently locked; no
-            later fetch replaces a confirmed-final bar through this path.
           - Existing pointer not final, incoming `retrieved_at` OLDER
             than the pointer's own -> rejected (never replace with
             staler data).
@@ -323,6 +370,28 @@ class IngestionCatalog:
             repeated fetch, treated as a no-op (not counted as a real
             change) -- preserves the pre-existing dedup-on-repeat-fetch
             guarantee this function has always had.
+          - Existing pointer's bar already confirmed FINAL (see
+            `_bar_is_final`) -> R8-2 WIDENED RULE (round 9, 2026-10-18):
+            no longer an unconditional permanent lock. A genuine late
+            correction (R8-2's own requirement -- "a correction arriving
+            after the grace period should still be accepted if it's
+            more complete than what's stored... don't make the
+            grace-period itself a new way to permanently lock in a bad
+            bar") is accepted when BOTH: (a) the incoming fetch's
+            `retrieved_at` is strictly NEWER than the stored pointer's
+            own `retrieved_at` (never replace with data fetched earlier
+            or at the same instant -- that direction is still always
+            rejected, preserving the non-regression guarantee), AND
+            (b) the incoming fetch ALSO computes as final under
+            `_bar_is_final` (since `retrieved_at` only increases and the
+            trading date/close time are fixed, a strictly-later fetch
+            for an already-past, already-final session always re-
+            computes final too -- this is never a path for a mid-
+            session/less-complete snapshot to overwrite a final one).
+            Content-unchanged corrections are still a no-op (see above).
+            This is the ONLY way a confirmed-final bar's pointer can
+            ever move; it can never move to anything less trustworthy
+            than what it already points at.
           - Otherwise (content changed, or finality newly achieved) ->
             a real replacement: insert the new row, repoint, count it.
 
@@ -362,11 +431,24 @@ class IngestionCatalog:
 
                 if existing is not None:
                     old_bar_id, old_is_final, old_retrieved_at, oo, oh, ol, oc, ov = existing
-                    if old_is_final:
-                        continue  # confirmed final -- permanently locked, never regressed
                     old_dt, new_dt = _parse_iso_dt(old_retrieved_at), _parse_iso_dt(retrieved_at)
                     if old_dt is not None and new_dt is not None and new_dt < old_dt:
-                        continue  # staler than what's already cached -- rejected
+                        continue  # staler than what's already cached -- rejected (true regardless of finality)
+                    if old_is_final:
+                        # R8-2 widened rule (round 9, 2026-10-18): a confirmed-final
+                        # bar is no longer an unconditional lock -- a genuine late
+                        # correction is accepted only when the incoming fetch is
+                        # BOTH strictly newer (checked above) AND itself final (a
+                        # strictly-later fetch for an already-past session always
+                        # re-computes final, so this never admits a less-complete
+                        # snapshot). Same-instant retrieved_at (new_dt == old_dt,
+                        # not older) falls through here too and is correctly
+                        # rejected by requiring new_is_final AND a real content
+                        # change below -- see this function's updated docstring.
+                        if not new_is_final:
+                            continue  # would-be correction isn't itself final -- never trust it over a confirmed-final bar
+                        if old_dt is not None and new_dt is not None and new_dt == old_dt:
+                            continue  # same fetch instant, no genuine new information -- reject
                     unchanged = (
                         bool(new_is_final) == bool(old_is_final)
                         and _bars_content_equal(
