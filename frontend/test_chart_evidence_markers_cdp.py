@@ -594,29 +594,30 @@ def main():
             })()""")
 
         # Flow lane: top / middle / bottom of the real flow-alert bar's
-        # own band (0.55-0.67, see EVIDENCE_FLOW_MARGINS).
+        # own band (0.56-0.64, see EVIDENCE_FLOW_MARGINS -- round 5
+        # widened the inter-lane gaps, see app.core.js module note).
         for label, frac in [("top", 0.1), ("middle", 0.5), ("bottom", 0.9)]:
-            target = lane_hover_target(0.55, 0.33, frac)
+            target = lane_hover_target(0.56, 0.36, frac)
             result = hover_and_read(target)
             check(f"flow lane hover at {label} of the bar shows the FLOW tooltip (not dark-pool)",
                   result and result["display"] == "block" and f"{real_flow_count} Flow alert" in result["html"]
                   and "Dark-pool" not in result["html"], (label, result, real_flow_count))
-        flow_target = lane_hover_target(0.55, 0.33, 0.5)
+        flow_target = lane_hover_target(0.56, 0.36, 0.5)
 
         # Dark-pool lane: top / middle / bottom of its own band
-        # (0.69-0.81, see EVIDENCE_DP_MARGINS).
+        # (0.74-0.82, see EVIDENCE_DP_MARGINS -- round 5).
         for label, frac in [("top", 0.1), ("middle", 0.5), ("bottom", 0.9)]:
-            target = lane_hover_target(0.69, 0.19, frac)
+            target = lane_hover_target(0.74, 0.18, frac)
             result = hover_and_read(target)
             check(f"dark-pool lane hover at {label} of the bar shows the DARK-POOL tooltip (not flow)",
                   result and result["display"] == "block" and f"{real_dp_count} Dark-pool" in result["html"]
                   and "Flow alert" not in result["html"], (label, result, real_dp_count))
-        dp_target = lane_hover_target(0.69, 0.19, 0.5)
+        dp_target = lane_hover_target(0.74, 0.18, 0.5)
 
-        # Volume-only region (below both evidence lanes, 0.85-1.0) must
+        # Volume-only region (below both evidence lanes, 0.90-1.0) must
         # NOT trigger an evidence tooltip -- and vice versa was already
         # checked above (neither lane's tooltip mentions the other kind).
-        volume_target = lane_hover_target(0.85, 0.0, 0.5)
+        volume_target = lane_hover_target(0.90, 0.0, 0.5)
         volume_result = hover_and_read(volume_target)
         check("hovering the volume-only region does not trigger an evidence tooltip",
               volume_result is None or volume_result["display"] == "none", volume_result)
@@ -793,7 +794,7 @@ def main():
         })()""")
         check(f"R4-1: dense single-bucket fixture produced exactly ONE real bucket with all {R4_DENSE_DP_COUNT} dark-pool prints (no fabricated splitting)",
               dense_info and dense_info["dpCountAtLast"] == R4_DENSE_DP_COUNT, (dense_info, R4_DENSE_DP_COUNT))
-        dense_hover = lane_hover_target(0.69, 0.19, 0.5)  # dark-pool lane, middle of the bar
+        dense_hover = lane_hover_target(0.74, 0.18, 0.5)  # dark-pool lane, middle of the bar
         dense_result = hover_and_read(dense_hover)
         check(f"R4-1: hovering the dense bucket's dark-pool lane shows the real count ({R4_DENSE_DP_COUNT}), not a truncated/fabricated one",
               dense_result and dense_result["display"] == "block" and f"{R4_DENSE_DP_COUNT} Dark-pool" in dense_result["html"],
@@ -825,13 +826,13 @@ def main():
         check(f"R4-2: that shared bucket's real counts are exact ({R4_SHARED_FLOW_COUNT} flow, {R4_SHARED_DP_COUNT} dark-pool)",
               shared_info and shared_info["flowCount"] == R4_SHARED_FLOW_COUNT and shared_info["dpCount"] == R4_SHARED_DP_COUNT,
               (shared_info, R4_SHARED_FLOW_COUNT, R4_SHARED_DP_COUNT))
-        shared_flow_hover = lane_hover_target(0.55, 0.33, 0.5)
+        shared_flow_hover = lane_hover_target(0.56, 0.36, 0.5)
         shared_flow_result = hover_and_read(shared_flow_hover)
         check("R4-2: hovering the shared bucket's FLOW lane shows only the flow tooltip (never cross-contaminated with dark-pool)",
               shared_flow_result and shared_flow_result["display"] == "block"
               and f"{R4_SHARED_FLOW_COUNT} Flow alert" in shared_flow_result["html"] and "Dark-pool" not in shared_flow_result["html"],
               shared_flow_result)
-        shared_dp_hover = lane_hover_target(0.69, 0.19, 0.5)
+        shared_dp_hover = lane_hover_target(0.74, 0.18, 0.5)
         shared_dp_result = hover_and_read(shared_dp_hover)
         check("R4-2: hovering the SAME shared bucket's DARK-POOL lane shows only the dark-pool tooltip",
               shared_dp_result and shared_dp_result["display"] == "block"
@@ -915,7 +916,7 @@ def main():
           const x = chart.timeScale().timeToCoordinate(t);
           const rect = root.getBoundingClientRect();
           const h = chart.options().height;
-          const y = h * 0.69 + (h * (1 - 0.19) - h * 0.69) * 0.5;
+          const y = h * 0.74 + (h * (1 - 0.18) - h * 0.74) * 0.5;
           return { clientX: rect.left + x, clientY: rect.top + y };
         })()""")
         cdp.dispatch_mouse("mouseMoved", right_edge_target["clientX"], right_edge_target["clientY"])

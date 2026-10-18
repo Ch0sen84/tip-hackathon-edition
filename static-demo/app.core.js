@@ -2745,10 +2745,45 @@ const EVIDENCE_HISTOGRAM_COLORS = { flow_alert: "rgba(245,158,11,0.75)", darkpoo
 // Final non-overlapping layout (all fractions of the ACTUAL chart pixel
 // height passed in at mount time -- see mountCandlestickChart's
 // chartHeight, never a DOM-measured container height, which is C-2's
-// fix below): candles 2%-50%, gap, flow-alert lane 55%-67%, gap,
-// dark-pool lane 69%-81%, gap, volume 85%-100%.
-const EVIDENCE_FLOW_MARGINS = { top: 0.55, bottom: 0.33 };
-const EVIDENCE_DP_MARGINS = { top: 0.69, bottom: 0.19 };
+// fix below): candles 2%-46%, gap (10%), flow-alert lane 56%-64%, gap
+// (10%), dark-pool lane 74%-82%, gap (8%), volume 90%-100%.
+//
+// Round 5 fix (2026-10-18, scale-margin widening, scope: margin VALUES
+// only, no architecture change): round 4's split was already
+// non-overlapping BY ARITHMETIC (top/bottom fractions never crossed),
+// but the chosen gaps were too thin at real pixel heights -- candle/
+// flow had only a 5% gap (candle ended 50%, flow started 55%) and
+// flow/dark-pool had only a 2% gap (flow ended 67%, dark-pool started
+// 69%; ~8px at 400px tall), which Layla's independent vision-model
+// screenshot read as "commingled... no visual separation."
+//
+// A first round-5 attempt tried a uniform 4% gap (Chad's suggested
+// starting values). Real-browser measurement caught a SECOND, more
+// subtle problem a pure arithmetic check cannot see: lightweight-
+// charts' histogram series apply their own internal autoscale
+// headroom ON TOP of scaleMargins whenever a lane's real data is
+// sparse (near-all-zero buckets plus one real value, exactly this
+// app's normal evidence shape) -- confirmed by reading
+// series.priceToCoordinate() directly against the real R4 dense/
+// shared-bucket fixtures: a lane's bar can render ~15-30px ABOVE its
+// own band's nominal top boundary regardless of chart height, because
+// the headroom is roughly proportional to the LANE'S OWN band height,
+// not to the actual data value. At a 4% (~21px) gap and a ~10% lane
+// band, that headroom alone consumed nearly the entire gap (measured
+// real flow/dark-pool separation as low as ~1px in the worst case,
+// despite the fractions themselves never overlapping) -- the exact
+// same "arithmetic says fine, pixels say touching" trap this round
+// exists to fix. Widening the GAPS specifically (not just the bands)
+// to 8-10% survives this: measured real (not nominal) separation of
+// ~31px at a 520px-tall chart and ~11-30px even at the library's
+// 320px height floor, using the real dense (180 dark-pool/0 flow) and
+// shared-bucket (40 flow/25 dark-pool, same time slot) fixtures --
+// see frontend/test_chart_evidence_markers_cdp.py's R4-1/R4-2 cases
+// and this round's own screenshot-based verification. Candle pane
+// shrank from 48% to 44% to make room; still ample for reading price
+// action at any supported chart height.
+const EVIDENCE_FLOW_MARGINS = { top: 0.56, bottom: 0.36 };
+const EVIDENCE_DP_MARGINS = { top: 0.74, bottom: 0.18 };
 
 function getEvidenceVisibilityMode() {
   try {
@@ -3247,11 +3282,16 @@ function mountCandlestickChart(containerId, ohlc, opts = {}) {
   // unset was the actual root cause of the evidence histogram visually
   // overlapping the candlesticks. Round 4 (C-2/C-3) widened the candle
   // band slightly (more breathing room, an explicit presentation
-  // request) and re-split the old single evidence band into two lanes:
-  // candles 2%-50%, gap, flow-alert lane 55%-67%, gap, dark-pool lane
-  // 69%-81%, gap, volume 85%-100% (see the volume series' own margins
-  // just below).
-  const CANDLE_PANE_MARGINS = { top: 0.02, bottom: 0.50 };
+  // request) and re-split the old single evidence band into two lanes.
+  // Round 5 (scale-margin widening, see EVIDENCE_FLOW_MARGINS/
+  // EVIDENCE_DP_MARGINS's module note for the full real-pixel
+  // investigation, including the histogram-autoscale-headroom effect
+  // that a 4%-gap first attempt didn't survive): candles 2%-46%, gap
+  // (10%), flow-alert lane 56%-64%, gap (10%), dark-pool lane 74%-82%,
+  // gap (8%), volume 90%-100% (see the volume series' own margins just
+  // below). Candle band gave up 4 percentage points (48%->44%) to fund
+  // the wider gaps; still ample room for reading price action.
+  const CANDLE_PANE_MARGINS = { top: 0.02, bottom: 0.54 };
   if (typeof series.priceScale === "function") {
     series.priceScale().applyOptions({ scaleMargins: CANDLE_PANE_MARGINS });
   } // else: minimal test DOM stub (no real priceScale API) -- safe no-op
@@ -3319,16 +3359,19 @@ function mountCandlestickChart(containerId, ohlc, opts = {}) {
       priceScaleId: "volume",
       color: "rgba(96,165,250,0.5)",
     });
-    // Round 4: moved from 82% to 85% top margin to preserve a real gap
-    // below the dark-pool lane (now ending at 81%, see
-    // EVIDENCE_DP_MARGINS) -- never let the volume band's own top edge
-    // creep into the evidence lanes just above it. `visible: false`
+    // Round 4 moved this from 82% to 85% top margin to preserve a real
+    // gap below the dark-pool lane; round 5 (scale-margin widening,
+    // real-pixel-measured, see EVIDENCE_DP_MARGINS's module note)
+    // moved it again to 90% to keep a real ~8%+ gap below the
+    // dark-pool lane (now ending at 82%, see EVIDENCE_DP_MARGINS) --
+    // never let the volume band's own top edge creep into the evidence
+    // lanes just above it. `visible: false`
     // (same additional presentation fix as the evidence lanes above):
     // hides this overlay scale's own right-axis tick labels so the
     // right-edge label column only ever shows the candle's real $
     // prices, never a second numeric sequence bleeding into the volume
     // region.
-    volumeSeries.priceScale().applyOptions({ scaleMargins: { top: 0.85, bottom: 0 }, visible: false });
+    volumeSeries.priceScale().applyOptions({ scaleMargins: { top: 0.90, bottom: 0 }, visible: false });
     volumeSeries.setData(ohlc.candles.map((c) => ({
       time: toChartTime(c.t), value: c.v || 0, color: c.c >= c.o ? "rgba(34,211,168,0.5)" : "rgba(239,68,68,0.5)",
     })));
