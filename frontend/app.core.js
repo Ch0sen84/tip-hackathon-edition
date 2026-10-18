@@ -2526,11 +2526,29 @@ const EVIDENCE_VISIBILITY_KEY = "tipEvidenceMarkerVisibility"; // "flow" | "dp" 
 // Same two rgba series colors mountActivityTimeline already uses for its
 // own flow/dark-pool histogram series -- reused verbatim, never reinvented.
 const EVIDENCE_HISTOGRAM_COLORS = { flow_alert: "rgba(245,158,11,0.75)", darkpool_trade: "rgba(96,165,250,0.6)" };
-// Band occupied by the evidence pane, as a fraction of total chart
-// height: 60%-78%, i.e. below the candles' own (unmargined) area and
-// above the volume pane's band (top:0.82, bottom:0 -- see below),
-// matching the SAME scaleMargins-based layering the volume histogram
-// already uses, never drawn on top of candle bodies.
+// ARCHITECTURE NOTE (2026-10-17, round 3 -- visual-separation fix):
+// Round 2 set this pane's margins but left the candlestick series on
+// its library-DEFAULT scaleMargins (top:0.2, bottom:0.1 -- see
+// lightweight-charts.js's own `ge` default price-scale options object,
+// applied to rightPriceScale). That default means the candle series'
+// plotted region spans 20%-90% of the pane's pixel height -- which
+// FULLY CONTAINS this 60%-78% evidence band and also overlaps the
+// volume band below (82%-100%). priceScaleId creates an independent
+// SCALE (its own autoscale + its own margins) but NOT an independent
+// pixel region/pane -- confirmed by reading PriceScale's margin
+// accessor in the vendored bundle (search `scaleMargins.bottom*this.At()
+// +this.co:this.cn.scaleMargins.top*this.At()+this.uo` in
+// lightweight-charts.js): every price scale's drawable band is a
+// fraction of the SAME shared pane height, so bands only stay disjoint
+// if EVERY series sharing that pane -- including the main candlesticks,
+// not just the overlay histograms -- has mutually non-overlapping
+// margins. Confirmed this is the actual root cause of the visual
+// overlap Layla found (not a mode/priceScaleId mismatch, and not
+// evidence vs. volume competing with each other -- their own two bands,
+// 60-78 and 82-100, were already disjoint). See CANDLE_PANE_MARGINS
+// just below mountCandlestickChart's addCandlestickSeries call for the
+// other half of this fix. Final non-overlapping layout: candles
+// 2%-55%, gap, evidence 60%-78%, gap, volume 82%-100%.
 const EVIDENCE_PANE_MARGINS = { top: 0.60, bottom: 0.22 };
 
 function getEvidenceVisibilityMode() {
@@ -2872,6 +2890,18 @@ function mountCandlestickChart(containerId, ohlc, opts = {}) {
     wickUpColor: "#22d3a8", wickDownColor: "#ef4444",
     priceScaleId: "right",
   });
+  // Round 3 fix: shrink the candle series' OWN plotted band so it no
+  // longer silently defaults to the library's top:0.2/bottom:0.1 (i.e.
+  // 20%-90% of the pane) -- see EVIDENCE_PANE_MARGINS' module note just
+  // above mountEvidenceHistogram for why leaving this unset was the
+  // actual root cause of the evidence histogram visually overlapping
+  // the candlesticks. 2%-55%, leaving a real (non-zero) gap before the
+  // evidence band (60%-78%) and another before the volume band
+  // (82%-100%) further down.
+  const CANDLE_PANE_MARGINS = { top: 0.02, bottom: 0.45 };
+  if (typeof series.priceScale === "function") {
+    series.priceScale().applyOptions({ scaleMargins: CANDLE_PANE_MARGINS });
+  } // else: minimal test DOM stub (no real priceScale API) -- safe no-op
 
   // 2026-10-15 (item #3, genuine 1D intraday): daily bars' `t` is a
   // plain "YYYY-MM-DD" date (UW's own docs: 1d/1w candles have no

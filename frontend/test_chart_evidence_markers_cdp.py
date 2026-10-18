@@ -184,6 +184,14 @@ FIXTURE_3M, _ = build_daily_fixture(65)
 FIXTURE_6M, _ = build_daily_fixture(130)
 FIXTURE_1Y, _ = build_daily_fixture(252)
 
+# --- round 3 (2026-10-17, visual-separation fix): a second, genuinely
+# NVDA-shaped fixture (real NVDA price regime, ~$925) -- same builders,
+# real different base price/volatility so it isn't just SPY relabeled --
+# used alongside the SPY fixtures above for the 8 required SPY/NVDA x
+# 1D/3M x 1920x1080/2560x1440 post-fix visual-inspection screenshots.
+FIXTURE_NVDA_1D, LAST_BAR_NVDA_1D = build_intraday_fixture(base_price=925.0, session_date="2026-10-17")
+FIXTURE_NVDA_3M, _ = build_daily_fixture(65, base_price=925.0)
+
 
 class QuietHandler(http.server.SimpleHTTPRequestHandler):
     def log_message(self, *a):
@@ -305,6 +313,8 @@ def main():
       window.__fixture3M = {json.dumps(FIXTURE_3M)};
       window.__fixture6M = {json.dumps(FIXTURE_6M)};
       window.__fixture1Y = {json.dumps(FIXTURE_1Y)};
+      window.__fixtureNVDA1D = {json.dumps(FIXTURE_NVDA_1D)};
+      window.__fixtureNVDA3M = {json.dumps(FIXTURE_NVDA_3M)};
     """
 
     # === BEFORE (main@62b29f8, real originally-reported-bug rendering,
@@ -558,6 +568,28 @@ def main():
         check("panning the chart does not crash", pan_ok is True, pan_ok)
         still_mounted_after_pan = cdp.eval("!!document.getElementById('ohlcChartContainer')._tipEvidenceSeries")
         check("evidence histogram series survive a pan (still mounted, same chart instance)", still_mounted_after_pan is True)
+
+        # --- Round 3 (2026-10-17) visual-separation acceptance evidence:
+        #     8 real post-fix screenshots -- SPY x NVDA, 1D x 3M, both
+        #     required resolutions -- ticker-tagged filenames so Layla's
+        #     independent re-inspection can be done per-screenshot. These
+        #     are the ONLY thing that counts as proof per Chad's
+        #     instruction; this script does not (and cannot) assert
+        #     "no visual overlap" itself.
+        for ticker, fixtures in [
+            ("SPY", [("1D", "window.__fixture1D"), ("3M", "window.__fixture3M")]),
+            ("NVDA", [("1D", "window.__fixtureNVDA1D"), ("3M", "window.__fixtureNVDA3M")]),
+        ]:
+            for range_label, fixture_var in fixtures:
+                cdp.eval(mount_js(fixture_var))
+                time.sleep(0.4)
+                for w, h in SIZES:
+                    cdp.set_viewport(w, h)
+                    time.sleep(0.3)
+                    cdp.screenshot(SCREENSHOT_DIR / f"after_{ticker}_{range_label}_{w}x{h}.png")
+        print(f"Saved 8 round-3 SPY/NVDA 1D/3M acceptance screenshots to {SCREENSHOT_DIR}")
+        cdp.set_viewport(1920, 1080)
+        time.sleep(0.2)
 
         print(f"\\n{passed} check(s) passed, {failed} failed.")
     finally:
