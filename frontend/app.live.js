@@ -472,6 +472,27 @@ async function loadOhlcChart(ticker, range, mySeq) {
         `<div style="margin-top:6px"><button id="loadMoreChartDataBtn" type="button" class="btn-refresh">` +
         `Load more (fetch real ${esc(range)} data from UW)</button>` +
         `<div id="loadMoreChartDataStatus" class="muted" style="margin-top:6px;font-size:11px"></div></div>`;
+    } else if (ohlc.latest_bar_is_final === false) {
+      // R8-3 (chart-data-integrity-fixes round 9, 2026-10-18): the range
+      // IS fully cached/satisfied (we're in this branch precisely
+      // because range_fully_satisfied was NOT false above), but the
+      // backend's own finality determination (see _bar_is_final /
+      // get_latest_daily_bar_final_status) says the trailing cataloged
+      // bar may still be incomplete. Before this fix there was NO
+      // affordance at all in this case -- a user had no way to trigger
+      // the refresh that would pull in the real final close. Only
+      // meaningful for daily ranges (latest_bar_is_final is always None
+      // for 1D intraday -- see that field's own backend docstring).
+      const negNote = ohlc.negative_volume_bars_clamped
+        ? ` \u00b7 ${ohlc.negative_volume_bars_clamped} bar(s) had an upstream negative-volume artifact (clamped to 0 for display)`
+        : "";
+      noteEl.innerHTML =
+        `<span>${esc(range)} \u00b7 ${ohlc.candle_count} daily candles${esc(negNote)}${esc(rawNote)} -- ` +
+        `the most recent cached bar may not be final yet (fetched close to or just after the real session close). ` +
+        `This range is otherwise fully cached.</span>` +
+        `<div style="margin-top:6px"><button id="refreshLastBarBtn" type="button" class="btn-refresh">` +
+        `Refresh last bar</button>` +
+        `<div id="refreshLastBarStatus" class="muted" style="margin-top:6px;font-size:11px"></div></div>`;
     } else {
       const negNote = ohlc.negative_volume_bars_clamped
         ? ` \u00b7 ${ohlc.negative_volume_bars_clamped} bar(s) had an upstream negative-volume artifact (clamped to 0 for display)`
@@ -481,6 +502,7 @@ async function loadOhlcChart(ticker, range, mySeq) {
     }
     wireLoadChartDataButton(ticker, range, mySeq);
     wireLoadMoreChartDataButton(ticker, range, mySeq);
+    wireRefreshLastBarButton(ticker, range, mySeq);
   } catch (chartErr) {
     if (mySeq !== _navSeq) return;
     mountCandlestickChart("ohlcChartContainer", { unavailable: true, reason: { message: chartErr.message } }, { showLoadButton: true });
@@ -594,6 +616,78 @@ function wireLoadMoreChartDataButton(ticker, range, mySeq) {
       if (mySeq !== _navSeq) return;
       if (statusEl && statusEl.isConnected) {
         statusEl.textContent = `Failed to load more chart data: ${err.message}`;
+      }
+      if (btn.isConnected) btn.disabled = false;
+    } finally {
+      _chartLoadInFlight = false;
+    }
+  });
+}
+
+// R8-3 (chart-data-integrity-fixes round 9, 2026-10-18): the trailing-
+// bar refresh affordance for the FULLY-CACHED-but-latest-bar-non-final
+// case (see loadOhlcChart's `ohlc.latest_bar_is_final === false` branch
+// above). Calls the SAME existing authenticated
+// POST /api/ticker/{ticker}/ohlc/refresh route every other chart-
+// refresh button on this page already uses -- no new endpoint.
+//
+// SCOPING (the real R8-3 requirement -- never refresh the whole 3M/6M/
+// 1Y range's hundreds of already-final bars just to pick up one
+// incomplete trailing one): UW's real OHLC endpoint has no date-
+// filtered "give me just this one day" call -- it is COUNT-based
+// (`limit` rows within a `window`), not date-range-based (confirmed by
+// reading live_uw_adapter.stock_ohlc's own docstring/live-verified
+// behavior). The narrowest scope the EXISTING endpoint actually
+// supports is therefore: a small `limit` (REFRESH_LAST_BAR_LIMIT) with
+// NO `range`/window forwarded at all -- UW then returns only its most
+// recent few raw session records for this ticker, never the full
+// 3M (65)/6M (130)/1Y (252) trading-day count. catalog_price_bars's own
+// directional-safety logic (R8-2) additionally guarantees that even the
+// handful of historical bars this small request DOES happen to overlap
+// with are a harmless no-op if unchanged, and never silently regress an
+// already-confirmed-final bar to something less trustworthy.
+//
+// Idempotent by construction (verified explicitly by this round's own
+// backend tests, not just inherited): clicking this twice issues two
+// identical scoped refetches, and catalog_price_bars's content-
+// sensitive source_id + "unchanged content -> no-op" rule (R8-2) means
+// the second click never double-inserts or duplicates a row.
+const REFRESH_LAST_BAR_LIMIT = 5;
+
+function wireRefreshLastBarButton(ticker, range, mySeq) {
+  const btn = document.getElementById("refreshLastBarBtn");
+  if (!btn) return;
+  const statusEl = document.getElementById("refreshLastBarStatus");
+  btn.addEventListener("click", async () => {
+    if (_chartLoadInFlight) return;
+    _chartLoadInFlight = true;
+    btn.disabled = true;
+    if (statusEl) statusEl.textContent = "Refreshing the most recent bar from UW...";
+    try {
+      // Deliberately NO `range=` query param -- see this function's own
+      // header comment for why a small `limit` alone is the narrowest
+      // real scope the existing endpoint supports.
+      const ohlc = await apiPost(
+        `/api/ticker/${encodeURIComponent(ticker)}/ohlc/refresh?limit=${REFRESH_LAST_BAR_LIMIT}`,
+        {}
+      );
+      if (mySeq !== _navSeq) return; // user navigated away while this was in flight
+      // The scoped refresh intentionally returns only a FEW bars (not
+      // the full range the chart is showing) -- re-request the real
+      // cache-only range read so the chart re-renders with the full
+      // range PLUS the just-refreshed trailing bar, never a chart that
+      // visually shrinks down to 5 bars after a successful refresh.
+      await loadOhlcChart(ticker, range, mySeq);
+      const newStatusEl = document.getElementById("refreshLastBarStatus");
+      if (newStatusEl) {
+        newStatusEl.textContent = ohlc.unavailable
+          ? ((ohlc.reason && ohlc.reason.message) || "Refresh did not return new data.")
+          : `Refreshed -- latest bar is now ${ohlc.latest_bar_is_final ? "final" : "still not yet final"}.`;
+      }
+    } catch (err) {
+      if (mySeq !== _navSeq) return;
+      if (statusEl && statusEl.isConnected) {
+        statusEl.textContent = `Failed to refresh the last bar: ${err.message}`;
       }
       if (btn.isConnected) btn.disabled = false;
     } finally {

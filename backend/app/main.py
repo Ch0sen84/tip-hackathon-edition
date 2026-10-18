@@ -2125,6 +2125,12 @@ def _ticker_ohlc_impl(ticker: str, timeframe: str, limit: int, range: Optional[s
     live_fetch = refresh or not is_live
     cached_at = None
     source_label = None
+    # R8-3 placeholder (chart-data-integrity-fixes round 9, 2026-10-18):
+    # resolved below once `timeframe` is final (the `range` block above
+    # can still rewrite it) -- see the full writeup just above the
+    # response dict for why this is read AFTER a live fetch too, not
+    # just on the cache-only path.
+    latest_bar_is_final = None
 
     if live_fetch:
         # `window` (Phase B final fix, 2026-10-14): UW's REAL date-window
@@ -2191,6 +2197,23 @@ def _ticker_ohlc_impl(ticker: str, timeframe: str, limit: int, range: Optional[s
         regular_session_records_retained = None
         source_label = "cache" if candles else None
 
+    # R8-3 (chart-data-integrity-fixes round 9, 2026-10-18): whether the
+    # most-recent CATALOGED daily bar is confirmed final (see
+    # IngestionCatalog.get_latest_daily_bar_final_status / _bar_is_final
+    # in ingestion.py). Computed for BOTH the cache-only and live-fetch
+    # paths -- a live fetch here still only ever reads what Issue 2's
+    # fix already wrote via catalog_price_bars a few lines above, never
+    # re-derives finality independently, so the frontend's refresh
+    # affordance always reflects the SAME pointer the chart data itself
+    # came from. None for intraday timeframes (never a meaningful
+    # question -- see that method's docstring) and when nothing is
+    # cataloged yet for this ticker/timeframe at all.
+    if is_live:
+        try:
+            latest_bar_is_final = get_catalog().get_latest_daily_bar_final_status(ticker, timeframe)
+        except Exception:  # noqa: BLE001 -- disclosure-only field, never fail the whole response over it
+            latest_bar_is_final = None
+
     markers = build_markers(flow_alerts, darkpool_trades)
     # Phase B (2026-10-14) honest coverage disclosure -- production-
     # inspired (its own range_fully_satisfied/available_span_days
@@ -2256,6 +2279,10 @@ def _ticker_ohlc_impl(ticker: str, timeframe: str, limit: int, range: Optional[s
         # definition and doesn't need a second timestamp).
         "served_from_cache": not live_fetch,
         "cached_at": cached_at,
+        # R8-3: see the computation comment above -- lets the frontend
+        # show a scoped "refresh last bar" affordance even when the
+        # range is otherwise fully cached/satisfied.
+        "latest_bar_is_final": latest_bar_is_final,
     }
 
 

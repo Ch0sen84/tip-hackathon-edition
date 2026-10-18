@@ -2103,8 +2103,8 @@ function dateOnly(ts) {
 
 // Finds the latest candle date <= the marker's date (markers can land on
 // a non-trading day -- e.g. an alert timestamped intraday maps onto that
-// trading day's daily bar). Falls back to the first candle if the marker
-// predates the whole series, rather than silently dropping it.
+// trading day's daily bar, when that trading day IS within the fetched
+// range).
 //
 // REAL BUG FIX (2026-10-14, reported live on NVDA): a marker dated AFTER
 // every fetched candle (e.g. today's real-time flow alerts/dark-pool
@@ -2113,13 +2113,37 @@ function dateOnly(ts) {
 // yet) used to silently fall through this same loop and land on the
 // LAST candle -- every single out-of-range marker collapsing onto one
 // bar at the right edge, exactly the "stacked at the right boundary" bug.
-// The loop logic for "marker predates the series" (falling back to the
-// FIRST candle) was intentional and stays; "marker postdates the series"
-// must NOT get the same treatment -- there is no real candle that event
-// happened on. Returns null in that case so the caller excludes the
-// marker rather than inventing/clamping its position.
+// Fixed to return null (excluded, never clamped) in that case.
+//
+// REAL BUG FIX (chart-data-integrity-fixes, 2026-10-18, reported live on
+// CHAD-PC's final hackathon video capture): the MIRROR-IMAGE bug on the
+// other edge. A marker dated BEFORE every fetched candle (e.g. a real
+// October-15 flow-alert/dark-pool observation, when the 1D chart's
+// visible range starts at the FIRST October-16 candle because only one
+// day of intraday candles is cached/fetched) used to fall back to the
+// FIRST candle instead of being excluded -- producing a false early
+// candle "spike" that misrepresented October-15 evidence as if it
+// happened on October-16. This was the OLD, explicitly "intentional"
+// behavior (see this function's prior comment and the now-updated
+// test_chart_markers.mjs) -- re-examined per Chad's report and confirmed
+// to be the SAME CATEGORY of bug as the already-fixed postdate case,
+// just the reverse direction: there is no real October-16 candle that
+// an October-15 event happened on, so clamping it onto one is exactly
+// the "invented/clamped position" the postdate fix above already
+// rejects. Fixed the same way: return null (excluded, never clamped)
+// when the marker predates the entire fetched series too. The event
+// itself is NEVER dropped -- it is still counted via `excludedCount` and
+// listed in the full "Evidence by day" table by the caller
+// (mountCandlestickChart), exactly like an after-range exclusion.
+//
+// A marker landing BETWEEN two candles IN the fetched range (e.g. a
+// weekend/holiday date between two real trading-day bars) still legally
+// maps forward to the latest candle <= it via the loop below -- that
+// behavior is unchanged and is NOT the same thing as predating the whole
+// series.
 function nearestBarTime(markerDate, sortedCandleDates) {
   if (!sortedCandleDates.length) return null;
+  const firstCandle = sortedCandleDates[0];
   const lastCandle = sortedCandleDates[sortedCandleDates.length - 1];
   // REAL BUG FIX (real-data QA remediation round 4, 2026-10-17):
   // discovered via the R4-1 dense-single-bucket regression fixture
@@ -2148,12 +2172,22 @@ function nearestBarTime(markerDate, sortedCandleDates) {
     }
   }
   if (markerDate > upperBound) return null; // genuinely outside the fetched range -- do not clamp
+  // chart-data-integrity-fixes (2026-10-18): symmetric lower-bound guard,
+  // see this function's header comment. `firstCandle`'s own start is
+  // already the real left edge of the fetched range (unlike the upper
+  // bound, there is no "last bar's own window" to extend into on this
+  // side -- any marker strictly before the first candle starts did not
+  // happen during any fetched bar's window, full stop). Returning null
+  // here -- instead of the old fallback-to-first-candle -- is what
+  // excludes an October-15 event from a chart whose first real candle is
+  // October-16, rather than clamping it there.
+  if (markerDate < firstCandle) return null; // genuinely outside the fetched range -- do not clamp
   let best = null;
   for (const t of sortedCandleDates) {
     if (t <= markerDate) best = t;
     else break;
   }
-  return best || sortedCandleDates[0];
+  return best; // always set now: markerDate >= firstCandle is guaranteed above
 }
 
 // --- C-1 (real-data QA remediation, round 4, 2026-10-17): genuine
@@ -2407,8 +2441,23 @@ function renderEvidenceDaySummaryTable(byDay) {
 // configurable id namespace for the markup this function already emits.
 function renderEvidencePanel(allEvents, excludedCount, idPrefix = "") {
   const byDay = buildEvidenceDaySummary(allEvents);
+  // R8-1 FIX (chart-data-integrity-fixes round 9, 2026-10-18): `allEvents`
+  // now genuinely contains EVERY real fetched observation (see
+  // mountCandlestickChart's R8-1 comment) -- `excludedCount` of them are
+  // excluded from the CHART HISTOGRAM only (nearestBarTime found no
+  // in-range candle for them), the rest (`allEvents.length -
+  // excludedCount`) are the ones actually plotted. The old wording
+  // ("...are not shown on the chart -- still counted and listed below")
+  // was a LIE at the time it was written: those events were silently
+  // dropped from "listed below" too (the real R8-1 bug this round
+  // fixes). Now that they genuinely remain listed, the text is
+  // rewritten to state BOTH numbers explicitly so "total fetched" and
+  // "plotted on this chart range" can never be confused with each
+  // other again, and so this claim stays independently checkable
+  // against the real numbers in every future round.
+  const plottedCount = Math.max(0, allEvents.length - excludedCount);
   const excludedNote = excludedCount > 0
-    ? `<div class="muted">${excludedCount} evidence marker(s) dated after this chart's most recent bar are not shown on the chart (no real candle exists yet for that date) -- still counted and listed below, never clamped or estimated.</div>`
+    ? `<div class="muted">${allEvents.length} total fetched observation${allEvents.length === 1 ? "" : "s"}; ${plottedCount} plotted on this chart's currently fetched candle range; ${excludedCount} fall outside that range (before the first bar or after the last) and are not plotted on the chart -- they DO remain listed in the evidence table, individual-observations drill-down, and Activity Timeline below, never dropped, clamped, or estimated.</div>`
     : "";
   if (!allEvents.length) {
     return `${excludedNote}<div class="empty">No evidence recorded for this chart's period.</div>`;
@@ -3537,9 +3586,47 @@ function mountCandlestickChart(containerId, ohlc, opts = {}) {
   // hover/click drill-down and in the unchanged, already-existing
   // evidence table below, never permanently drawn as text on the chart
   // itself. See mountEvidenceHistogram's own header comment for the rest.
+  // R8-1 FIX (chart-data-integrity-fixes round 9, 2026-10-18): the loop
+  // below used to build `groups` (chart-plotting only) and then derive
+  // `allEvents` FROM `groups.values()` -- so any event nearestBarTime()
+  // excluded (barTime === null, EITHER direction: before the first
+  // candle OR after the last) was never added to any group and
+  // therefore silently never made it into `allEvents` either. Since
+  // `allEvents` is the SAME list handed to renderEvidencePanel (the
+  // evidence table + individual-observations drill-down) and
+  // mountActivityTimeline just below, every genuinely-fetched
+  // out-of-range observation was being dropped from those views too --
+  // not just excluded from the chart, which is the only thing
+  // nearestBarTime's exclusion is supposed to control. Real-data QA
+  // (Claude Code, port 8200) measured this directly: SPY -561
+  // observations (2,737 -> 2,176), NVDA -575 (2,662 -> 2,087), both
+  // matching the October-15 lower-bound-exclusion count exactly.
+  //
+  // Verified this was NOT new in this round: the upper-bound (postdate)
+  // exclusion path has used the identical `if (!barTime) { excludedCount
+  // += 1; continue; }` shape since it was introduced on 2026-10-14 (see
+  // nearestBarTime's own header comment above), and `allEvents` has been
+  // derived from `groups.values()` since this grouping was introduced
+  // the same day -- so a marker dated AFTER the last fetched candle has
+  // ALWAYS been silently dropped from the table/timeline too, under the
+  // exact same bug, just never reported until the lower-bound fix made
+  // the counts large enough (a whole prior trading day's worth of
+  // events) to notice. Both directions get the same fix below.
+  //
+  // Fix: keep `groups` as the SOLE input to the chart histogram
+  // (mountEvidenceHistogram, unchanged, still plot-only / in-range-only
+  // -- requirement 1/3, nearestBarTime's own exclusion logic is NOT
+  // touched). Build `allEvents` directly from EVERY real fetched marker
+  // exactly once (requirement 2/5 -- no double counting: each marker
+  // contributes to `allEvents` exactly once here, and independently to
+  // `groups` only when in-range, so summing group sizes is always
+  // `allEvents.length - excludedCount`, never overlapping or duplicated
+  // with the excluded set).
   let excludedCount = 0;
-  const groups = new Map(); // key: `${barTime}|${kind}` -> { barTime, kind, events: [...] }
+  const groups = new Map(); // key: `${barTime}|${kind}` -> { barTime, kind, events: [...] } -- CHART PLOTTING ONLY (in-range)
+  const allEvents = []; // every real fetched marker, in-range or not -- feeds the evidence table/drill-down/Activity Timeline
   for (const m of ohlc.markers || []) {
+    allEvents.push(m);
     const barTime = nearestBarTime(toChartTime(m.time), candleDates);
     if (!barTime) {
       excludedCount += 1;
@@ -3549,8 +3636,6 @@ function mountCandlestickChart(containerId, ohlc, opts = {}) {
     if (!groups.has(key)) groups.set(key, { barTime, kind: m.kind, events: [] });
     groups.get(key).events.push(m);
   }
-  const allEvents = []; // flat list for the detail table, newest-first within each group preserved
-  for (const g of groups.values()) allEvents.push(...g.events);
   chart.timeScale().fitContent();
   // Additional presentation fix (round 4): a small right-side margin so
   // the LAST bar's own tick label has room to render fully instead of

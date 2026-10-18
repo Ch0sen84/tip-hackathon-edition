@@ -60,6 +60,7 @@ NEW_CATALOG_TABLES = (
     "signal_transitions",
     "ai_investigations",
     "ingestion_jobs",
+    "price_bar_current",
 )
 
 
