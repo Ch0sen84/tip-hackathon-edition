@@ -3,9 +3,17 @@
 // fetched candle onto the LAST candle -- every out-of-range marker (e.g.
 // today's real-time flow alerts while today's daily bar hasn't closed/
 // finalized yet) collapsing onto one bar at the chart's right edge. Fixed
-// to return null (marker excluded, not clamped) in that case; the
-// "marker predates the series" fallback to the FIRST candle is untouched
-// (that one's intentional and documented).
+// to return null (marker excluded, not clamped) in that case.
+//
+// REAL BUG FIX regression guard (chart-data-integrity-fixes, 2026-10-18,
+// reported live on CHAD-PC's final hackathon video capture): the
+// MIRROR-IMAGE bug on the other edge. A marker dated BEFORE every
+// fetched candle (e.g. a real October-15 evidence observation, when the
+// 1D chart's visible range starts at the FIRST October-16 candle) used
+// to fall back to the FIRST candle -- an "intentional" behavior at the
+// time -- producing a false spike that misattributed October-15
+// evidence to October-16. Re-examined and fixed the same way as the
+// postdate case: return null (excluded, never clamped).
 //
 //   node frontend/test_chart_markers.mjs
 
@@ -46,13 +54,36 @@ check("marker between two candle dates -> maps to the latest candle <= it (non-t
   assert.equal(nearestBarTime("2026-10-11T15:30:00Z".slice(0, 10), candleDates), "2026-10-11");
 });
 
-check("marker BEFORE the whole series -> falls back to the FIRST candle (unchanged, intentional)", () => {
-  assert.equal(nearestBarTime("2026-10-01", candleDates), "2026-10-10");
+check("THE OCT-15-INTO-OCT-16 BUG: marker BEFORE the whole series -> excluded (null), never clamped to the first bar", () => {
+  assert.equal(nearestBarTime("2026-10-01", candleDates), null);
+  assert.equal(nearestBarTime("2026-10-09", candleDates), null);
+});
+
+check("marker exactly on the first candle's date -> matches, not excluded", () => {
+  assert.equal(nearestBarTime("2026-10-10", candleDates), "2026-10-10");
 });
 
 check("THE ACTUAL BUG: marker AFTER the last candle -> excluded (null), never clamped to the last bar", () => {
   assert.equal(nearestBarTime("2026-10-14", candleDates), null);
   assert.equal(nearestBarTime("2026-10-20", candleDates), null);
+});
+
+// Market-session-boundary edge case (the exact category underlying the
+// Oct-15-into-Oct-16 bug): intraday (numeric UTCTimestamp) candles for a
+// SINGLE day only, an event timestamped just before vs. just at/after
+// that day's first bar.
+const intradayCandleDates = [1000, 1300, 1600, 1900]; // one day's 5-min-ish bars, seconds epoch
+check("intraday: event exactly AT the first bar's start -> matches, not excluded", () => {
+  assert.equal(nearestBarTime(1000, intradayCandleDates), 1000);
+});
+check("intraday: event 1 second BEFORE the first bar's start (prior session) -> excluded (null), never clamped", () => {
+  assert.equal(nearestBarTime(999, intradayCandleDates), null);
+});
+check("intraday: event just AFTER the last bar's own window -> excluded (null), never clamped", () => {
+  assert.equal(nearestBarTime(1900 + 300, intradayCandleDates), null); // bar width inferred as 300s; this is the start of a NEXT (unfetched) bar
+});
+check("intraday: event inside the last bar's own window -> matches the last bar", () => {
+  assert.equal(nearestBarTime(1900 + 250, intradayCandleDates), 1900);
 });
 
 check("empty candle series -> never crashes, returns null", () => {

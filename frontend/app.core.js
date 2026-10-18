@@ -2103,8 +2103,8 @@ function dateOnly(ts) {
 
 // Finds the latest candle date <= the marker's date (markers can land on
 // a non-trading day -- e.g. an alert timestamped intraday maps onto that
-// trading day's daily bar). Falls back to the first candle if the marker
-// predates the whole series, rather than silently dropping it.
+// trading day's daily bar, when that trading day IS within the fetched
+// range).
 //
 // REAL BUG FIX (2026-10-14, reported live on NVDA): a marker dated AFTER
 // every fetched candle (e.g. today's real-time flow alerts/dark-pool
@@ -2113,13 +2113,37 @@ function dateOnly(ts) {
 // yet) used to silently fall through this same loop and land on the
 // LAST candle -- every single out-of-range marker collapsing onto one
 // bar at the right edge, exactly the "stacked at the right boundary" bug.
-// The loop logic for "marker predates the series" (falling back to the
-// FIRST candle) was intentional and stays; "marker postdates the series"
-// must NOT get the same treatment -- there is no real candle that event
-// happened on. Returns null in that case so the caller excludes the
-// marker rather than inventing/clamping its position.
+// Fixed to return null (excluded, never clamped) in that case.
+//
+// REAL BUG FIX (chart-data-integrity-fixes, 2026-10-18, reported live on
+// CHAD-PC's final hackathon video capture): the MIRROR-IMAGE bug on the
+// other edge. A marker dated BEFORE every fetched candle (e.g. a real
+// October-15 flow-alert/dark-pool observation, when the 1D chart's
+// visible range starts at the FIRST October-16 candle because only one
+// day of intraday candles is cached/fetched) used to fall back to the
+// FIRST candle instead of being excluded -- producing a false early
+// candle "spike" that misrepresented October-15 evidence as if it
+// happened on October-16. This was the OLD, explicitly "intentional"
+// behavior (see this function's prior comment and the now-updated
+// test_chart_markers.mjs) -- re-examined per Chad's report and confirmed
+// to be the SAME CATEGORY of bug as the already-fixed postdate case,
+// just the reverse direction: there is no real October-16 candle that
+// an October-15 event happened on, so clamping it onto one is exactly
+// the "invented/clamped position" the postdate fix above already
+// rejects. Fixed the same way: return null (excluded, never clamped)
+// when the marker predates the entire fetched series too. The event
+// itself is NEVER dropped -- it is still counted via `excludedCount` and
+// listed in the full "Evidence by day" table by the caller
+// (mountCandlestickChart), exactly like an after-range exclusion.
+//
+// A marker landing BETWEEN two candles IN the fetched range (e.g. a
+// weekend/holiday date between two real trading-day bars) still legally
+// maps forward to the latest candle <= it via the loop below -- that
+// behavior is unchanged and is NOT the same thing as predating the whole
+// series.
 function nearestBarTime(markerDate, sortedCandleDates) {
   if (!sortedCandleDates.length) return null;
+  const firstCandle = sortedCandleDates[0];
   const lastCandle = sortedCandleDates[sortedCandleDates.length - 1];
   // REAL BUG FIX (real-data QA remediation round 4, 2026-10-17):
   // discovered via the R4-1 dense-single-bucket regression fixture
@@ -2148,12 +2172,22 @@ function nearestBarTime(markerDate, sortedCandleDates) {
     }
   }
   if (markerDate > upperBound) return null; // genuinely outside the fetched range -- do not clamp
+  // chart-data-integrity-fixes (2026-10-18): symmetric lower-bound guard,
+  // see this function's header comment. `firstCandle`'s own start is
+  // already the real left edge of the fetched range (unlike the upper
+  // bound, there is no "last bar's own window" to extend into on this
+  // side -- any marker strictly before the first candle starts did not
+  // happen during any fetched bar's window, full stop). Returning null
+  // here -- instead of the old fallback-to-first-candle -- is what
+  // excludes an October-15 event from a chart whose first real candle is
+  // October-16, rather than clamping it there.
+  if (markerDate < firstCandle) return null; // genuinely outside the fetched range -- do not clamp
   let best = null;
   for (const t of sortedCandleDates) {
     if (t <= markerDate) best = t;
     else break;
   }
-  return best || sortedCandleDates[0];
+  return best; // always set now: markerDate >= firstCandle is guaranteed above
 }
 
 // --- C-1 (real-data QA remediation, round 4, 2026-10-17): genuine
@@ -2407,8 +2441,19 @@ function renderEvidenceDaySummaryTable(byDay) {
 // configurable id namespace for the markup this function already emits.
 function renderEvidencePanel(allEvents, excludedCount, idPrefix = "") {
   const byDay = buildEvidenceDaySummary(allEvents);
+  // chart-data-integrity-fixes (2026-10-18): wording widened from
+  // "...dated after this chart's most recent bar..." to cover BOTH real
+  // out-of-range directions nearestBarTime now excludes (never clamps):
+  // an event dated after the LAST fetched candle (no candle exists yet
+  // for that date -- e.g. today's still-forming session) and, just as
+  // importantly, an event dated before the FIRST fetched candle (no
+  // candle was fetched for that earlier date -- e.g. a prior day's real
+  // evidence when only a single day of 1D intraday candles is cached).
+  // Same disclosure convention as the existing C-4 historical-coverage
+  // note elsewhere in this file: state the real limitation plainly
+  // rather than silently misplacing the event.
   const excludedNote = excludedCount > 0
-    ? `<div class="muted">${excludedCount} evidence marker(s) dated after this chart's most recent bar are not shown on the chart (no real candle exists yet for that date) -- still counted and listed below, never clamped or estimated.</div>`
+    ? `<div class="muted">${excludedCount} evidence marker(s) fall outside this chart's currently fetched candle range (before the first bar or after the last) and are not shown on the chart -- still counted and listed below, never clamped or estimated.</div>`
     : "";
   if (!allEvents.length) {
     return `${excludedNote}<div class="empty">No evidence recorded for this chart's period.</div>`;
