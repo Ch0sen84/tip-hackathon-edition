@@ -518,14 +518,29 @@ pre.raw { background: var(--panel3); padding: 12px; border-radius: 8px; overflow
    pool). The hover tooltip markup/classes are unchanged (now positioned
    relative to a raw crosshair point instead of a dot element). */
 .chart-evidence-legend {
-  display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
   font-size: 11.5px; color: var(--muted); margin-bottom: 4px; padding: 2px 0;
 }
+/* Round 4 (C-4/presentation fixes): the toggle row is now wrapped in its
+   own .cel-row flex line so an optional coverage-note block (C-4) and a
+   unit-label span (additional presentation fix) can sit above/alongside
+   it without fighting the old single-level flex layout. */
+.cel-row { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
 .cel-item { display: inline-flex; align-items: center; gap: 5px; }
 .cel-dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
 .cel-dot-flow { background: #f59e0b; }
 .cel-dot-dp { background: #60a5fa; border-radius: 3px; }
+.cel-unit { font-size: 10.5px; }
 .cel-toggles { display: inline-flex; gap: 4px; margin-left: auto; }
+/* C-4: honest single-day (or honest multi-day) evidence-coverage
+   disclosure on 1M/3M/6M/1Y ranges -- see mountEvidenceHistogram's own
+   comment for why this exists and what real field drives it. */
+.cel-coverage-note {
+  font-size: 11px; color: var(--muted); margin-bottom: 6px; line-height: 1.4;
+}
+.cel-coverage-note-single {
+  color: #f0b429; background: rgba(245,158,11,0.08);
+  border: 1px solid rgba(245,158,11,0.25); border-radius: 6px; padding: 5px 8px;
+}
 .cel-btn {
   background: transparent; border: 1px solid var(--border); color: var(--muted);
   border-radius: 10px; padding: 2px 9px; font-size: 11px; cursor: pointer;
