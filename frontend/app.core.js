@@ -2238,7 +2238,18 @@ function renderEvidenceDaySummaryTable(byDay) {
 // collapsed-by-default detail panel shell (filter/sort controls + an
 // empty table body -- wireEvidencePanel fills it with only ONE page's
 // worth of rows at a time, never all events at once).
-function renderEvidencePanel(allEvents, excludedCount) {
+// `idPrefix` (2026-10-17, chart-evidence-markers round 2): defaults to
+// "" so every existing call site/test (document.getElementById("evFilterType")
+// etc., see test_evidence_panel.mjs) is completely unaffected. The
+// evidence histogram's click drill-down (mountEvidenceBucketDrilldown)
+// is the only caller that passes a non-empty prefix ("cebd_") -- it
+// reuses this exact function for a SECOND, independent instance of the
+// same panel elsewhere in the DOM, and plain ids would collide with the
+// main evidence panel's own identically-named elements (getElementById
+// only ever finds the first match in document order, silently wiring
+// the wrong instance). No new table/filter/pagination logic, just a
+// configurable id namespace for the markup this function already emits.
+function renderEvidencePanel(allEvents, excludedCount, idPrefix = "") {
   const byDay = buildEvidenceDaySummary(allEvents);
   const excludedNote = excludedCount > 0
     ? `<div class="muted">${excludedCount} evidence marker(s) dated after this chart's most recent bar are not shown on the chart (no real candle exists yet for that date) -- still counted and listed below, never clamped or estimated.</div>`
@@ -2255,14 +2266,14 @@ function renderEvidencePanel(allEvents, excludedCount) {
     <details class="evidence-detail-panel">
       <summary class="muted">Individual observations (${allEvents.length}) \u2014 filter, sort, paginated</summary>
       <div class="evidence-controls">
-        <select id="evFilterType">
+        <select id="${idPrefix}evFilterType">
           <option value="">All types</option>
           <option value="flow_alert">Flow alerts</option>
           <option value="darkpool_trade">Dark-pool trades</option>
         </select>
-        <input type="date" id="evFilterDate" title="Filter to one date" />
-        <input type="number" id="evFilterMinValue" placeholder="Min value ($)" title="Minimum premium/value" />
-        <select id="evSort">
+        <input type="date" id="${idPrefix}evFilterDate" title="Filter to one date" />
+        <input type="number" id="${idPrefix}evFilterMinValue" placeholder="Min value ($)" title="Minimum premium/value" />
+        <select id="${idPrefix}evSort">
           <option value="time_desc">Newest first</option>
           <option value="time_asc">Oldest first</option>
           <option value="value_desc">Largest value first</option>
@@ -2270,12 +2281,12 @@ function renderEvidencePanel(allEvents, excludedCount) {
       </div>
       <table class="chart-markers-table">
         <thead><tr><th>Time</th><th>Kind</th><th>Label</th><th>Price</th><th>Value</th></tr></thead>
-        <tbody id="evTableBody"></tbody>
+        <tbody id="${idPrefix}evTableBody"></tbody>
       </table>
       <div class="evidence-pagination">
-        <button id="evPrevPage" class="btn-sm">\u2190 Prev</button>
-        <span id="evPageInfo" class="muted"></span>
-        <button id="evNextPage" class="btn-sm">Next \u2192</button>
+        <button id="${idPrefix}evPrevPage" class="btn-sm">\u2190 Prev</button>
+        <span id="${idPrefix}evPageInfo" class="muted"></span>
+        <button id="${idPrefix}evNextPage" class="btn-sm">Next \u2192</button>
       </div>
     </details>`;
 }
@@ -2286,14 +2297,16 @@ function renderEvidencePanel(allEvents, excludedCount) {
 // Re-renders only the current page's rows (<=EVIDENCE_PAGE_SIZE) into
 // #evTableBody on every control change, so the DOM never holds more
 // than one page of event rows regardless of how many real events exist.
-function wireEvidencePanel(allEvents) {
+// `idPrefix`: see renderEvidencePanel's comment above -- must match
+// whatever prefix that call used for the SAME markup instance.
+function wireEvidencePanel(allEvents, idPrefix = "") {
   let page = 0;
   function currentFiltered() {
-    const typeEl = document.getElementById("evFilterType");
+    const typeEl = document.getElementById(`${idPrefix}evFilterType`);
     if (!typeEl) return [];
-    const dateEl = document.getElementById("evFilterDate");
-    const minValEl = document.getElementById("evFilterMinValue");
-    const sortEl = document.getElementById("evSort");
+    const dateEl = document.getElementById(`${idPrefix}evFilterDate`);
+    const minValEl = document.getElementById(`${idPrefix}evFilterMinValue`);
+    const sortEl = document.getElementById(`${idPrefix}evSort`);
     let filtered = allEvents.filter((e) => {
       if (typeEl.value && e.kind !== typeEl.value) return false;
       if (dateEl.value && dateOnly(e.time) !== dateEl.value) return false;
@@ -2313,7 +2326,7 @@ function wireEvidencePanel(allEvents) {
     const totalPages = Math.max(1, Math.ceil(filtered.length / EVIDENCE_PAGE_SIZE));
     page = Math.min(page, totalPages - 1);
     const pageItems = filtered.slice(page * EVIDENCE_PAGE_SIZE, (page + 1) * EVIDENCE_PAGE_SIZE);
-    const tbody = document.getElementById("evTableBody");
+    const tbody = document.getElementById(`${idPrefix}evTableBody`);
     if (!tbody) return;
     tbody.innerHTML = pageItems.map((e) => `
       <tr>
@@ -2323,19 +2336,19 @@ function wireEvidencePanel(allEvents) {
         <td>${e.price != null ? Number(e.price).toFixed(2) : "\u2014"}</td>
         <td>${e.value != null ? esc(fmtMoney(e.value)) : "\u2014"}</td>
       </tr>`).join("");
-    const pageInfoEl = document.getElementById("evPageInfo");
+    const pageInfoEl = document.getElementById(`${idPrefix}evPageInfo`);
     if (pageInfoEl) pageInfoEl.textContent = `Page ${page + 1} of ${totalPages} (${filtered.length} matching)`;
-    const prevBtn = document.getElementById("evPrevPage");
-    const nextBtn = document.getElementById("evNextPage");
+    const prevBtn = document.getElementById(`${idPrefix}evPrevPage`);
+    const nextBtn = document.getElementById(`${idPrefix}evNextPage`);
     if (prevBtn) prevBtn.disabled = page === 0;
     if (nextBtn) nextBtn.disabled = page >= totalPages - 1;
   }
   ["evFilterType", "evFilterDate", "evFilterMinValue", "evSort"].forEach((id) => {
-    const el = document.getElementById(id);
+    const el = document.getElementById(`${idPrefix}${id}`);
     if (el) el.addEventListener("change", () => { page = 0; render(); });
   });
-  const prevBtn = document.getElementById("evPrevPage");
-  const nextBtn = document.getElementById("evNextPage");
+  const prevBtn = document.getElementById(`${idPrefix}evPrevPage`);
+  const nextBtn = document.getElementById(`${idPrefix}evNextPage`);
   if (prevBtn) prevBtn.addEventListener("click", () => { page = Math.max(0, page - 1); render(); });
   if (nextBtn) nextBtn.addEventListener("click", () => { page += 1; render(); });
   render();
@@ -2454,35 +2467,71 @@ function renderChartUnavailable(reason, opts = {}) {
   return `<div class="chart-unavailable">No chart data cached yet for this ticker &mdash; ${esc(detail)}${btn}</div>`;
 }
 
-// --- Compact evidence marker overlay (2026-10-17 fix) ------------------
+// --- Evidence histogram pane (2026-10-17, chart-evidence-markers round 2) --
 //
-// Replaces lightweight-charts' native series.setMarkers() text labels
-// (which overlapped unreadably near the chart's right edge -- see the
-// root-cause comment inside mountCandlestickChart above) with a custom,
-// absolutely-positioned HTML overlay: one small fixed-size colored dot
-// per (bar, kind) group, a hover/click tooltip with the real aggregate +
-// per-event detail, and a legend with Flow only / Dark Pool only / Both
-// / None toggle buttons. Positions come from the SAME
-// chart.timeScale().timeToCoordinate() the candlesticks themselves use,
-// so dots stay correctly aligned through pan/zoom/resize/range changes
-// -- re-rendered on chart.timeScale().subscribeVisibleTimeRangeChange
-// and on the existing ResizeObserver callback (see call sites).
+// REJECTED PRIOR APPROACH (511eb08, this same branch): an absolutely-
+// positioned HTML overlay drawing one small colored dot per (bar, kind)
+// group. Chad reviewed real SPY/NVDA screenshots and rejected it on
+// sight -- at real UW data density (hundreds to thousands of events/day
+// clustered on the most recent trading days) consecutive bars each still
+// get their own same-lane dot, and at normal chart widths those dots
+// land close enough together to overlap/smear exactly like the text
+// labels they replaced. Grouping-into-dots does not fix an overlap
+// problem caused by bar-spacing-vs-marker-size; it only shrinks the
+// marker, buying a bit of headroom, not solving the problem at scale.
 //
-// Every number shown anywhere in the tooltip (count, summed premium,
-// each listed timestamp/price) is read directly from the real
-// marker/event objects the backend returned -- nothing here fabricates,
-// interpolates, or repositions a real event's time to "look cleaner";
-// grouping only changes what's drawn on the chart canvas, never the
-// real timestamps a user can see in the tooltip or the (unchanged)
-// evidence table below the chart.
+// NEW APPROACH: two native lightweight-charts histogram series (orange
+// = flow alerts, blue = dark-pool trades) added as a SECOND pane on the
+// SAME chart instance and SAME synced timeScale as the candlesticks --
+// the exact native pattern this file already uses successfully for the
+// volume histogram (see addHistogramSeries + its own priceScaleId +
+// scaleMargins a bit further down in mountCandlestickChart) and for
+// mountActivityTimeline's own dual histogram series above. A histogram
+// bar's height (a real count) degrades gracefully under density --
+// taller/shorter bars, never visually-colliding text or dots -- which is
+// why this, not a bigger/smaller dot, is the real fix for the density
+// problem that got 511eb08 rejected.
+//
+// Bucket boundaries are the SAME real bar times the candlesticks
+// themselves use: one bucket per candle bar, reusing the exact
+// (barTime, kind) grouping mountCandlestickChart already builds into
+// `groups` (no separate/parallel bucket-building logic). This makes
+// bucket width automatically adaptive -- "fine" (5-minute) at 1D zoom,
+// "coarse" (one trading day) at 1M/3M/6M/1Y zoom -- because it is
+// exactly each range's own real candle granularity, never a fixed
+// bucket size misapplied across zoom levels. A bar with no real event
+// for a given (barTime, kind) simply has no histogram data point
+// (sparse setData, not a drawn/implied zero) -- nothing here fabricates,
+// redistributes, or repositions a real event's timestamp.
+//
+// Hover/click use the chart's own native subscribeCrosshairMove/
+// subscribeClick APIs (not a DOM overlay) and only react when the
+// cursor is genuinely within the evidence pane's own vertical band
+// (computed from the same scaleMargins passed to addHistogramSeries
+// below), so they never intercept interaction with the candlesticks
+// above or the volume pane below. Click opens a drill-down panel that
+// calls the EXISTING renderEvidencePanel()/wireEvidencePanel() functions
+// verbatim (same ones backing the full evidence table) with just that
+// bucket's own real events -- no parallel table/filter/pagination logic
+// is introduced; every number traces back to the real underlying
+// observations, individually inspectable there.
 //
 // Degrades to a safe no-op under the repo's minimal getElementById-only
-// test DOM stubs (no real appendChild/getBoundingClientRect/
-// timeToCoordinate) -- same defensive-guard style this file already
-// uses for `typeof ResizeObserver !== "undefined"`.
+// test DOM stubs (no real appendChild/subscribeCrosshairMove) -- same
+// defensive-guard style this file already uses for
+// `typeof ResizeObserver !== "undefined"`.
 const EVIDENCE_MARKER_COLORS = { flow_alert: "#f59e0b", darkpool_trade: "#60a5fa" };
 const EVIDENCE_MARKER_LABELS = { flow_alert: "Flow alert", darkpool_trade: "Dark-pool trade" };
 const EVIDENCE_VISIBILITY_KEY = "tipEvidenceMarkerVisibility"; // "flow" | "dp" | "both" | "none"
+// Same two rgba series colors mountActivityTimeline already uses for its
+// own flow/dark-pool histogram series -- reused verbatim, never reinvented.
+const EVIDENCE_HISTOGRAM_COLORS = { flow_alert: "rgba(245,158,11,0.75)", darkpool_trade: "rgba(96,165,250,0.6)" };
+// Band occupied by the evidence pane, as a fraction of total chart
+// height: 60%-78%, i.e. below the candles' own (unmargined) area and
+// above the volume pane's band (top:0.82, bottom:0 -- see below),
+// matching the SAME scaleMargins-based layering the volume histogram
+// already uses, never drawn on top of candle bodies.
+const EVIDENCE_PANE_MARGINS = { top: 0.60, bottom: 0.22 };
 
 function getEvidenceVisibilityMode() {
   try {
@@ -2566,99 +2615,211 @@ function showEvidenceTooltip(anchorEl, html) {
 function hideEvidenceTooltip() {
   if (_evidenceTooltipEl) _evidenceTooltipEl.style.display = "none";
 }
+// Point-anchored variant of showEvidenceTooltip (above): the histogram
+// pane has no per-bucket DOM element to anchor on (native chart series,
+// not a DOM overlay), so this positions relative to a raw client x/y
+// (derived from the chart's own crosshair-move point + the container's
+// getBoundingClientRect) instead of an element's bounding box. Same
+// tooltip element/classes, same "never covers the point" clamping logic.
+function showEvidenceTooltipAtClientXY(clientX, clientY, html) {
+  const tip = getEvidenceTooltipEl();
+  if (!tip) return;
+  tip.innerHTML = html;
+  tip.style.display = "block";
+  const tipRect = tip.getBoundingClientRect();
+  let left = clientX - tipRect.width / 2;
+  const maxLeft = (typeof window !== "undefined" ? window.innerWidth : left + tipRect.width) - tipRect.width - 4;
+  left = Math.max(4, Math.min(left, maxLeft));
+  let top = clientY - tipRect.height - 14;
+  if (top < 4) top = clientY + 14;
+  tip.style.left = `${left}px`;
+  tip.style.top = `${top}px`;
+}
 
-// Mounts the legend/toggle row + absolutely-positioned dot overlay as
-// extra children of `root` (appended AFTER the chart library has
-// already populated it -- never replaces root.innerHTML again, so the
-// chart's own DOM is left untouched). `groups` is the same Map built in
-// mountCandlestickChart: key `${barTime}|${kind}` -> { barTime, kind,
-// events }.
-function mountEvidenceMarkerOverlay(root, chart, groups) {
-  const timeScale = chart.timeScale();
-  if (typeof root.appendChild !== "function" || typeof timeScale.timeToCoordinate !== "function") {
-    return; // minimal test DOM stub / non-browser environment -- safe no-op
+// Combined tooltip for one bucket (time), which may carry a flow-alert
+// group, a dark-pool group, or both -- reuses evidenceGroupTooltipHtml
+// per group, just concatenated, never a new formatting path.
+function evidenceBucketTooltipHtml(groupsAtBucket) {
+  return groupsAtBucket.map(evidenceGroupTooltipHtml).join('<div class="cet-row muted" style="margin:4px 0">\u2014</div>');
+}
+
+// Reuses the EXISTING renderEvidencePanel()/wireEvidencePanel() verbatim
+// (same functions backing the full evidence table below the chart),
+// just with one bucket's own real events as the input -- no parallel
+// table/filter/pagination logic. Rendered into a dedicated sibling
+// container placed right after the chart's own full evidence panel
+// (or after `root` if that panel isn't present), removed and rebuilt on
+// every click so repeated clicks never accumulate duplicate siblings.
+function mountEvidenceBucketDrilldown(root, barTime, groupsAtBucket) {
+  if (typeof document === "undefined" || typeof document.createElement !== "function") return;
+  const existing = document.getElementById("chartEvidenceBucketDrilldown");
+  if (existing) existing.remove();
+  const events = [];
+  for (const g of groupsAtBucket) events.push(...g.events);
+  const kindsLabel = groupsAtBucket
+    .map((g) => `${g.events.length} ${EVIDENCE_MARKER_LABELS[g.kind] || g.kind}${g.events.length === 1 ? "" : "s"}`)
+    .join(" + ");
+  const box = document.createElement("div");
+  box.id = "chartEvidenceBucketDrilldown";
+  box.className = "chart-evidence-bucket-drilldown";
+  box.innerHTML = `
+    <div class="cebd-head">Bucket detail \u2014 ${esc(String(barTime))} (${esc(kindsLabel)})
+      <button type="button" class="btn-sm cebd-close">Close</button>
+    </div>
+    <div id="cebdPanel"></div>`;
+  const infoSibling = root.nextElementSibling;
+  const anchor = (infoSibling && typeof infoSibling.classList !== "undefined" && infoSibling.classList.contains("chart-markers-info"))
+    ? infoSibling : root;
+  if (typeof anchor.after === "function") anchor.after(box);
+  const closeBtn = typeof box.querySelector === "function" ? box.querySelector(".cebd-close") : null;
+  if (closeBtn && typeof closeBtn.addEventListener === "function") closeBtn.addEventListener("click", () => box.remove());
+  const panel = document.getElementById("cebdPanel");
+  if (panel) {
+    // "cebd_" id prefix -- avoids colliding with the main evidence
+    // panel's identically-named elements elsewhere in the DOM (see
+    // renderEvidencePanel/wireEvidencePanel's own comment on idPrefix).
+    panel.innerHTML = renderEvidencePanel(events, 0, "cebd_");
+    wireEvidencePanel(events, "cebd_");
   }
-  const groupList = Array.from(groups.values());
-  if (!groupList.length) return; // nothing real to show -- no legend for an empty chart
+}
 
-  if (root.style && !root.style.position) root.style.position = "relative";
+// Mounts the two evidence histogram series (flow alerts, dark-pool) as
+// a second pane on the SAME chart instance, plus the legend/toggle row
+// as an extra trailing child of `root` (appended AFTER the chart
+// library has already populated it -- never replaces root.innerHTML
+// again, so the chart's own DOM is left untouched). `groups` is the
+// same Map mountCandlestickChart already builds: key
+// `${barTime}|${kind}` -> { barTime, kind, events }. See this section's
+// module comment above for the full architecture writeup.
+function mountEvidenceHistogram(root, chart, groups) {
+  if (typeof chart.addHistogramSeries !== "function") return; // minimal test DOM stub -- safe no-op
+  const groupList = Array.from(groups.values());
+  if (!groupList.length) return; // nothing real to show -- no pane/legend for an empty chart
 
   let mode = getEvidenceVisibilityMode();
 
-  const legend = document.createElement("div");
-  legend.className = "chart-evidence-legend";
-  legend.innerHTML = `
-    <span class="cel-item"><span class="cel-dot cel-dot-flow"></span>Flow alerts</span>
-    <span class="cel-item"><span class="cel-dot cel-dot-dp"></span>Dark-pool</span>
-    <span class="cel-toggles">
-      <button type="button" class="cel-btn" data-mode="flow">Flow only</button>
-      <button type="button" class="cel-btn" data-mode="dp">Dark Pool only</button>
-      <button type="button" class="cel-btn" data-mode="both">Both</button>
-      <button type="button" class="cel-btn" data-mode="none">None</button>
-    </span>`;
-  root.appendChild(legend);
+  // lastValueVisible/priceLineVisible: false on both -- these are count
+  // histograms, not tradeable prices, so a floating "current value"
+  // badge/line on the right price axis would just be clutter (and, in a
+  // tall/narrow evidence band, risks crowding the candle's own last-
+  // price badge). The bars themselves (the actual real data) are
+  // unaffected; only the native per-series right-axis decorations are
+  // suppressed.
+  const flowSeries = chart.addHistogramSeries({
+    color: EVIDENCE_HISTOGRAM_COLORS.flow_alert,
+    priceScaleId: "evidence",
+    priceFormat: { type: "volume" },
+    visible: evidenceModeShowsKind(mode, "flow_alert"),
+    lastValueVisible: false,
+    priceLineVisible: false,
+  });
+  const dpSeries = chart.addHistogramSeries({
+    color: EVIDENCE_HISTOGRAM_COLORS.darkpool_trade,
+    priceScaleId: "evidence",
+    priceFormat: { type: "volume" },
+    visible: evidenceModeShowsKind(mode, "darkpool_trade"),
+    lastValueVisible: false,
+    priceLineVisible: false,
+  });
+  flowSeries.priceScale().applyOptions({ scaleMargins: EVIDENCE_PANE_MARGINS });
 
-  const overlay = document.createElement("div");
-  overlay.className = "chart-evidence-overlay";
-  root.appendChild(overlay);
-
-  function updateLegendActiveState() {
-    if (typeof legend.querySelectorAll !== "function") return;
-    legend.querySelectorAll(".cel-btn").forEach((b) => b.classList.toggle("active", b.dataset.mode === mode));
+  // One bucket per real candle bar time (see module comment) -- `byTime`
+  // lets both the histogram data and the hover/click lookup share
+  // exactly one (barTime -> {flow_alert?, darkpool_trade?}) structure.
+  const byTime = new Map();
+  for (const g of groupList) {
+    if (!byTime.has(g.barTime)) byTime.set(g.barTime, {});
+    byTime.get(g.barTime)[g.kind] = g;
   }
+  const flowData = [];
+  const dpData = [];
+  for (const [barTime, kinds] of byTime.entries()) {
+    if (kinds.flow_alert) flowData.push({ time: barTime, value: kinds.flow_alert.events.length });
+    if (kinds.darkpool_trade) dpData.push({ time: barTime, value: kinds.darkpool_trade.events.length });
+  }
+  const byBarTimeAsc = (a, b) => (a.time < b.time ? -1 : a.time > b.time ? 1 : 0);
+  flowData.sort(byBarTimeAsc);
+  dpData.sort(byBarTimeAsc);
+  flowSeries.setData(flowData);
+  dpSeries.setData(dpData);
+  // Test/introspection hook only (mirrors the existing root._tipChart
+  // convention) -- never read by any production code path, lets the
+  // real-Chromium/CDP regression test assert real series data/visibility
+  // without needing private lightweight-charts internals.
+  root._tipEvidenceSeries = { flow: flowSeries, dp: dpSeries, byTime };
 
-  function renderDots() {
-    overlay.innerHTML = "";
-    const h = root.clientHeight || 320;
-    const flowLaneY = 12;
-    const dpLaneY = Math.max(24, h - 30);
-    for (const g of groupList) {
-      if (!evidenceModeShowsKind(mode, g.kind)) continue;
-      const x = timeScale.timeToCoordinate(g.barTime);
-      if (x == null) continue; // genuinely outside the currently-visible range -- correctly hidden, not misplaced
-      const dot = document.createElement("div");
-      const n = g.events.length;
-      const kindClass = g.kind === "darkpool_trade" ? "dp" : "flow";
-      dot.className = `chart-evidence-dot chart-evidence-dot-${kindClass}`;
-      dot.style.left = `${x}px`;
-      dot.style.top = `${g.kind === "darkpool_trade" ? dpLaneY : flowLaneY}px`;
-      if (n > 1) dot.textContent = n > 99 ? "99+" : String(n);
-      dot.title = ""; // never rely on the native title tooltip -- our own is the real UI
-      overlay.appendChild(dot);
-      if (typeof dot.addEventListener === "function") {
-        dot.addEventListener("mouseenter", () => showEvidenceTooltip(dot, evidenceGroupTooltipHtml(g)));
-        dot.addEventListener("mouseleave", () => { if (!dot._pinned) hideEvidenceTooltip(); });
-        dot.addEventListener("click", (ev) => {
-          ev.stopPropagation();
-          if (typeof overlay.querySelectorAll === "function") {
-            overlay.querySelectorAll(".chart-evidence-dot.pinned").forEach((d) => {
-              if (d !== dot) { d.classList.remove("pinned"); d._pinned = false; }
-            });
-          }
-          dot._pinned = !dot._pinned;
-          dot.classList.toggle("pinned", dot._pinned);
-          if (dot._pinned) showEvidenceTooltip(dot, evidenceGroupTooltipHtml(g)); else hideEvidenceTooltip();
-        });
-      }
+  // Legend/toggle row -- same 4 controls preserved from the prior round,
+  // now driving histogram series visibility instead of dot visibility.
+  // Appended as a trailing child of `root`, i.e. below the chart's own
+  // canvas in normal block flow (not absolutely positioned over it).
+  if (typeof root.appendChild === "function") {
+    const legend = document.createElement("div");
+    legend.className = "chart-evidence-legend";
+    legend.innerHTML = `
+      <span class="cel-item"><span class="cel-dot cel-dot-flow"></span>Flow alerts</span>
+      <span class="cel-item"><span class="cel-dot cel-dot-dp"></span>Dark-pool</span>
+      <span class="cel-toggles">
+        <button type="button" class="cel-btn" data-mode="flow">Flow only</button>
+        <button type="button" class="cel-btn" data-mode="dp">Dark Pool only</button>
+        <button type="button" class="cel-btn" data-mode="both">Both</button>
+        <button type="button" class="cel-btn" data-mode="none">None</button>
+      </span>`;
+    root.appendChild(legend);
+
+    function updateLegendActiveState() {
+      if (typeof legend.querySelectorAll !== "function") return;
+      legend.querySelectorAll(".cel-btn").forEach((b) => b.classList.toggle("active", b.dataset.mode === mode));
     }
+    function applySeriesVisibility() {
+      flowSeries.applyOptions({ visible: evidenceModeShowsKind(mode, "flow_alert") });
+      dpSeries.applyOptions({ visible: evidenceModeShowsKind(mode, "darkpool_trade") });
+    }
+    if (typeof legend.addEventListener === "function") {
+      legend.addEventListener("click", (ev) => {
+        const btn = typeof ev.target.closest === "function" ? ev.target.closest(".cel-btn") : null;
+        if (!btn) return;
+        mode = btn.dataset.mode;
+        setEvidenceVisibilityMode(mode);
+        updateLegendActiveState();
+        applySeriesVisibility();
+      });
+    }
+    updateLegendActiveState();
   }
 
-  if (typeof legend.addEventListener === "function") {
-    legend.addEventListener("click", (ev) => {
-      const btn = typeof ev.target.closest === "function" ? ev.target.closest(".cel-btn") : null;
-      if (!btn) return;
-      mode = btn.dataset.mode;
-      setEvidenceVisibilityMode(mode);
-      updateLegendActiveState();
-      renderDots();
+  if (typeof chart.subscribeCrosshairMove !== "function" || typeof root.getBoundingClientRect !== "function") {
+    return; // minimal test DOM stub -- hover/click drill-down is a safe no-op
+  }
+
+  function paneBandPx() {
+    const h = root.clientHeight || 320;
+    return { top: h * EVIDENCE_PANE_MARGINS.top, bottom: h * (1 - EVIDENCE_PANE_MARGINS.bottom) };
+  }
+  function bucketGroupsAt(time) {
+    const kinds = byTime.get(time);
+    if (!kinds) return [];
+    return [kinds.flow_alert, kinds.darkpool_trade].filter(Boolean);
+  }
+
+  chart.subscribeCrosshairMove((param) => {
+    if (!param || param.time == null || !param.point) { hideEvidenceTooltip(); return; }
+    const band = paneBandPx();
+    if (param.point.y < band.top || param.point.y > band.bottom) { hideEvidenceTooltip(); return; }
+    const gs = bucketGroupsAt(param.time);
+    if (!gs.length) { hideEvidenceTooltip(); return; }
+    const rect = root.getBoundingClientRect();
+    showEvidenceTooltipAtClientXY(rect.left + param.point.x, rect.top + param.point.y, evidenceBucketTooltipHtml(gs));
+  });
+
+  if (typeof chart.subscribeClick === "function") {
+    chart.subscribeClick((param) => {
+      if (!param || param.time == null || !param.point) return;
+      const band = paneBandPx();
+      if (param.point.y < band.top || param.point.y > band.bottom) return;
+      const gs = bucketGroupsAt(param.time);
+      if (!gs.length) return;
+      mountEvidenceBucketDrilldown(root, param.time, gs);
     });
-  }
-
-  updateLegendActiveState();
-  renderDots();
-  root._tipRenderEvidenceOverlay = renderDots;
-  if (typeof timeScale.subscribeVisibleTimeRangeChange === "function") {
-    timeScale.subscribeVisibleTimeRangeChange(renderDots);
   }
 }
 
@@ -2688,7 +2849,22 @@ function mountCandlestickChart(containerId, ohlc, opts = {}) {
       vertLines: { color: "rgba(255,255,255,0.06)" },
       horzLines: { color: "rgba(255,255,255,0.06)" },
     },
-    timeScale: { borderColor: "rgba(255,255,255,0.12)" },
+    // Step 1 fix (2026-10-17, chart-evidence-markers round 2): add the
+    // same timeVisible/secondsVisible keys mountActivityTimeline's own
+    // createChart() call already has a few hundred lines above -- their
+    // absence here was a copy-paste gap, confirmed by an independent
+    // investigation, and the root cause of 1D showing the same "16"
+    // (day-of-month) label on every tick instead of real HH:MM times:
+    // without timeVisible, lightweight-charts' default tick formatter
+    // always treats every time value as a whole day, so a UTCTimestamp
+    // a few minutes apart still formats to the identical day-of-month
+    // string. Display-options-only change -- no timestamp computation,
+    // timezone handling, or market-session logic touched. timeVisible
+    // only changes which label format the library picks for a given
+    // real bar spacing/zoom; at 1M/3M/6M/1Y (daily bars, wide spacing)
+    // it still chooses day+month labels exactly as before, confirmed
+    // visually below (see this round's screenshots).
+    timeScale: { borderColor: "rgba(255,255,255,0.12)", timeVisible: true, secondsVisible: false },
     rightPriceScale: { borderColor: "rgba(255,255,255,0.12)" },
   });
   const series = chart.addCandlestickSeries({
@@ -2789,19 +2965,24 @@ function mountCandlestickChart(containerId, ohlc, opts = {}) {
   // under/behind the right price scale.
   //
   // Fix: STOP asking the chart library to draw any permanent per-marker
-  // text. Native setMarkers() is no longer used at all. Instead,
-  // mountEvidenceMarkerOverlay() below draws small fixed-size, color-
-  // coded dots (compact, same color convention already used elsewhere
-  // in this app: orange = options flow, blue = dark pool) positioned via
-  // the SAME chart.timeScale().timeToCoordinate() the library itself
-  // uses, so dots always track real bar positions through scroll/zoom/
-  // resize/range changes. Each dot still represents exactly one (bar,
-  // kind) group -- same honest aggregation as before, same real count,
-  // same real underlying events -- but ALL detail (count, aggregate
-  // premium, real per-event timestamps) now lives in a hover/click
-  // tooltip and in the unchanged, already-existing evidence table below,
-  // never permanently drawn on the chart itself. See
-  // mountEvidenceMarkerOverlay's own header comment for the rest.
+  // text. Native setMarkers() is no longer used at all. The first
+  // replacement (511eb08, small fixed-size dots with a grouped count)
+  // was itself rejected after Chad reviewed real SPY/NVDA screenshots:
+  // at real UW data density dots on consecutive dense bars still
+  // visually collided, same root problem (bar-spacing-vs-marker-size)
+  // wearing a smaller marker. The actual fix (this round):
+  // mountEvidenceHistogram() below draws a native histogram pane (bar
+  // height = real count, same color convention already used elsewhere
+  // in this app: orange = options flow, blue = dark pool) on the SAME
+  // chart/timeScale, so it degrades under density the way a bar chart
+  // does (shorter/taller bars) rather than the way overlapping markers
+  // do (unreadable collisions). Each histogram bucket still represents
+  // exactly one (bar, kind) group -- same honest aggregation as before,
+  // same real count, same real underlying events -- but ALL detail
+  // (count, aggregate premium, real per-event timestamps) lives in a
+  // hover/click drill-down and in the unchanged, already-existing
+  // evidence table below, never permanently drawn as text on the chart
+  // itself. See mountEvidenceHistogram's own header comment for the rest.
   let excludedCount = 0;
   const groups = new Map(); // key: `${barTime}|${kind}` -> { barTime, kind, events: [...] }
   for (const m of ohlc.markers || []) {
@@ -2841,18 +3022,23 @@ function mountCandlestickChart(containerId, ohlc, opts = {}) {
   }
   mountActivityTimeline("activityTimelineContainer", allEvents);
 
-  // Compact marker overlay + legend/toggle controls (2026-10-17 fix) --
-  // see the long comment above this function's grouping loop for the
-  // full root-cause writeup. No-ops safely when running under a
-  // minimal test DOM stub (no real appendChild/timeToCoordinate).
-  mountEvidenceMarkerOverlay(root, chart, groups);
+  // Evidence histogram pane + legend/toggle controls (2026-10-17, round
+  // 2) -- see the long comment above this function's grouping loop, and
+  // mountEvidenceHistogram's own header comment, for the full
+  // architecture writeup. No-ops safely when running under a minimal
+  // test DOM stub (no real appendChild/subscribeCrosshairMove). Uses the
+  // SAME chart instance/timeScale as the candlesticks (native histogram
+  // series + a second priceScaleId, exactly like the volume series just
+  // above) -- no second createChart() call, so resizing the chart via
+  // applyOptions({width}) below already keeps the evidence pane in sync
+  // with no extra per-overlay reposition step needed.
+  mountEvidenceHistogram(root, chart, groups);
 
   root._tipChart = chart;
   if (!root._tipResizeObserverAttached && typeof ResizeObserver !== "undefined") {
     const ro = new ResizeObserver(() => {
       if (root._tipChart && root.clientWidth > 0) {
         root._tipChart.applyOptions({ width: root.clientWidth });
-        if (typeof root._tipRenderEvidenceOverlay === "function") root._tipRenderEvidenceOverlay();
       }
     });
     ro.observe(root);
