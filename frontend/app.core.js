@@ -2742,11 +2742,11 @@ const EVIDENCE_HISTOGRAM_COLORS = { flow_alert: "rgba(245,158,11,0.75)", darkpoo
 // unaffected -- it still just flips `visible` on each series; an
 // inactive lane is simply empty space, never removed structurally.
 //
-// Final non-overlapping layout (all fractions of the ACTUAL chart pixel
-// height passed in at mount time -- see mountCandlestickChart's
-// chartHeight, never a DOM-measured container height, which is C-2's
-// fix below): candles 2%-46%, gap (10%), flow-alert lane 56%-64%, gap
-// (10%), dark-pool lane 74%-82%, gap (8%), volume 90%-100%.
+// Round-7 non-overlapping layout (fractions of the real plotting pane,
+// after subtracting the native time-axis strip): candles 2%-69%, gap
+// (4%), flow-alert lane 73%-77%, gap (4%), dark-pool lane 81%-85%, gap
+// (5%), volume 90%-100%. This gives price action the primary 67% visual
+// weight while retaining two independent evidence scales and volume.
 //
 // Round 5 fix (2026-10-18, scale-margin widening, scope: margin VALUES
 // only, no architecture change): round 4's split was already
@@ -2782,8 +2782,13 @@ const EVIDENCE_HISTOGRAM_COLORS = { flow_alert: "rgba(245,158,11,0.75)", darkpoo
 // and this round's own screenshot-based verification. Candle pane
 // shrank from 48% to 44% to make room; still ample for reading price
 // action at any supported chart height.
-const EVIDENCE_FLOW_MARGINS = { top: 0.56, bottom: 0.36 };
-const EVIDENCE_DP_MARGINS = { top: 0.74, bottom: 0.18 };
+// Round 7 rebalanced the same single-chart layout after Chad's visual
+// review: price is primary, so candles now receive 67% of the plotting
+// pane; the compact evidence lanes retain 4-5% nominal gaps, which must
+// still be validated against real rendered pixels because the autoscale
+// headroom described above can consume nominal whitespace.
+const EVIDENCE_FLOW_MARGINS = { top: 0.73, bottom: 0.23 };
+const EVIDENCE_DP_MARGINS = { top: 0.81, bottom: 0.15 };
 
 function getEvidenceVisibilityMode() {
   try {
@@ -3355,15 +3360,13 @@ function mountCandlestickChart(containerId, ohlc, opts = {}) {
   // overlapping the candlesticks. Round 4 (C-2/C-3) widened the candle
   // band slightly (more breathing room, an explicit presentation
   // request) and re-split the old single evidence band into two lanes.
-  // Round 5 (scale-margin widening, see EVIDENCE_FLOW_MARGINS/
-  // EVIDENCE_DP_MARGINS's module note for the full real-pixel
-  // investigation, including the histogram-autoscale-headroom effect
-  // that a 4%-gap first attempt didn't survive): candles 2%-46%, gap
-  // (10%), flow-alert lane 56%-64%, gap (10%), dark-pool lane 74%-82%,
-  // gap (8%), volume 90%-100% (see the volume series' own margins just
-  // below). Candle band gave up 4 percentage points (48%->44%) to fund
-  // the wider gaps; still ample room for reading price action.
-  const CANDLE_PANE_MARGINS = { top: 0.02, bottom: 0.54 };
+  // Round 7 visual hierarchy: candles occupy 2%-69% (67%) of the real
+  // plotting pane. Compact supporting lanes follow at flow 73%-77%,
+  // dark-pool 81%-85%, and volume 90%-100%; the gaps are deliberately
+  // tighter than round 5 but remain subject to independent rendered-
+  // pixel separation checks because histogram autoscale headroom can
+  // consume nominal margin space.
+  const CANDLE_PANE_MARGINS = { top: 0.02, bottom: 0.31 };
   if (typeof series.priceScale === "function") {
     series.priceScale().applyOptions({ scaleMargins: CANDLE_PANE_MARGINS });
   } // else: minimal test DOM stub (no real priceScale API) -- safe no-op
