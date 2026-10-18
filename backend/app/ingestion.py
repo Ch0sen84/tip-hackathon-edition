@@ -526,6 +526,39 @@ class IngestionCatalog:
             bars = bars[-limit:]
         return bars
 
+    def get_latest_daily_bar_final_status(self, ticker: str, timeframe: str) -> Optional[bool]:
+        """R8-3 (chart-data-integrity-fixes round 9, 2026-10-18): the
+        is_final flag for the most-recent CATALOGED daily bar's current
+        pointer row -- lets a cache-only read honestly tell the frontend
+        whether its trailing bar might still need a refresh, without
+        the frontend ever having to guess from wall-clock time itself
+        (the backend already owns the real finality determination, see
+        `_bar_is_final`). Reads `price_bar_current` directly (the single
+        pointer table that always resolves to the CURRENT authoritative
+        bar per date -- see R8-4's `price_bar_current_latest` VIEW in
+        migrations.py for the equivalent, documented SQL-level path any
+        future direct-SQL caller should use instead of touching
+        `price_bars` raw) rather than the raw append-only `price_bars`
+        table, so a stale/superseded revision can never be mistaken for
+        the authoritative one.
+
+        Returns None when there is no cataloged daily pointer at all
+        (nothing to assess) or when `timeframe != '1d'` (intraday bars
+        never get a pointer row -- see catalog_price_bars -- so
+        finality is not a meaningful question for them; the frontend
+        must never show a trailing-bar refresh affordance for 1D)."""
+        if timeframe != "1d":
+            return None
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT is_final FROM price_bar_current "
+                "WHERE ticker = ? AND timeframe = ? ORDER BY event_time DESC LIMIT 1",
+                (ticker, timeframe),
+            ).fetchone()
+        if row is None:
+            return None
+        return bool(row[0])
+
     def get_cached_flow_observations(self, ticker: str) -> list[dict]:
         """Every real cataloged options-flow-alert raw_json for `ticker`,
         deserialized back to the exact normalized dict shape
