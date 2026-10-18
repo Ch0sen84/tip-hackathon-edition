@@ -224,7 +224,7 @@ nav#nav .ic { font-size: 13px; width: 16px; text-align: center; opacity: .7; }
 .card-head { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; flex-wrap: wrap; }
 
 .chart-card { margin-bottom: 14px; }
-.chart-container { min-height: 320px; width: 100%; }
+.chart-container { min-height: 320px; width: 100%; position: relative; }
 .chart-unavailable {
   min-height: 120px; display: flex; align-items: center; justify-content: center;
   color: var(--muted); font-size: 13px; text-align: center; padding: 20px;
@@ -506,6 +506,64 @@ pre.raw { background: var(--panel3); padding: 12px; border-radius: 8px; overflow
 .chart-markers-table { width: 100%; border-collapse: collapse; margin-top: 6px; font-size: 12px; max-height: 320px; }
 .chart-markers-table th, .chart-markers-table td { text-align: left; padding: 3px 8px; border-bottom: 1px solid rgba(255,255,255,0.08); }
 .chart-markers-table thead th { color: var(--muted); font-weight: 600; }
+
+/* --- Chart evidence histogram pane (2026-10-17, round 2) -------------
+   Replaces the old dot overlay (rejected by Chad on real SPY/NVDA
+   screenshots -- overlapped unreadably at real UW data density; see
+   app.core.js's mountEvidenceHistogram comment for the full writeup)
+   with a native histogram pane sharing the candlestick chart's own
+   instance/timeScale. Legend/toggle row kept, now controlling series
+   visibility. Colors match the convention already used by the
+   activity-timeline legend above (orange = options flow, blue = dark
+   pool). The hover tooltip markup/classes are unchanged (now positioned
+   relative to a raw crosshair point instead of a dot element). */
+.chart-evidence-legend {
+  font-size: 11.5px; color: var(--muted); margin-bottom: 4px; padding: 2px 0;
+}
+/* Round 4 (C-4/presentation fixes): the toggle row is now wrapped in its
+   own .cel-row flex line so an optional coverage-note block (C-4) and a
+   unit-label span (additional presentation fix) can sit above/alongside
+   it without fighting the old single-level flex layout. */
+.cel-row { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+.cel-item { display: inline-flex; align-items: center; gap: 5px; }
+.cel-dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
+.cel-dot-flow { background: #f59e0b; }
+.cel-dot-dp { background: #60a5fa; border-radius: 3px; }
+.cel-unit { font-size: 10.5px; }
+.cel-toggles { display: inline-flex; gap: 4px; margin-left: auto; }
+/* C-4: honest single-day (or honest multi-day) evidence-coverage
+   disclosure on 1M/3M/6M/1Y ranges -- see mountEvidenceHistogram's own
+   comment for why this exists and what real field drives it. */
+.cel-coverage-note {
+  font-size: 11px; color: var(--muted); margin-bottom: 6px; line-height: 1.4;
+}
+.cel-coverage-note-single {
+  color: #f0b429; background: rgba(245,158,11,0.08);
+  border: 1px solid rgba(245,158,11,0.25); border-radius: 6px; padding: 5px 8px;
+}
+.cel-btn {
+  background: transparent; border: 1px solid var(--border); color: var(--muted);
+  border-radius: 10px; padding: 2px 9px; font-size: 11px; cursor: pointer;
+}
+.cel-btn:hover { color: var(--text); border-color: var(--muted); }
+.cel-btn.active { background: var(--panel); color: var(--text); border-color: var(--text); font-weight: 600; }
+.chart-evidence-tooltip {
+  position: fixed; z-index: 9999; max-width: 260px;
+  background: #10151c; border: 1px solid rgba(255,255,255,0.15); border-radius: 6px;
+  padding: 8px 10px; font-size: 11.5px; color: var(--text);
+  box-shadow: 0 6px 20px rgba(0,0,0,0.45); pointer-events: none;
+}
+.chart-evidence-tooltip .cet-head { font-weight: 700; margin-bottom: 2px; }
+.chart-evidence-tooltip .cet-sub { color: var(--muted); margin-bottom: 4px; }
+.chart-evidence-tooltip .cet-row { display: flex; justify-content: space-between; gap: 10px; white-space: nowrap; }
+.chart-evidence-tooltip .cet-row.muted { color: var(--muted); justify-content: flex-start; }
+/* Click-through drill-down panel: reuses renderEvidencePanel/wireEvidencePanel
+   verbatim for the actual table -- this just wraps it with a bucket header. */
+.chart-evidence-bucket-drilldown {
+  margin-top: 8px; font-size: 12px; border: 1px solid var(--border);
+  border-radius: 8px; padding: 8px 10px; background: var(--panel2);
+}
+.cebd-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; font-weight: 600; margin-bottom: 6px; }
 
 /* --- Phase A: auth setup/re-auth banner ------------------------------ */
 .auth-setup-card {

@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<!--
+  Isolated real-browser harness for the chart evidence marker overlay
+  fix (chart-evidence-markers branch, 2026-10-17). NOT linked from
+  index.html / NOT part of the shipped app -- loads the same real
+  lightweight-charts.js + app.core.js the production app uses, with a
+  minimal container so mountCandlestickChart()/mountActivityTimeline()
+  can run exactly as they do in production, driven by a synthetic
+  fixture via CDP (see test_chart_evidence_markers_cdp.py). Zero network
+  calls: no app.live.js, no backend, no UW/Anthropic traffic whatsoever.
+-->
+<html>
+<head>
+<meta charset="utf-8">
+<title>Chart evidence marker overlay harness</title>
+<link rel="stylesheet" href="styles.css">
+<style>
+  body { background:#0b0f14; margin:0; padding:24px; }
+  #tickerDetail { max-width: 1800px; }
+</style>
+</head>
+<body>
+  <div id="tickerDetail">
+    <div class="card chart-card chart-card-prominent">
+      <div id="chartRangeRow"></div>
+      <div id="ohlcChartContainer" class="chart-container"></div>
+      <div id="chartVolumeLabel" class="muted"></div>
+      <div id="chartRangeNote" class="muted"></div>
+      <div id="activityTimelineContainer"></div>
+    </div>
+  </div>
+<script src="lightweight-charts.js"></script>
+<script src="timefmt.js"></script>
+<script src="app.core.js"></script>
+</body>
+</html>

@@ -194,7 +194,7 @@ async function main() {
     [
       "setMode", "loadRadar", "loadTickerDetail", "navigateToTicker", "TIP_STATE",
       "loadSettings", "testUwKey", "saveUwKey", "disconnectUwKey", "apiPost", "apiGet",
-      "mountCandlestickChart",
+      "mountCandlestickChart", "nearestBarTime", "dateOnly",
       // Unified ticker combobox (2026-10-14) -- _comboFilter is a plain
       // `function` declaration, so (unlike the `let`-declared pool/state
       // variables it closes over) it IS exposed as a global by indirect
@@ -267,14 +267,33 @@ async function main() {
       assert.ok(typeof b.time === "string" && typeof b.open === "number" && typeof b.close === "number");
     }
   });
-  check("FLUX: markers include at least one priced marker (real price field present)", () => {
-    const priced = (lastChartCall.markers || []).filter((m) => m.text && m.text.includes("@"));
-    assert.ok(priced.length > 0, `no priced marker found: ${JSON.stringify(lastChartCall.markers)}`);
+  // 2026-10-17 (chart-evidence-markers, round 2): the chart no longer
+  // calls LightweightCharts' native series.setMarkers() at all -- the
+  // overlapping always-on text labels near the chart's right edge (the
+  // real SPY demo-video defect), and the dot-overlay replacement that
+  // was itself rejected after Chad reviewed real SPY/NVDA screenshots,
+  // are both replaced by mountEvidenceHistogram()'s native histogram
+  // pane on the same chart instance -- which this minimal FakeEl DOM
+  // stub (no real addHistogramSeries/subscribeCrosshairMove) deliberately
+  // no-ops for -- that real-DOM behavior is covered by the dedicated
+  // real-Chromium/CDP test (frontend/test_chart_evidence_markers_cdp.py),
+  // which asserts actual rendered histogram bar data and tooltip content.
+  // This check instead verifies, against the REAL running backend, that
+  // the exact same alignment logic mountCandlestickChart uses
+  // (nearestBarTime) still correctly maps real priced markers onto real
+  // bar times -- i.e. the data this feature depends on is genuinely
+  // present and genuinely alignable, even though this harness can't see
+  // the rendered histogram bars themselves.
+  const fluxOhlc = await (await fetch(`${BASE}/api/ticker/FLUX/ohlc`)).json();
+  check("FLUX: real backend OHLC response includes at least one priced marker", () => {
+    const priced = (fluxOhlc.markers || []).filter((m) => m.price != null);
+    assert.ok(priced.length > 0, `no priced marker found: ${JSON.stringify(fluxOhlc.markers)}`);
   });
-  check("FLUX: no marker is placed off the rendered bar range (every marker.time is one of the bars)", () => {
-    const barTimes = new Set(lastChartCall.bars.map((b) => b.time));
-    for (const m of lastChartCall.markers || []) {
-      assert.ok(barTimes.has(m.time), `marker time ${m.time} not among rendered bar times`);
+  check("FLUX: every real marker's nearestBarTime maps onto an actually-rendered bar", () => {
+    const barTimes = lastChartCall.bars.map((b) => b.time).sort();
+    for (const m of fluxOhlc.markers || []) {
+      const mapped = liveB.nearestBarTime(liveB.dateOnly(m.time), barTimes);
+      assert.ok(mapped === null || barTimes.includes(mapped), `marker ${m.time} mapped to non-existent bar ${mapped}`);
     }
   });
 
