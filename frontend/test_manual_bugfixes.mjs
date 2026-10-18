@@ -267,21 +267,23 @@ async function main() {
       assert.ok(typeof b.time === "string" && typeof b.open === "number" && typeof b.close === "number");
     }
   });
-  // 2026-10-17 (chart-evidence-markers fix): the chart no longer calls
-  // LightweightCharts' native series.setMarkers() at all -- overlapping
-  // always-on text labels near the chart's right edge (the real SPY
-  // demo-video defect) are replaced by mountEvidenceMarkerOverlay's own
-  // absolutely-positioned dot overlay, which this minimal FakeEl DOM
-  // stub (no real appendChild/getBoundingClientRect) deliberately no-ops
-  // for -- that real-DOM behavior is covered by the dedicated real-
-  // Chromium/CDP test (frontend/test_chart_evidence_markers_cdp.py),
-  // which asserts actual rendered pixel positions and tooltip content.
+  // 2026-10-17 (chart-evidence-markers, round 2): the chart no longer
+  // calls LightweightCharts' native series.setMarkers() at all -- the
+  // overlapping always-on text labels near the chart's right edge (the
+  // real SPY demo-video defect), and the dot-overlay replacement that
+  // was itself rejected after Chad reviewed real SPY/NVDA screenshots,
+  // are both replaced by mountEvidenceHistogram()'s native histogram
+  // pane on the same chart instance -- which this minimal FakeEl DOM
+  // stub (no real addHistogramSeries/subscribeCrosshairMove) deliberately
+  // no-ops for -- that real-DOM behavior is covered by the dedicated
+  // real-Chromium/CDP test (frontend/test_chart_evidence_markers_cdp.py),
+  // which asserts actual rendered histogram bar data and tooltip content.
   // This check instead verifies, against the REAL running backend, that
   // the exact same alignment logic mountCandlestickChart uses
   // (nearestBarTime) still correctly maps real priced markers onto real
   // bar times -- i.e. the data this feature depends on is genuinely
   // present and genuinely alignable, even though this harness can't see
-  // the rendered dots themselves.
+  // the rendered histogram bars themselves.
   const fluxOhlc = await (await fetch(`${BASE}/api/ticker/FLUX/ohlc`)).json();
   check("FLUX: real backend OHLC response includes at least one priced marker", () => {
     const priced = (fluxOhlc.markers || []).filter((m) => m.price != null);
