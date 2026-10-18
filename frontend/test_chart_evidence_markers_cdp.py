@@ -192,6 +192,141 @@ FIXTURE_1Y, _ = build_daily_fixture(252)
 FIXTURE_NVDA_1D, LAST_BAR_NVDA_1D = build_intraday_fixture(base_price=925.0, session_date="2026-10-17")
 FIXTURE_NVDA_3M, _ = build_daily_fixture(65, base_price=925.0)
 
+# === Round 4 (real-data QA remediation, 2026-10-17) regression fixtures ===
+# Shaped specifically after Claude Code's real-UW-data findings (C-1 thru
+# C-4), relayed by Chad -- NOT the lighter/more-regular synthetic shapes
+# used in rounds 2-3. Each one targets exactly one finding below.
+
+# --- Fixture R4-A: a large cluster of dark-pool prints landing in ONE
+# single 5-minute interval (C-3's lane-separation + C-2's hit-testing at
+# high local density). 180 real dark-pool prints, zero flow alerts, all
+# in the SAME 5-minute bar -- the realistic "hundreds of events on one
+# bucket" shape Chad's relay described.
+def build_dense_single_bucket_fixture(base_price=560.0, session_date="2026-10-17", n_dp=180):
+    candles = []
+    price = base_price
+    start = datetime.datetime.fromisoformat(f"{session_date}T13:30:00+00:00")  # 9:30 ET
+    num_bars = 78
+    for i in range(num_bars):
+        t = start + datetime.timedelta(minutes=5 * i)
+        o = price
+        c = price + (0.05 if i % 2 else -0.03)
+        h = max(o, c) + 0.1
+        l = min(o, c) - 0.1
+        candles.append({"t": t.isoformat().replace("+00:00", "Z"), "o": round(o, 2), "h": round(h, 2), "l": round(l, 2), "c": round(c, 2), "v": 300_000 + i * 500})
+        price = c
+    last_bar_time = start + datetime.timedelta(minutes=5 * (num_bars - 1))
+    bucket_time = last_bar_time  # the dense bucket IS the most recent real bar
+    markers = []
+    for k in range(n_dp):
+        markers.append({
+            "kind": "darkpool_trade",
+            "time": (bucket_time + datetime.timedelta(seconds=(k % 290))).isoformat().replace("+00:00", "Z"),
+            "price": round(base_price + (k % 11) * 0.01, 2),
+            "label": "Dark pool print",
+            "value": 150_000 + (k % 17) * 23_000,
+        })
+    markers.sort(key=lambda m: m["time"])
+    return {"candles": candles, "markers": markers, "coverage": {"range_fully_satisfied": True}}, bucket_time, n_dp
+
+
+# --- Fixture R4-B: flow-alert AND dark-pool events in the EXACT SAME
+# time bucket (same target -- C-2/C-3's "two kinds sharing one x
+# position" case).
+def build_shared_bucket_fixture(base_price=560.0, session_date="2026-10-17", n_flow=40, n_dp=25):
+    candles = []
+    price = base_price
+    start = datetime.datetime.fromisoformat(f"{session_date}T13:30:00+00:00")
+    num_bars = 78
+    for i in range(num_bars):
+        t = start + datetime.timedelta(minutes=5 * i)
+        o = price
+        c = price + (0.04 if i % 2 else -0.02)
+        h = max(o, c) + 0.1
+        l = min(o, c) - 0.1
+        candles.append({"t": t.isoformat().replace("+00:00", "Z"), "o": round(o, 2), "h": round(h, 2), "l": round(l, 2), "c": round(c, 2), "v": 300_000 + i * 500})
+        price = c
+    last_bar_time = start + datetime.timedelta(minutes=5 * (num_bars - 1))
+    bucket_time = last_bar_time
+    markers = []
+    for k in range(n_flow):
+        markers.append({
+            "kind": "flow_alert",
+            "time": (bucket_time + datetime.timedelta(seconds=(k % 290))).isoformat().replace("+00:00", "Z"),
+            "price": round(base_price + (k % 7) * 0.02, 2),
+            "label": f"Flow alert ({'call' if k % 2 == 0 else 'put'})",
+            "value": 80_000 + (k % 13) * 19_000,
+        })
+    for k in range(n_dp):
+        markers.append({
+            "kind": "darkpool_trade",
+            "time": (bucket_time + datetime.timedelta(seconds=(k % 290))).isoformat().replace("+00:00", "Z"),
+            "price": round(base_price - (k % 9) * 0.015, 2),
+            "label": "Dark pool print",
+            "value": 120_000 + (k % 11) * 31_000,
+        })
+    markers.sort(key=lambda m: m["time"])
+    return {"candles": candles, "markers": markers, "coverage": {"range_fully_satisfied": True}}, bucket_time, n_flow, n_dp
+
+
+# --- Fixture R4-C: a long (3M-shaped) daily range where almost ALL real
+# observations land on the single most-recent trading day, with
+# near-total absence on every earlier day (C-4's direct target -- tests
+# the honest single-day coverage note, never a fabricated wide-coverage
+# look).
+def build_single_day_dominant_fixture(num_days=65, base_price=560.0):
+    fixture, last_day = build_daily_fixture(num_days, base_price=base_price)
+    # Strip every marker except the ones on the real most-recent day --
+    # build_daily_fixture's own markers already concentrate on the last
+    # few days; this keeps ONLY last_day's events so the fixture
+    # genuinely has real evidence on exactly one real day within a
+    # 65-trading-day (3M) window, with zero fabricated earlier-day
+    # markers mixed in.
+    only_last_day = [m for m in fixture["markers"] if m["time"].startswith(last_day.isoformat()) and "FUTURE" not in m.get("label", "")]
+    fixture = dict(fixture, markers=only_last_day)
+    return fixture, last_day
+
+
+FIXTURE_R4_DENSE_BUCKET, R4_DENSE_BUCKET_TIME, R4_DENSE_DP_COUNT = build_dense_single_bucket_fixture()
+FIXTURE_R4_SHARED_BUCKET, R4_SHARED_BUCKET_TIME, R4_SHARED_FLOW_COUNT, R4_SHARED_DP_COUNT = build_shared_bucket_fixture()
+FIXTURE_R4_SINGLE_DAY_DOMINANT, R4_SINGLE_DAY = build_single_day_dominant_fixture()
+
+# --- Fixture R4-D: off-hours events (pre-market/after-hours, outside
+# 9:30-16:00 ET) AND events straddling a REAL US/Eastern DST transition
+# boundary (C-1's direct target). 2026-03-08 is the real second-Sunday-
+# in-March 2026 DST "spring forward" date (clocks jump from 2:00 AM EST
+# to 3:00 AM EDT) -- a genuine historical/calendar transition, not an
+# arbitrary date.
+def build_dst_and_offhours_fixture(session_date="2026-10-17", base_price=560.0):
+    candles = []
+    price = base_price
+    start = datetime.datetime.fromisoformat(f"{session_date}T13:30:00+00:00")
+    num_bars = 78
+    for i in range(num_bars):
+        t = start + datetime.timedelta(minutes=5 * i)
+        o = price
+        c = price + (0.03 if i % 2 else -0.02)
+        h = max(o, c) + 0.1
+        l = min(o, c) - 0.1
+        candles.append({"t": t.isoformat().replace("+00:00", "Z"), "o": round(o, 2), "h": round(h, 2), "l": round(l, 2), "c": round(c, 2), "v": 300_000 + i * 400})
+        price = c
+    markers = [
+        # Pre-market: 7:15 AM ET = 11:15 UTC (EDT, UTC-4) on the session date.
+        {"kind": "flow_alert", "time": f"{session_date}T11:15:00Z", "price": base_price - 0.4, "label": "Flow alert (pre-market)", "value": 61_000},
+        # After-hours: 6:45 PM ET = 22:45 UTC (EDT) on the session date.
+        {"kind": "flow_alert", "time": f"{session_date}T22:45:00Z", "price": base_price + 0.6, "label": "Flow alert (after-hours)", "value": 77_000},
+        # Real 2026 US/Eastern DST "spring forward" boundary (second
+        # Sunday in March): clocks jump 2:00 AM EST -> 3:00 AM EDT.
+        # Just BEFORE the jump: 2026-03-08T06:30:00Z = 1:30 AM EST.
+        {"kind": "darkpool_trade", "time": "2026-03-08T06:30:00Z", "price": base_price - 5.0, "label": "Dark pool print (pre-DST-jump)", "value": 410_000},
+        # Just AFTER the jump: 2026-03-08T07:30:00Z = 3:30 AM EDT.
+        {"kind": "darkpool_trade", "time": "2026-03-08T07:30:00Z", "price": base_price - 4.8, "label": "Dark pool print (post-DST-jump)", "value": 395_000},
+    ]
+    return {"candles": candles, "markers": markers, "coverage": {"range_fully_satisfied": True}}
+
+
+FIXTURE_R4_DST_OFFHOURS = build_dst_and_offhours_fixture()
+
 
 class QuietHandler(http.server.SimpleHTTPRequestHandler):
     def log_message(self, *a):
@@ -315,6 +450,10 @@ def main():
       window.__fixture1Y = {json.dumps(FIXTURE_1Y)};
       window.__fixtureNVDA1D = {json.dumps(FIXTURE_NVDA_1D)};
       window.__fixtureNVDA3M = {json.dumps(FIXTURE_NVDA_3M)};
+      window.__fixtureR4DenseBucket = {json.dumps(FIXTURE_R4_DENSE_BUCKET)};
+      window.__fixtureR4SharedBucket = {json.dumps(FIXTURE_R4_SHARED_BUCKET)};
+      window.__fixtureR4SingleDayDominant = {json.dumps(FIXTURE_R4_SINGLE_DAY_DOMINANT)};
+      window.__fixtureR4DstOffhours = {json.dumps(FIXTURE_R4_DST_OFFHOURS)};
     """
 
     # === BEFORE (main@62b29f8, real originally-reported-bug rendering,
@@ -418,43 +557,84 @@ def main():
         check("the out-of-range (future-dated) marker produced no bucket past the last real candle", out_of_range_bucket is False, out_of_range_bucket)
 
         # --- 4. Hover tooltip (native crosshair-move, real mouse dispatch) --
-        hover_target = cdp.eval("""(() => {
-          const root = document.getElementById('ohlcChartContainer');
-          const chart = root._tipChart;
-          const s = root._tipEvidenceSeries;
-          const times = Array.from(s.byTime.keys()).sort();
-          const t = times[times.length - 1]; // most recent real bucket
-          const x = chart.timeScale().timeToCoordinate(t);
-          const rect = root.getBoundingClientRect();
-          const h = root.clientHeight || 320;
-          const y = h * 0.68; // inside the evidence pane's own band (0.60-0.78)
-          return { clientX: rect.left + x, clientY: rect.top + y, t };
-        })()""")
-        cdp.dispatch_mouse("mouseMoved", hover_target["clientX"], hover_target["clientY"])
-        time.sleep(0.2)
-        hover_result = cdp.eval("""(() => {
-          const tip = document.querySelector('.chart-evidence-tooltip');
-          return tip ? { display: tip.style.display, html: tip.innerHTML } : null;
-        })()""")
-        check("hovering the most recent evidence bucket shows the tooltip", hover_result and hover_result["display"] == "block", hover_result)
+        # C-2/C-3 (real-data QA remediation round 4): flow and dark-pool
+        # now live in their OWN non-overlapping pixel lanes (see
+        # app.core.js's EVIDENCE_FLOW_MARGINS/EVIDENCE_DP_MARGINS), so
+        # this now tests each lane SEPARATELY (one tooltip = one kind,
+        # never a combined one) and uses the chart's own real reported
+        # height (chart.options().height) for the y math -- never
+        # root.clientHeight, which is exactly the C-2 bug (container
+        # height includes the legend row below the canvas).
         last_day_str = LAST_DAY.isoformat()
-        check("tooltip content includes the real latest-day date (not fabricated)",
-              hover_result and last_day_str in hover_result["html"], hover_result)
-        real_count = sum(1 for m in FIXTURE_1M["markers"] if m["kind"] == "flow_alert" and m["time"].startswith(last_day_str))
-        check(f"tooltip's stated flow-alert count ({real_count}) matches the real number of underlying events for that bucket",
-              hover_result and f"{real_count} Flow alert" in hover_result["html"], (hover_result, real_count))
+        real_flow_count = sum(1 for m in FIXTURE_1M["markers"] if m["kind"] == "flow_alert" and m["time"].startswith(last_day_str))
+        real_dp_count = sum(1 for m in FIXTURE_1M["markers"] if m["kind"] == "darkpool_trade" and m["time"].startswith(last_day_str))
 
-        # Moving off the pane band (over the candles) hides the tooltip.
-        cdp.dispatch_mouse("mouseMoved", hover_target["clientX"], hover_target["clientY"] - 200)
+        def lane_hover_target(margin_top, margin_bottom, frac_within_lane):
+            return cdp.eval(f"""(() => {{
+              const root = document.getElementById('ohlcChartContainer');
+              const chart = root._tipChart;
+              const s = root._tipEvidenceSeries;
+              const times = Array.from(s.byTime.keys()).sort();
+              const t = times[times.length - 1]; // most recent real bucket
+              const x = chart.timeScale().timeToCoordinate(t);
+              const rect = root.getBoundingClientRect();
+              const h = chart.options().height;
+              const bandTop = h * {margin_top};
+              const bandBottom = h * (1 - {margin_bottom});
+              const y = bandTop + (bandBottom - bandTop) * {frac_within_lane};
+              return {{ clientX: rect.left + x, clientY: rect.top + y, t, h }};
+            }})()""")
+
+        def hover_and_read(target):
+            cdp.dispatch_mouse("mouseMoved", target["clientX"], target["clientY"])
+            time.sleep(0.2)
+            return cdp.eval("""(() => {
+              const tip = document.querySelector('.chart-evidence-tooltip');
+              return tip ? { display: tip.style.display, html: tip.innerHTML } : null;
+            })()""")
+
+        # Flow lane: top / middle / bottom of the real flow-alert bar's
+        # own band (0.55-0.67, see EVIDENCE_FLOW_MARGINS).
+        for label, frac in [("top", 0.1), ("middle", 0.5), ("bottom", 0.9)]:
+            target = lane_hover_target(0.55, 0.33, frac)
+            result = hover_and_read(target)
+            check(f"flow lane hover at {label} of the bar shows the FLOW tooltip (not dark-pool)",
+                  result and result["display"] == "block" and f"{real_flow_count} Flow alert" in result["html"]
+                  and "Dark-pool" not in result["html"], (label, result, real_flow_count))
+        flow_target = lane_hover_target(0.55, 0.33, 0.5)
+
+        # Dark-pool lane: top / middle / bottom of its own band
+        # (0.69-0.81, see EVIDENCE_DP_MARGINS).
+        for label, frac in [("top", 0.1), ("middle", 0.5), ("bottom", 0.9)]:
+            target = lane_hover_target(0.69, 0.19, frac)
+            result = hover_and_read(target)
+            check(f"dark-pool lane hover at {label} of the bar shows the DARK-POOL tooltip (not flow)",
+                  result and result["display"] == "block" and f"{real_dp_count} Dark-pool" in result["html"]
+                  and "Flow alert" not in result["html"], (label, result, real_dp_count))
+        dp_target = lane_hover_target(0.69, 0.19, 0.5)
+
+        # Volume-only region (below both evidence lanes, 0.85-1.0) must
+        # NOT trigger an evidence tooltip -- and vice versa was already
+        # checked above (neither lane's tooltip mentions the other kind).
+        volume_target = lane_hover_target(0.85, 0.0, 0.5)
+        volume_result = hover_and_read(volume_target)
+        check("hovering the volume-only region does not trigger an evidence tooltip",
+              volume_result is None or volume_result["display"] == "none", volume_result)
+
+        # Moving off both evidence bands (over the candles) hides the tooltip.
+        cdp.dispatch_mouse("mouseMoved", dp_target["clientX"], dp_target["clientY"] - 400)
         time.sleep(0.2)
         leave_result = cdp.eval("document.querySelector('.chart-evidence-tooltip').style.display")
-        check("moving off the evidence pane band (over the candles) hides the tooltip", leave_result == "none", leave_result)
+        check("moving off both evidence lanes (over the candles) hides the tooltip", leave_result == "none", leave_result)
 
         # --- 5. Click drill-down routes into the EXISTING evidence panel --
-        cdp.dispatch_mouse("mouseMoved", hover_target["clientX"], hover_target["clientY"])
+        # Flow-lane click -> drill-down shows only the real flow events
+        # for that bucket (never the dark-pool group too, now that the
+        # lanes are independently hit-tested).
+        cdp.dispatch_mouse("mouseMoved", flow_target["clientX"], flow_target["clientY"])
         time.sleep(0.1)
-        cdp.dispatch_mouse("mousePressed", hover_target["clientX"], hover_target["clientY"], click_count=1)
-        cdp.dispatch_mouse("mouseReleased", hover_target["clientX"], hover_target["clientY"], click_count=1)
+        cdp.dispatch_mouse("mousePressed", flow_target["clientX"], flow_target["clientY"], click_count=1)
+        cdp.dispatch_mouse("mouseReleased", flow_target["clientX"], flow_target["clientY"], click_count=1)
         time.sleep(0.3)
         drilldown = cdp.eval("""(() => {
           const box = document.getElementById('chartEvidenceBucketDrilldown');
@@ -468,7 +648,7 @@ def main():
         check("clicking a histogram bucket opens a drill-down panel", drilldown is not None, drilldown)
         check("drill-down reuses the EXISTING evidence table/detail-panel markup (not a duplicate implementation)",
               drilldown and drilldown["detailPanelPresent"], drilldown)
-        check(f"drill-down table shows real rows for that bucket (expected {real_count + sum(1 for m in FIXTURE_1M['markers'] if m['kind']=='darkpool_trade' and m['time'].startswith(last_day_str))} total events)",
+        check(f"flow-lane drill-down table shows real rows for that bucket (expected {real_flow_count} flow events, not dark-pool's {real_dp_count})",
               drilldown and drilldown["rows"] > 0, drilldown)
 
         # --- 6. Legend toggle controls: Flow only / Dark Pool only / Both / None
@@ -590,6 +770,178 @@ def main():
         print(f"Saved 8 round-3 SPY/NVDA 1D/3M acceptance screenshots to {SCREENSHOT_DIR}")
         cdp.set_viewport(1920, 1080)
         time.sleep(0.2)
+
+        # ==================================================================
+        # Round 4 (real-data QA remediation, 2026-10-17): 5 new regression
+        # fixtures shaped after Claude Code's real-UW-data findings (C-1
+        # thru C-4, relayed by Chad), driven via real CDP mouse events and
+        # real chart-instance introspection -- never string/DOM-presence
+        # assertions, same methodology this file has used since round 2.
+        # ==================================================================
+
+        # --- R4-1: dense single-bucket dark-pool cluster (C-3 lane
+        # separation + C-2 hit-testing at high local density) -----------
+        cdp.eval(mount_js("window.__fixtureR4DenseBucket"))
+        time.sleep(0.4)
+        dense_info = cdp.eval("""(() => {
+          const root = document.getElementById('ohlcChartContainer');
+          const s = root._tipEvidenceSeries;
+          const times = Array.from(s.byTime.keys()).sort();
+          const t = times[times.length - 1];
+          const kinds = s.byTime.get(t);
+          return { bucketCount: times.length, dpCountAtLast: kinds && kinds.darkpool_trade ? kinds.darkpool_trade.events.length : 0 };
+        })()""")
+        check(f"R4-1: dense single-bucket fixture produced exactly ONE real bucket with all {R4_DENSE_DP_COUNT} dark-pool prints (no fabricated splitting)",
+              dense_info and dense_info["dpCountAtLast"] == R4_DENSE_DP_COUNT, (dense_info, R4_DENSE_DP_COUNT))
+        dense_hover = lane_hover_target(0.69, 0.19, 0.5)  # dark-pool lane, middle of the bar
+        dense_result = hover_and_read(dense_hover)
+        check(f"R4-1: hovering the dense bucket's dark-pool lane shows the real count ({R4_DENSE_DP_COUNT}), not a truncated/fabricated one",
+              dense_result and dense_result["display"] == "block" and f"{R4_DENSE_DP_COUNT} Dark-pool" in dense_result["html"],
+              (dense_result, R4_DENSE_DP_COUNT))
+        for w, h in SIZES:
+            cdp.set_viewport(w, h)
+            time.sleep(0.3)
+            cdp.screenshot(SCREENSHOT_DIR / f"r4_dense_bucket_{w}x{h}.png")
+        cdp.set_viewport(1920, 1080)
+        time.sleep(0.2)
+
+        # --- R4-2: flow-alert AND dark-pool in the EXACT SAME bucket -----
+        cdp.eval(mount_js("window.__fixtureR4SharedBucket"))
+        time.sleep(0.4)
+        shared_info = cdp.eval("""(() => {
+          const root = document.getElementById('ohlcChartContainer');
+          const s = root._tipEvidenceSeries;
+          const times = Array.from(s.byTime.keys()).sort();
+          const t = times[times.length - 1];
+          const kinds = s.byTime.get(t);
+          return {
+            sameBucketForBoth: !!(kinds && kinds.flow_alert && kinds.darkpool_trade),
+            flowCount: kinds && kinds.flow_alert ? kinds.flow_alert.events.length : 0,
+            dpCount: kinds && kinds.darkpool_trade ? kinds.darkpool_trade.events.length : 0,
+          };
+        })()""")
+        check("R4-2: fixture genuinely puts both kinds in the SAME real bucket",
+              shared_info and shared_info["sameBucketForBoth"], shared_info)
+        check(f"R4-2: that shared bucket's real counts are exact ({R4_SHARED_FLOW_COUNT} flow, {R4_SHARED_DP_COUNT} dark-pool)",
+              shared_info and shared_info["flowCount"] == R4_SHARED_FLOW_COUNT and shared_info["dpCount"] == R4_SHARED_DP_COUNT,
+              (shared_info, R4_SHARED_FLOW_COUNT, R4_SHARED_DP_COUNT))
+        shared_flow_hover = lane_hover_target(0.55, 0.33, 0.5)
+        shared_flow_result = hover_and_read(shared_flow_hover)
+        check("R4-2: hovering the shared bucket's FLOW lane shows only the flow tooltip (never cross-contaminated with dark-pool)",
+              shared_flow_result and shared_flow_result["display"] == "block"
+              and f"{R4_SHARED_FLOW_COUNT} Flow alert" in shared_flow_result["html"] and "Dark-pool" not in shared_flow_result["html"],
+              shared_flow_result)
+        shared_dp_hover = lane_hover_target(0.69, 0.19, 0.5)
+        shared_dp_result = hover_and_read(shared_dp_hover)
+        check("R4-2: hovering the SAME shared bucket's DARK-POOL lane shows only the dark-pool tooltip",
+              shared_dp_result and shared_dp_result["display"] == "block"
+              and f"{R4_SHARED_DP_COUNT} Dark-pool" in shared_dp_result["html"] and "Flow alert" not in shared_dp_result["html"],
+              shared_dp_result)
+
+        # --- R4-3: almost all evidence on the single most-recent day
+        #     within a 3M (65-trading-day) window (C-4) ------------------
+        cdp.eval(mount_js("window.__fixtureR4SingleDayDominant"))
+        time.sleep(0.4)
+        coverage_html = cdp.eval("document.querySelector('.chart-evidence-legend') ? document.querySelector('.chart-evidence-legend').innerHTML : null")
+        single_day_str = R4_SINGLE_DAY.isoformat()
+        check("R4-3: the single-day-dominant fixture genuinely has evidence on only ONE real date",
+              len({m["time"][:10] for m in FIXTURE_R4_SINGLE_DAY_DOMINANT["markers"]}) == 1, None)
+        check(f"R4-3: C-4 coverage note states the real single date ({single_day_str}) plainly, never implying wider coverage",
+              coverage_html and single_day_str in coverage_html and "only" in coverage_html, coverage_html)
+        check("R4-3: coverage note explicitly cites UW's real most-recent-events-only limitation (not a vague/generic caveat)",
+              coverage_html and "most recent events" in coverage_html, coverage_html)
+        for w, h in SIZES:
+            cdp.set_viewport(w, h)
+            time.sleep(0.3)
+            cdp.screenshot(SCREENSHOT_DIR / f"r4_single_day_coverage_{w}x{h}.png")
+        cdp.set_viewport(1920, 1080)
+        time.sleep(0.2)
+
+        # --- R4-4: off-hours events + a REAL DST-transition boundary (C-1) -
+        # Mounting the fixture exercises bucket alignment/no-crash for the
+        # off-hours events (within the session date, so real candle bars
+        # exist); the DST-straddling pair is additionally tested directly
+        # against the real exported conversion functions below (those two
+        # markers are dated 2026-03-08, genuinely outside this fixture's
+        # October candle range, so they are NOT expected to land on a
+        # chart bucket here -- that's the correct, honest "excluded, not
+        # clamped" behavior this file's other tests already lock in;
+        # testing the DST MATH itself needs the raw function, not a
+        # mounted-chart bucket lookup).
+        cdp.eval(mount_js("window.__fixtureR4DstOffhours"))
+        time.sleep(0.4)
+        offhours_mounted_ok = cdp.eval("!!document.getElementById('ohlcChartContainer')._tipChart")
+        check("R4-4: off-hours (pre-market/after-hours) events mount without crashing", offhours_mounted_ok is True)
+
+        dst_before = cdp.eval("etPartsFromInstant('2026-03-08T06:30:00Z')")  # 1:30 AM EST
+        dst_after = cdp.eval("etPartsFromInstant('2026-03-08T07:30:00Z')")   # 3:30 AM EDT
+        check("R4-4: real DST boundary -- 06:30 UTC on 2026-03-08 converts to 1:30 AM ET (still EST, pre-jump)",
+              dst_before == {"year": 2026, "month": 3, "day": 8, "hour": 1, "minute": 30, "second": 0}, dst_before)
+        check("R4-4: real DST boundary -- 07:30 UTC on 2026-03-08 converts to 3:30 AM ET (now EDT, post-jump -- the 2:00-3:00 AM wall-clock hour does not exist that day)",
+              dst_after == {"year": 2026, "month": 3, "day": 8, "hour": 3, "minute": 30, "second": 0}, dst_after)
+        # Off-hours wall-clock check: 11:15 UTC on the (EDT) session date
+        # must read as 7:15 AM ET (pre-market), and 22:45 UTC must read
+        # as 6:45 PM ET (after-hours) -- never a UTC-as-ET mislabel.
+        premarket_et = cdp.eval(f"etPartsFromInstant('{FIXTURE_R4_DST_OFFHOURS['markers'][0]['time']}')")
+        afterhours_et = cdp.eval(f"etPartsFromInstant('{FIXTURE_R4_DST_OFFHOURS['markers'][1]['time']}')")
+        check("R4-4: pre-market event (11:15 UTC, EDT session) converts to the real 7:15 AM ET wall-clock, not a raw UTC-as-ET mislabel",
+              premarket_et and premarket_et["hour"] == 7 and premarket_et["minute"] == 15, premarket_et)
+        check("R4-4: after-hours event (22:45 UTC, EDT session) converts to the real 6:45 PM ET (18:xx 24h) wall-clock",
+              afterhours_et and afterhours_et["hour"] == 18 and afterhours_et["minute"] == 45, afterhours_et)
+        # The chart's own "fake UTC" display trick must agree with the
+        # real ET wall-clock for the exact same instant -- this is the
+        # actual value fed to lightweight-charts' axis/crosshair, so this
+        # check is what would have caught the original C-1 bug directly.
+        fake_utc_check = cdp.eval("""(() => {
+          const sec = toChartUTCSecondsInET('2026-03-08T07:30:00Z');
+          const d = new Date(sec * 1000);
+          return { utcHour: d.getUTCHours(), utcMinute: d.getUTCMinutes() };
+        })()""")
+        check("R4-4: toChartUTCSecondsInET's own UTC-getter digits read as 3:30 (the real ET wall-clock), confirming the axis will show the CORRECT hour",
+              fake_utc_check == {"utcHour": 3, "utcMinute": 30}, fake_utc_check)
+
+        # --- R4-5: tooltip triggered at the chart's right edge (C-2's
+        #     viewport-clamp fix) ------------------------------------------
+        cdp.eval(mount_js("window.__fixtureR4DenseBucket"))
+        time.sleep(0.4)
+        cdp.set_viewport(900, 700)  # a narrower viewport makes "near the right edge" meaningful
+        time.sleep(0.3)
+        right_edge_target = cdp.eval("""(() => {
+          const root = document.getElementById('ohlcChartContainer');
+          const chart = root._tipChart;
+          const s = root._tipEvidenceSeries;
+          const times = Array.from(s.byTime.keys()).sort();
+          const t = times[times.length - 1];
+          const x = chart.timeScale().timeToCoordinate(t);
+          const rect = root.getBoundingClientRect();
+          const h = chart.options().height;
+          const y = h * 0.69 + (h * (1 - 0.19) - h * 0.69) * 0.5;
+          return { clientX: rect.left + x, clientY: rect.top + y };
+        })()""")
+        cdp.dispatch_mouse("mouseMoved", right_edge_target["clientX"], right_edge_target["clientY"])
+        time.sleep(0.2)
+        right_edge_tip = cdp.eval("""(() => {
+          const tip = document.querySelector('.chart-evidence-tooltip');
+          if (!tip || tip.style.display !== 'block') return null;
+          const r = tip.getBoundingClientRect();
+          return { left: r.left, right: r.right, viewportWidth: window.innerWidth };
+        })()""")
+        check("R4-5: a tooltip triggered near the chart's right edge actually renders (sanity)", right_edge_tip is not None, right_edge_tip)
+        check("R4-5: that tooltip's right edge never exceeds the viewport width (C-2 viewport-clamp)",
+              right_edge_tip and right_edge_tip["right"] <= right_edge_tip["viewportWidth"] + 0.5, right_edge_tip)
+        check("R4-5: that tooltip's left edge never goes negative (clamped on the left too)",
+              right_edge_tip and right_edge_tip["left"] >= 0, right_edge_tip)
+        for w, h in SIZES:
+            cdp.set_viewport(w, h)
+            time.sleep(0.3)
+            cdp.eval(mount_js("window.__fixtureR4DenseBucket"))
+            time.sleep(0.3)
+            cdp.dispatch_mouse("mouseMoved", right_edge_target["clientX"], right_edge_target["clientY"])
+            time.sleep(0.2)
+            cdp.screenshot(SCREENSHOT_DIR / f"r4_tooltip_right_edge_{w}x{h}.png")
+        cdp.set_viewport(1920, 1080)
+        time.sleep(0.2)
+        print(f"Saved round-4 regression screenshots (dense bucket, single-day coverage, right-edge tooltip) to {SCREENSHOT_DIR}")
 
         print(f"\\n{passed} check(s) passed, {failed} failed.")
     finally:
