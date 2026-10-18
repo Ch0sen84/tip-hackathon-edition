@@ -3000,6 +3000,28 @@ function mountEvidenceHistogram(root, chart, groups, chartHeight) {
   // above EVIDENCE_FLOW_MARGINS/EVIDENCE_DP_MARGINS for why a shared
   // baseline could let one series visually bury the other at realistic
   // density, and why a split lane (not opacity/stacking) is the fix.
+  // R5-2 (real-data QA remediation round 6, 2026-10-18): `title` is a
+  // real, documented per-series option (confirmed in the vendored
+  // v4.2.0 bundle's own default series-options object, which includes
+  // a `title` field alongside lastValueVisible/priceLineVisible) that
+  // lightweight-charts draws as a small colored text tag at the
+  // series' own last-bar vertical position -- investigated directly in
+  // a real headless-Chrome probe (synthetic fixture): this label STILL
+  // renders even with the lane's own priceScale `visible:false` (set
+  // just below), because its paint path is gated on the SERIES' own
+  // visible()/title, never on its price scale's visible flag. That
+  // makes it the ideal "short, readable category label on/near each
+  // lane" the lane-labeling requirement asked for: zero DOM overlay,
+  // zero hardcoded pixel position, a real supported library mechanism,
+  // and it automatically tracks the lane's real vertical position
+  // (whatever EVIDENCE_FLOW_MARGINS/EVIDENCE_DP_MARGINS currently are)
+  // since it's drawn by the library itself at the series' own last
+  // real data point. Hidden automatically whenever the lane itself is
+  // hidden (Flow only/Dark Pool only/None toggles, via each series'
+  // `visible` option already set above) since an invisible series
+  // draws no title either -- confirmed by the same probe. No plotted
+  // value/count/premium changes; this only adds a label, never alters
+  // a number.
   const flowSeries = chart.addHistogramSeries({
     color: EVIDENCE_HISTOGRAM_COLORS.flow_alert,
     priceScaleId: "evidence-flow",
@@ -3007,6 +3029,7 @@ function mountEvidenceHistogram(root, chart, groups, chartHeight) {
     visible: evidenceModeShowsKind(mode, "flow_alert"),
     lastValueVisible: false,
     priceLineVisible: false,
+    title: "Flow alerts",
   });
   const dpSeries = chart.addHistogramSeries({
     color: EVIDENCE_HISTOGRAM_COLORS.darkpool_trade,
@@ -3015,6 +3038,7 @@ function mountEvidenceHistogram(root, chart, groups, chartHeight) {
     visible: evidenceModeShowsKind(mode, "darkpool_trade"),
     lastValueVisible: false,
     priceLineVisible: false,
+    title: "Dark-pool",
   });
   // Additional presentation fix (real-data QA remediation round 4,
   // 2026-10-17): `visible: false` on each overlay price SCALE (not the
@@ -3028,6 +3052,15 @@ function mountEvidenceHistogram(root, chart, groups, chartHeight) {
   // regions" failure this item was filed to prevent. The candlestick
   // series' own "right" scale is the ONLY one left visible, so the
   // right-edge label column only ever shows real $ prices.
+  //
+  // Round 6 re-verification (R5-2): re-confirmed via a fresh real-
+  // browser probe (not re-assumed from round 4's writeup) that
+  // `visible:false` here still genuinely suppresses ALL of this
+  // scale's own numeric tick labels in every case checked, including
+  // after the round-5 margin widening -- the only bleed-through this
+  // round's real-data QA actually found was the separate per-series
+  // last-value badge issue (volumeSeries, fixed above), not this
+  // scale's tick-label suppression, which remains correct.
   flowSeries.priceScale().applyOptions({ scaleMargins: EVIDENCE_FLOW_MARGINS, visible: false });
   dpSeries.priceScale().applyOptions({ scaleMargins: EVIDENCE_DP_MARGINS, visible: false });
 
@@ -3158,7 +3191,46 @@ function mountEvidenceHistogram(root, chart, groups, chartHeight) {
   // mountCandlestickChart) instead of a DOM measurement eliminates the
   // whole class of "container includes UI chrome below the canvas"
   // bug, now and for any future control appended below the chart.
-  const paneH = chartHeight || root.clientHeight || 320;
+  //
+  // R5-1 fix (real-data QA remediation round 6, 2026-10-18): C-2's
+  // `chartHeight` was itself still wrong -- it is the literal number
+  // passed to createChart({height}), i.e. the FULL container height
+  // INCLUDING the ~28px time-axis strip lightweight-charts reserves
+  // at the bottom below the actual plottable pane. Confirmed by direct
+  // real-browser measurement (not assumed): chart.options().height
+  // read 520 while every real series canvas inside the container
+  // (`root.querySelectorAll('canvas')`) measured exactly 492px tall --
+  // a 28px gap that exactly matches chart.timeScale().height(), a
+  // real, documented ITimeScaleApi getter (chart.timeScale().height():
+  // confirmed present in the vendored v4.2.0 bundle -- class `Re`,
+  // the object returned by `chart.timeScale()`, defines both
+  // `width()` and `height()`). Every scaleMargins fraction below is a
+  // fraction of the ACTUAL PANE height (492px here), never of the full
+  // createChart({height}) number -- so subtracting the time-axis
+  // strip's real measured height from chartHeight is required before
+  // multiplying any EVIDENCE_*_MARGINS fraction by it. No pixel
+  // constant is hardcoded: the 28px figure above is only an example
+  // from one real measurement; the code below re-derives it fresh
+  // every time via chart.timeScale().height(), so it stays correct
+  // under any responsive chartHeight, font, or theme change. Falls
+  // back to the un-subtracted chartHeight only under the minimal test
+  // DOM stubs (where chart.timeScale is absent/non-functional) so
+  // existing non-CDP unit tests that stub out the chart entirely keep
+  // working unchanged.
+  function realPlottingHeight() {
+    const total = chartHeight || root.clientHeight || 320;
+    if (typeof chart.timeScale === "function") {
+      const ts = chart.timeScale();
+      if (ts && typeof ts.height === "function") {
+        const stripH = ts.height();
+        if (typeof stripH === "number" && stripH >= 0 && stripH < total) {
+          return total - stripH;
+        }
+      }
+    }
+    return total; // stub/unsupported-API fallback -- no real time-axis strip to subtract
+  }
+  const paneH = realPlottingHeight();
   function flowBandPx() {
     return { top: paneH * EVIDENCE_FLOW_MARGINS.top, bottom: paneH * (1 - EVIDENCE_FLOW_MARGINS.bottom) };
   }
@@ -3354,10 +3426,30 @@ function mountCandlestickChart(containerId, ohlc, opts = {}) {
     volLabelEl.textContent = volumeText ? `${volumeText} \u00b7 ${TZ_NOTE}` : TZ_NOTE;
   }
   if (hasTrustworthyVolume) {
+    // R5-2 fix (real-data QA remediation round 6, 2026-10-18): this
+    // series was missing `lastValueVisible`/`priceLineVisible: false`
+    // -- the SAME two series-level options flowSeries/dpSeries already
+    // set a few hundred lines above (see their own comment). Confirmed
+    // by direct real-browser investigation (headless Chrome, synthetic
+    // fixture) that the series-level last-value floating badge is NOT
+    // gated by its own priceScale's `visible:false` -- the bundle's
+    // last-value-label painter (class `Si` in the vendored v4.2.0
+    // minified source) only checks the SERIES' own visible()/
+    // lastValueVisible, never the price scale's visible flag. That is
+    // exactly why `volumeSeries.priceScale().applyOptions({visible:
+    // false})` below (round 4) suppressed this scale's own tick-label
+    // column but did nothing about the floating last-value badge --
+    // confirmed visually: without this option a real share-volume
+    // figure (e.g. "31.05M") rendered right next to the candle's own
+    // last-price tag on the right edge, exactly the "volume's
+    // last-value badge appears there too" defect reported. No plotted
+    // value, count, or stored record changes -- presentation-only.
     const volumeSeries = chart.addHistogramSeries({
       priceFormat: { type: "volume" },
       priceScaleId: "volume",
       color: "rgba(96,165,250,0.5)",
+      lastValueVisible: false,
+      priceLineVisible: false,
     });
     // Round 4 moved this from 82% to 85% top margin to preserve a real
     // gap below the dark-pool lane; round 5 (scale-margin widening,
@@ -3375,6 +3467,12 @@ function mountCandlestickChart(containerId, ohlc, opts = {}) {
     volumeSeries.setData(ohlc.candles.map((c) => ({
       time: toChartTime(c.t), value: c.v || 0, color: c.c >= c.o ? "rgba(34,211,168,0.5)" : "rgba(239,68,68,0.5)",
     })));
+    // Test/introspection hook only (same convention as root._tipChart /
+    // root._tipEvidenceSeries above) -- never read by production code,
+    // lets the real-Chromium/CDP regression test assert the R5-2
+    // lastValueVisible/priceLineVisible fix directly against the real
+    // series options object rather than re-deriving it.
+    root._tipVolumeSeries = volumeSeries;
   }
   series.setData(bars);
   const candleDates = bars.map((b) => b.time);

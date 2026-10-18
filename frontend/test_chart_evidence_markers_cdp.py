@@ -546,6 +546,37 @@ def main():
         check("number of real (in-range) buckets matches the real fixture's distinct in-range dates (no fabricated/merged buckets)",
               series_info and series_info["byTimeSize"] == real_bucket_count, (series_info, real_bucket_count))
 
+        # --- R5-2 (real-data QA remediation round 6, 2026-10-18): price-axis
+        # clutter fix -- asserted against the real applied series options
+        # objects (series.options()), never a string/DOM-presence guess.
+        r52_opts = cdp.eval("""(() => {
+          const root = document.getElementById('ohlcChartContainer');
+          const s = root._tipEvidenceSeries;
+          const vol = root._tipVolumeSeries;
+          return {
+            flow: s.flow.options(),
+            dp: s.dp.options(),
+            flowScale: s.flow.priceScale().options(),
+            dpScale: s.dp.priceScale().options(),
+            vol: vol ? vol.options() : null,
+            volScale: vol ? vol.priceScale().options() : null,
+          };
+        })()""")
+        check("R5-2: flow series carries a real, readable category title ('Flow alerts')",
+              r52_opts["flow"].get("title") == "Flow alerts", r52_opts["flow"])
+        check("R5-2: dark-pool series carries a real, readable category title ('Dark-pool')",
+              r52_opts["dp"].get("title") == "Dark-pool", r52_opts["dp"])
+        check("R5-2: flow lane's own priceScale stays visible:false (no second tick-label column bleeding into the main price axis)",
+              r52_opts["flowScale"].get("visible") is False, r52_opts["flowScale"])
+        check("R5-2: dark-pool lane's own priceScale stays visible:false (same)",
+              r52_opts["dpScale"].get("visible") is False, r52_opts["dpScale"])
+        check("R5-2: volume series now has lastValueVisible:false (the fix -- this was missing and caused the share-volume badge to bleed onto the right-edge price axis next to the candle's real last-price tag)",
+              r52_opts["vol"] is not None and r52_opts["vol"].get("lastValueVisible") is False, r52_opts["vol"])
+        check("R5-2: volume series now has priceLineVisible:false (same fix)",
+              r52_opts["vol"] is not None and r52_opts["vol"].get("priceLineVisible") is False, r52_opts["vol"])
+        check("R5-2: volume's own priceScale stays visible:false (its tick-label column suppression, unchanged from round 4)",
+              r52_opts["volScale"] is not None and r52_opts["volScale"].get("visible") is False, r52_opts["volScale"])
+
         # --- 3. Out-of-range marker excluded, no crash --------------------
         future_time_present = any(m["time"] > FIXTURE_1M["candles"][-1]["t"] + "T23:59:59" for m in FIXTURE_1M["markers"])
         check("fixture genuinely contains a marker dated after the last candle", future_time_present)
@@ -559,30 +590,86 @@ def main():
         # --- 4. Hover tooltip (native crosshair-move, real mouse dispatch) --
         # C-2/C-3 (real-data QA remediation round 4): flow and dark-pool
         # now live in their OWN non-overlapping pixel lanes (see
-        # app.core.js's EVIDENCE_FLOW_MARGINS/EVIDENCE_DP_MARGINS), so
-        # this now tests each lane SEPARATELY (one tooltip = one kind,
-        # never a combined one) and uses the chart's own real reported
-        # height (chart.options().height) for the y math -- never
-        # root.clientHeight, which is exactly the C-2 bug (container
-        # height includes the legend row below the canvas).
+        # app.core.js's EVIDENCE_FLOW_MARGINS/EVIDENCE_DP_MARGINS).
+        #
+        # R5-1 fix (round 6, 2026-10-18) -- CRITICAL METHODOLOGY CHANGE:
+        # this test previously computed the hover y-target as
+        # `chart.options().height * marginFraction` -- the EXACT SAME
+        # buggy assumption app.core.js's own hit-testing code used
+        # (chart.options().height is the FULL createChart({height})
+        # number, which INCLUDES the ~28px time-axis strip below the
+        # real plotting pane). Claude Code's real-data QA explicitly
+        # flagged this: because the test re-derived the identical wrong
+        # formula the app used internally, the R5-1 displacement bug
+        # passed this exact test suite undetected last round. Fixed
+        # here by making the test's own verification INDEPENDENT of any
+        # scaleMargins-fraction formula at all: `measureBarRowRange`
+        # below reads the REAL rendered canvas pixels (getImageData) in
+        # the x-column of the most recent real bucket and finds the
+        # actual top/bottom rows where each lane's own real bar color
+        # (EVIDENCE_HISTOGRAM_COLORS.flow_alert /.darkpool_trade) is
+        # painted -- a direct, physical measurement of where the bar
+        # ACTUALLY is on screen, never a re-computation of app.core.js's
+        # internal paneH/flowBandPx/dpBandPx math. If a future regression
+        # reintroduces C-2/R5-1's full-height-vs-plotting-height bug,
+        # this test's own y-targets no longer share that bug and will
+        # correctly catch the resulting misalignment.
         last_day_str = LAST_DAY.isoformat()
         real_flow_count = sum(1 for m in FIXTURE_1M["markers"] if m["kind"] == "flow_alert" and m["time"].startswith(last_day_str))
         real_dp_count = sum(1 for m in FIXTURE_1M["markers"] if m["kind"] == "darkpool_trade" and m["time"].startswith(last_day_str))
 
-        def lane_hover_target(margin_top, margin_bottom, frac_within_lane):
+        FLOW_RGB = (245, 158, 11)   # EVIDENCE_HISTOGRAM_COLORS.flow_alert (app.core.js)
+        DP_RGB = (96, 165, 250)     # EVIDENCE_HISTOGRAM_COLORS.darkpool_trade (app.core.js)
+
+        def measure_bar_row_range(rgb, tol=60):
+            """Independent pixel measurement: reads the real rendered canvas
+            (getImageData, not any scaleMargins/paneH formula) at the most
+            recent real bucket's x-coordinate and returns [topRow, bottomRow]
+            of pixels matching `rgb` within `tol`. Returns None if not found
+            (e.g. that lane is currently hidden by a legend toggle)."""
+            r, g, b = rgb
             return cdp.eval(f"""(() => {{
               const root = document.getElementById('ohlcChartContainer');
               const chart = root._tipChart;
               const s = root._tipEvidenceSeries;
               const times = Array.from(s.byTime.keys()).sort();
-              const t = times[times.length - 1]; // most recent real bucket
+              const t = times[times.length - 1];
+              const x = Math.round(chart.timeScale().timeToCoordinate(t));
+              const tsH = chart.timeScale().height();
+              const totalH = chart.options().height;
+              const canvases = Array.from(root.querySelectorAll('canvas'))
+                .filter(c => c.height === (totalH - tsH) && c.width > 100);
+              let best = null, bestNonBg = -1;
+              for (const c of canvases) {{
+                const ctx = c.getContext('2d', {{ willReadFrequently: true }});
+                if (!ctx) continue;
+                let img;
+                try {{ img = ctx.getImageData(Math.max(0, x - 2), 0, 5, c.height); }}
+                catch (e) {{ continue; }}
+                let nonBg = 0;
+                for (let i = 0; i < img.data.length; i += 4) if (img.data[i+3] > 10) nonBg++;
+                if (nonBg > bestNonBg) {{ bestNonBg = nonBg; best = img; }}
+              }}
+              if (!best) return null;
+              const rows = [];
+              for (let row = 0; row < best.height; row++) {{
+                const idx = (row * 5 + 2) * 4;
+                const pr = best.data[idx], pg = best.data[idx+1], pb = best.data[idx+2], pa = best.data[idx+3];
+                if (pa > 10 && Math.abs(pr-{r})<={tol} && Math.abs(pg-{g})<={tol} && Math.abs(pb-{b})<={tol}) rows.push(row);
+              }}
+              return rows.length ? [Math.min(...rows), Math.max(...rows)] : null;
+            }})()""")
+
+        def point_for_row(row):
+            return cdp.eval(f"""(() => {{
+              const root = document.getElementById('ohlcChartContainer');
+              const chart = root._tipChart;
+              const s = root._tipEvidenceSeries;
+              const times = Array.from(s.byTime.keys()).sort();
+              const t = times[times.length - 1];
               const x = chart.timeScale().timeToCoordinate(t);
               const rect = root.getBoundingClientRect();
-              const h = chart.options().height;
-              const bandTop = h * {margin_top};
-              const bandBottom = h * (1 - {margin_bottom});
-              const y = bandTop + (bandBottom - bandTop) * {frac_within_lane};
-              return {{ clientX: rect.left + x, clientY: rect.top + y, t, h }};
+              return {{ clientX: rect.left + x, clientY: rect.top + {row} }};
             }})()""")
 
         def hover_and_read(target):
@@ -593,40 +680,114 @@ def main():
               return tip ? { display: tip.style.display, html: tip.innerHTML } : null;
             })()""")
 
-        # Flow lane: top / middle / bottom of the real flow-alert bar's
-        # own band (0.56-0.64, see EVIDENCE_FLOW_MARGINS -- round 5
-        # widened the inter-lane gaps, see app.core.js module note).
-        for label, frac in [("top", 0.1), ("middle", 0.5), ("bottom", 0.9)]:
-            target = lane_hover_target(0.56, 0.36, frac)
-            result = hover_and_read(target)
-            check(f"flow lane hover at {label} of the bar shows the FLOW tooltip (not dark-pool)",
-                  result and result["display"] == "block" and f"{real_flow_count} Flow alert" in result["html"]
-                  and "Dark-pool" not in result["html"], (label, result, real_flow_count))
-        flow_target = lane_hover_target(0.56, 0.36, 0.5)
+        # R5-1 requirement: re-measure and re-verify at BOTH required
+        # viewport sizes (1920x1080 and 2560x1440) -- never assume
+        # alignment measured at one size holds at another, since the
+        # chart's real plotting height (and therefore every real bar
+        # row) can differ by viewport.
+        flow_target = None
+        dp_target = None
+        for size_w, size_h in SIZES:
+            cdp.set_viewport(size_w, size_h)
+            time.sleep(0.3)
+            cdp.eval(mount_js("window.__fixture1M"))
+            time.sleep(0.4)
+            size_tag = f"{size_w}x{size_h}"
 
-        # Dark-pool lane: top / middle / bottom of its own band
-        # (0.74-0.82, see EVIDENCE_DP_MARGINS -- round 5).
-        for label, frac in [("top", 0.1), ("middle", 0.5), ("bottom", 0.9)]:
-            target = lane_hover_target(0.74, 0.18, frac)
-            result = hover_and_read(target)
-            check(f"dark-pool lane hover at {label} of the bar shows the DARK-POOL tooltip (not flow)",
-                  result and result["display"] == "block" and f"{real_dp_count} Dark-pool" in result["html"]
-                  and "Flow alert" not in result["html"], (label, result, real_dp_count))
-        dp_target = lane_hover_target(0.74, 0.18, 0.5)
+            flow_rows = measure_bar_row_range(FLOW_RGB)
+            check(f"R5-1 [{size_tag}]: independent pixel scan found the flow lane's real rendered bar rows", flow_rows is not None, flow_rows)
+            dp_rows = measure_bar_row_range(DP_RGB)
+            check(f"R5-1 [{size_tag}]: independent pixel scan found the dark-pool lane's real rendered bar rows", dp_rows is not None, dp_rows)
 
-        # Volume-only region (below both evidence lanes, 0.90-1.0) must
-        # NOT trigger an evidence tooltip -- and vice versa was already
-        # checked above (neither lane's tooltip mentions the other kind).
-        volume_target = lane_hover_target(0.90, 0.0, 0.5)
-        volume_result = hover_and_read(volume_target)
-        check("hovering the volume-only region does not trigger an evidence tooltip",
-              volume_result is None or volume_result["display"] == "none", volume_result)
+            # Flow lane: top / middle / bottom of the ACTUAL measured bar rows
+            # (never a scaleMargins-fraction guess).
+            if flow_rows:
+                ftop, fbot = flow_rows
+                for label, row in [("top", ftop + 1), ("middle", (ftop + fbot) // 2), ("bottom", fbot - 1)]:
+                    target = point_for_row(row)
+                    if label == "middle":
+                        flow_target = target
+                    result = hover_and_read(target)
+                    check(f"R5-1 [{size_tag}]: flow lane hover at {label} of the REAL measured bar shows the FLOW tooltip (not dark-pool)",
+                          result and result["display"] == "block" and f"{real_flow_count} Flow alert" in result["html"]
+                          and "Dark-pool" not in result["html"], (label, row, result, real_flow_count))
 
-        # Moving off both evidence bands (over the candles) hides the tooltip.
-        cdp.dispatch_mouse("mouseMoved", dp_target["clientX"], dp_target["clientY"] - 400)
-        time.sleep(0.2)
-        leave_result = cdp.eval("document.querySelector('.chart-evidence-tooltip').style.display")
-        check("moving off both evidence lanes (over the candles) hides the tooltip", leave_result == "none", leave_result)
+            # Dark-pool lane: top / middle / bottom of the ACTUAL measured bar rows.
+            if dp_rows:
+                dtop, dbot = dp_rows
+                for label, row in [("top", dtop + 1), ("middle", (dtop + dbot) // 2), ("bottom", dbot - 1)]:
+                    target = point_for_row(row)
+                    if label == "middle":
+                        dp_target = target
+                    result = hover_and_read(target)
+                    check(f"R5-1 [{size_tag}]: dark-pool lane hover at {label} of the REAL measured bar shows the DARK-POOL tooltip (not flow)",
+                          result and result["display"] == "block" and f"{real_dp_count} Dark-pool" in result["html"]
+                          and "Flow alert" not in result["html"], (label, row, result, real_dp_count))
+
+            # Gap space strictly BETWEEN the two real measured lanes (never
+            # computed from any margin fraction) must NOT trigger a tooltip.
+            if flow_rows and dp_rows:
+                gap_row = (flow_rows[1] + dp_rows[0]) // 2
+                gap_target = point_for_row(gap_row)
+                gap_result = hover_and_read(gap_target)
+                check(f"R5-1 [{size_tag}]: hovering real measured empty gap space BETWEEN the flow and dark-pool bars triggers no tooltip",
+                      gap_result is None or gap_result["display"] == "none", (gap_row, gap_result))
+
+            # Volume-only region: below the real measured dark-pool bar's
+            # bottom row, but still within the real plotting canvas -- must
+            # NOT trigger an evidence tooltip.
+            if dp_rows:
+                canvas_h = cdp.eval("""(() => {
+                  const root = document.getElementById('ohlcChartContainer');
+                  const chart = root._tipChart;
+                  return chart.options().height - chart.timeScale().height();
+                })()""")
+                volume_row = dp_rows[1] + max(5, (canvas_h - dp_rows[1]) // 2)
+                volume_target = point_for_row(min(volume_row, canvas_h - 2))
+                volume_result = hover_and_read(volume_target)
+                check(f"R5-1 [{size_tag}]: hovering the volume-only region (below the real measured dark-pool bar) does not trigger an evidence tooltip",
+                      volume_result is None or volume_result["display"] == "none", volume_result)
+
+            # Moving off both evidence bands (over the candles) hides the tooltip.
+            if dp_target:
+                cdp.dispatch_mouse("mouseMoved", dp_target["clientX"], dp_target["clientY"] - 400)
+                time.sleep(0.2)
+                leave_result = cdp.eval("document.querySelector('.chart-evidence-tooltip').style.display")
+                check(f"R5-1 [{size_tag}]: moving off both evidence lanes (over the candles) hides the tooltip", leave_result == "none", leave_result)
+
+            # --- Filter modes disable hit-testing for hidden categories
+            # (R5-1 requirement): re-verify at this same viewport size
+            # that hovering a lane whose series is toggled OFF triggers
+            # no tooltip, using the SAME real measured row (a hidden
+            # series paints no bars there at all, which the independent
+            # pixel scan itself will also confirm returns None).
+            set_mode_js = """(() => {
+              const btn = Array.from(document.querySelectorAll('.cel-btn')).find(b => b.dataset.mode === '%s');
+              btn.click();
+              return true;
+            })()"""
+            cdp.eval(set_mode_js % "flow")
+            time.sleep(0.2)
+            flow_only_dp_rows = measure_bar_row_range(DP_RGB)
+            check(f"R5-1 [{size_tag}]: 'Flow only' mode -- dark-pool lane paints no bars (independent pixel scan finds none)",
+                  flow_only_dp_rows is None, flow_only_dp_rows)
+            if dp_target:
+                hidden_dp_result = hover_and_read(dp_target)
+                check(f"R5-1 [{size_tag}]: 'Flow only' mode -- hovering the (now empty) dark-pool lane position triggers no tooltip",
+                      hidden_dp_result is None or hidden_dp_result["display"] == "none", hidden_dp_result)
+            cdp.eval(set_mode_js % "both")
+            time.sleep(0.2)
+
+        cdp.set_viewport(1920, 1080)
+        time.sleep(0.3)
+        cdp.eval(mount_js("window.__fixture1M"))
+        time.sleep(0.4)
+        flow_rows = measure_bar_row_range(FLOW_RGB)
+        dp_rows = measure_bar_row_range(DP_RGB)
+        if flow_rows:
+            flow_target = point_for_row((flow_rows[0] + flow_rows[1]) // 2)
+        if dp_rows:
+            dp_target = point_for_row((dp_rows[0] + dp_rows[1]) // 2)
 
         # --- 5. Click drill-down routes into the EXISTING evidence panel --
         # Flow-lane click -> drill-down shows only the real flow events
@@ -794,7 +955,9 @@ def main():
         })()""")
         check(f"R4-1: dense single-bucket fixture produced exactly ONE real bucket with all {R4_DENSE_DP_COUNT} dark-pool prints (no fabricated splitting)",
               dense_info and dense_info["dpCountAtLast"] == R4_DENSE_DP_COUNT, (dense_info, R4_DENSE_DP_COUNT))
-        dense_hover = lane_hover_target(0.74, 0.18, 0.5)  # dark-pool lane, middle of the bar
+        dense_rows = measure_bar_row_range(DP_RGB)  # R5-1: real measured rows, not a margin fraction
+        check("R4-1: independent pixel scan found the dense bucket's real dark-pool bar rows", dense_rows is not None, dense_rows)
+        dense_hover = point_for_row((dense_rows[0] + dense_rows[1]) // 2) if dense_rows else {"clientX": 0, "clientY": 0}
         dense_result = hover_and_read(dense_hover)
         check(f"R4-1: hovering the dense bucket's dark-pool lane shows the real count ({R4_DENSE_DP_COUNT}), not a truncated/fabricated one",
               dense_result and dense_result["display"] == "block" and f"{R4_DENSE_DP_COUNT} Dark-pool" in dense_result["html"],
@@ -826,13 +989,17 @@ def main():
         check(f"R4-2: that shared bucket's real counts are exact ({R4_SHARED_FLOW_COUNT} flow, {R4_SHARED_DP_COUNT} dark-pool)",
               shared_info and shared_info["flowCount"] == R4_SHARED_FLOW_COUNT and shared_info["dpCount"] == R4_SHARED_DP_COUNT,
               (shared_info, R4_SHARED_FLOW_COUNT, R4_SHARED_DP_COUNT))
-        shared_flow_hover = lane_hover_target(0.56, 0.36, 0.5)
+        shared_flow_rows = measure_bar_row_range(FLOW_RGB)  # R5-1: real measured rows
+        check("R4-2: independent pixel scan found the shared bucket's real flow bar rows", shared_flow_rows is not None, shared_flow_rows)
+        shared_flow_hover = point_for_row((shared_flow_rows[0] + shared_flow_rows[1]) // 2) if shared_flow_rows else {"clientX": 0, "clientY": 0}
         shared_flow_result = hover_and_read(shared_flow_hover)
         check("R4-2: hovering the shared bucket's FLOW lane shows only the flow tooltip (never cross-contaminated with dark-pool)",
               shared_flow_result and shared_flow_result["display"] == "block"
               and f"{R4_SHARED_FLOW_COUNT} Flow alert" in shared_flow_result["html"] and "Dark-pool" not in shared_flow_result["html"],
               shared_flow_result)
-        shared_dp_hover = lane_hover_target(0.74, 0.18, 0.5)
+        shared_dp_rows = measure_bar_row_range(DP_RGB)  # R5-1: real measured rows
+        check("R4-2: independent pixel scan found the shared bucket's real dark-pool bar rows", shared_dp_rows is not None, shared_dp_rows)
+        shared_dp_hover = point_for_row((shared_dp_rows[0] + shared_dp_rows[1]) // 2) if shared_dp_rows else {"clientX": 0, "clientY": 0}
         shared_dp_result = hover_and_read(shared_dp_hover)
         check("R4-2: hovering the SAME shared bucket's DARK-POOL lane shows only the dark-pool tooltip",
               shared_dp_result and shared_dp_result["display"] == "block"
@@ -907,18 +1074,11 @@ def main():
         time.sleep(0.4)
         cdp.set_viewport(900, 700)  # a narrower viewport makes "near the right edge" meaningful
         time.sleep(0.3)
-        right_edge_target = cdp.eval("""(() => {
-          const root = document.getElementById('ohlcChartContainer');
-          const chart = root._tipChart;
-          const s = root._tipEvidenceSeries;
-          const times = Array.from(s.byTime.keys()).sort();
-          const t = times[times.length - 1];
-          const x = chart.timeScale().timeToCoordinate(t);
-          const rect = root.getBoundingClientRect();
-          const h = chart.options().height;
-          const y = h * 0.74 + (h * (1 - 0.18) - h * 0.74) * 0.5;
-          return { clientX: rect.left + x, clientY: rect.top + y };
-        })()""")
+        # R5-1 fix: real measured dark-pool bar row (pixel scan), not a
+        # scaleMargins-fraction-of-chart.options().height guess.
+        right_edge_dp_rows = measure_bar_row_range(DP_RGB)
+        check("R4-5: independent pixel scan found the real dark-pool bar rows at the narrow viewport", right_edge_dp_rows is not None, right_edge_dp_rows)
+        right_edge_target = point_for_row((right_edge_dp_rows[0] + right_edge_dp_rows[1]) // 2) if right_edge_dp_rows else {"clientX": 0, "clientY": 0}
         cdp.dispatch_mouse("mouseMoved", right_edge_target["clientX"], right_edge_target["clientY"])
         time.sleep(0.2)
         right_edge_tip = cdp.eval("""(() => {
