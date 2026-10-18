@@ -184,6 +184,27 @@ def test_upgrade_preserves_existing_mode_never_resets_to_disabled(tmp_path):
     conn.execute(
         "CREATE TABLE schema_version (version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL)"
     )
+    # R8-4 (chart-data-integrity-fixes round 9, 2026-10-18): this fixture
+    # previously only inserted schema_version ROWS claiming versions 1-4
+    # were applied, without actually running migration 1's real SQL --
+    # harmless until migration 6 (R8-4's own legacy-pointer backfill)
+    # became the first later migration to genuinely read FROM the
+    # price_bars table migration 1 creates, at which point this
+    # unrealistic half-built fixture broke with "no such table:
+    # price_bars". Fixed by actually executing the real migration 1-4
+    # SQL (never hand-rolled table defs that can drift from the real
+    # schema) for a genuinely faithful "upgrading from an old installed
+    # version" simulation -- scheduler_state/scheduler_lease below are
+    # STILL hand-rolled deliberately (this test's actual subject is
+    # their row surviving an upgrade, not whether migration 4's own SQL
+    # is correct, which has its own dedicated tests).
+    from app.migrations import MIGRATIONS as _REAL_MIGRATIONS
+    for m in sorted(_REAL_MIGRATIONS, key=lambda m: m.version):
+        if m.version > 4:
+            break
+        if m.name in ("scheduler_lease_and_state",):
+            continue  # this fixture hand-rolls scheduler_state/scheduler_lease itself below, pre-seeded with real data
+        conn.executescript(m.sql)
     for v, name in [(1, "catalog_foundation_tables"), (2, "signal_evidence_and_source_corrections"),
                     (3, "darkpool_coverage_status"), (4, "scheduler_lease_and_state")]:
         conn.execute("INSERT INTO schema_version (version, name, applied_at) VALUES (?, ?, ?)",

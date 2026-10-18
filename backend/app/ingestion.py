@@ -181,6 +181,74 @@ def _bars_content_equal(a: dict, b: dict) -> bool:
     return a.get("v") == b.get("v")
 
 
+# R8-4 (chart-data-integrity-fixes round 9, 2026-10-18): bounded growth
+# for daily-bar revisions. `price_bars` is append-only by this
+# codebase's own established design rule (see this module's docstring
+# and catalog_price_bars's own Issue-2-fix comment: "every value this
+# app ever legitimately saw for a date remains in the table forever,
+# exactly like every other catalog_* table's append-only contract") --
+# but that rule was written assuming infrequent corrections, not a
+# genuinely LIVE, still-in-progress session being polled repeatedly
+# while non-final (its OHLC/volume can legitimately change on every
+# poll until the real close). Without a bound, a long-lived process
+# polling one ticker's daily chart throughout a trading day could
+# accumulate an unbounded number of real, distinct revision rows for
+# the SAME (ticker, timeframe, event_time) before it ever goes final.
+#
+# Honest scoping of this bound (deliberately narrow, not a reversal of
+# the append-only rule): it ONLY ever prunes SUPERSEDED revisions for a
+# date that is STILL NON-FINAL right now -- the current pointer row is
+# NEVER a candidate for deletion (the join below always excludes it),
+# and the moment a date's pointer becomes final, no further inserts
+# happen for it at all (barring the rare, already strictly-newer-and-
+# itself-final late-correction path), so a final date's prior revision
+# count is simply frozen at whatever it was, never pruned further. This
+# keeps the most recent PRICE_BAR_REVISION_KEEP superseded revisions
+# (default 20 -- generous headroom for real intraday-polling churn
+# while a session is live) for audit, and discards only the OLDEST
+# excess beyond that. A legacy/rarely-refetched date (the overwhelming
+# majority of rows) never approaches this bound and is never touched.
+PRICE_BAR_REVISION_KEEP = 20
+
+
+def _prune_superseded_price_bar_revisions(
+    conn: sqlite3.Connection, ticker: str, timeframe: str, event_time,
+    keep: int = PRICE_BAR_REVISION_KEEP,
+) -> None:
+    """Deletes the OLDEST superseded (non-current) `price_bars` rows for
+    this exact (ticker, timeframe, event_time) beyond the most recent
+    `keep`, if the current pointer for this date is NOT final (see the
+    module note above for why this is scoped that way and why it does
+    not regress this codebase's append-only design rule in any case
+    that actually matters in practice). Only ever called for daily
+    (`timeframe == "1d"`) bars, immediately after catalog_price_bars's
+    own pointer upsert for this date -- never touches any OTHER date's
+    rows, and never deletes the row price_bar_current currently points
+    at, confirmed by the `pb.id != pc.price_bar_id` exclusion below."""
+    pointer = conn.execute(
+        "SELECT price_bar_id, is_final FROM price_bar_current "
+        "WHERE ticker = ? AND timeframe = ? AND event_time = ?",
+        (ticker, timeframe, event_time),
+    ).fetchone()
+    if pointer is None:
+        return
+    current_bar_id, is_final = pointer
+    if is_final:
+        return  # confirmed final -- no further revisions will arrive through this path; nothing to bound
+    superseded_ids = [
+        row[0]
+        for row in conn.execute(
+            "SELECT id FROM price_bars "
+            "WHERE ticker = ? AND timeframe = ? AND event_time = ? AND id != ? "
+            "ORDER BY id DESC",
+            (ticker, timeframe, event_time, current_bar_id),
+        ).fetchall()
+    ]
+    stale_ids = superseded_ids[keep:]  # keep the most recent `keep`, prune anything older
+    if stale_ids:
+        conn.executemany("DELETE FROM price_bars WHERE id = ?", [(i,) for i in stale_ids])
+
+
 def fingerprint(*parts: object) -> str:
     """Deterministic dedup key for an upstream record that carries no
     genuine unique id of its own. Order-sensitive and type-stable (every
@@ -479,6 +547,7 @@ class IngestionCatalog:
                     "retrieved_at = excluded.retrieved_at",
                     (ticker, timeframe, event_time, new_bar_id, new_is_final, retrieved_at),
                 )
+                _prune_superseded_price_bar_revisions(conn, ticker, timeframe, event_time)
                 inserted += 1
             conn.commit()
         return inserted
@@ -551,7 +620,7 @@ class IngestionCatalog:
             return None
         with self._conn() as conn:
             row = conn.execute(
-                "SELECT is_final FROM price_bar_current "
+                "SELECT is_final FROM price_bar_current_latest "
                 "WHERE ticker = ? AND timeframe = ? ORDER BY event_time DESC LIMIT 1",
                 (ticker, timeframe),
             ).fetchone()

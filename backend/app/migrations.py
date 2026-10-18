@@ -372,6 +372,103 @@ CREATE INDEX IF NOT EXISTS idx_price_bar_current_ticker_timeframe_event
     ON price_bar_current(ticker, timeframe, event_time);
 """,
     ),
+    # R8-4 (chart-data-integrity-fixes round 9, 2026-10-18): investigation
+    # finding -- a database that already had `price_bars` rows from
+    # BEFORE migration 5 ever ran (i.e. before `price_bar_current`
+    # existed at all) never gets a pointer row backfilled for those
+    # pre-existing dates. `catalog_price_bars` only ever INSERTs a
+    # pointer the next time that exact date is genuinely re-fetched --
+    # a legacy date that's never refetched again (common for an older
+    # historical daily bar once a ticker stops being actively charted)
+    # stays pointer-less forever. That's harmless for
+    # `get_cached_price_bars` (its LEFT JOIN already treats
+    # `cur.price_bar_id IS NULL` as "keep the one legacy row, no
+    # resolution needed" -- confirmed correct, see that method's own
+    # comment), but it DOES mean `get_latest_daily_bar_final_status`
+    # (R8-3, reads `price_bar_current` directly) would wrongly report
+    # None (looks like "nothing cataloged") for a ticker whose most
+    # recent daily bar predates migration 5, even though real OHLC data
+    # exists for it.
+    #
+    # Separately: does the schema allow more than one "current" row for
+    # the same (ticker, timeframe, event_time)? No -- `price_bar_current`
+    # has carried `UNIQUE(ticker, timeframe, event_time)` since migration
+    # 5, and every write path (`catalog_price_bars`'s own
+    # `INSERT ... ON CONFLICT(...) DO UPDATE`) is a single atomic
+    # upsert statement -- SQLite's own file-level write serialization
+    # plus that UNIQUE constraint together already guarantee exactly one
+    # row per key even under concurrent writers or a crash mid-write (a
+    # partial transaction is rolled back entirely, never left as a
+    # duplicate row; the UNIQUE index makes a second row for the same
+    # key impossible even if application logic somehow tried an INSERT
+    # instead of the upsert). No schema change needed for that
+    # guarantee -- it already held before this migration. What WAS
+    # missing is the backfill above, and a documented single query path
+    # for "the current bar for date X" (the VIEW below) so no future
+    # caller hand-rolls the price_bar_current/price_bars join
+    # differently (and potentially wrongly) elsewhere.
+    #
+    # SAFE TO RUN against an existing populated database: this is a
+    # NEW, ADDITIVE migration (idempotent backfill INSERT with a
+    # NOT EXISTS guard + a CREATE VIEW IF NOT EXISTS) -- never an
+    # ALTER/DROP, never touches an existing row's own columns, and
+    # re-running it (e.g. migration replay in a test) is a safe no-op
+    # the second time since every already-pointered date is skipped by
+    # the NOT EXISTS clause. This is evaluated and intended for use ONLY
+    # against this project's own sandbox/local database -- never a
+    # deployed/production instance -- per this round's hard constraints.
+    Migration(
+        version=6,
+        name="price_bar_current_backfill_and_view",
+        sql="""
+INSERT INTO price_bar_current (ticker, timeframe, event_time, price_bar_id, is_final, retrieved_at)
+SELECT pb.ticker, pb.timeframe, pb.event_time, pb.id,
+    -- Backfilled legacy pointers are conservatively marked NOT final
+    -- (0), never guessed True -- same safe-default convention
+    -- ingestion.py's `_bar_is_final` already uses for any uncertain
+    -- case. A non-final pointer can still be freely corrected by the
+    -- normal catalog_price_bars path the next time this date is
+    -- genuinely refetched; a wrongly-guessed-final pointer could not.
+    0,
+    pb.retrieved_at
+FROM price_bars pb
+WHERE pb.timeframe = '1d'
+    -- Exactly one row backfilled per legacy date: the MOST RECENT
+    -- (highest id -> latest INSERT) of however many legacy rows that
+    -- date happens to have, consistent with "the newest value we ever
+    -- saw is the best guess absent a pointer" -- this mirrors
+    -- get_cached_price_bars's own existing selection intent for an
+    -- unpointered date, just made explicit here as a real pointer row.
+    AND pb.id = (
+        SELECT MAX(pb2.id) FROM price_bars pb2
+        WHERE pb2.ticker = pb.ticker AND pb2.timeframe = pb.timeframe
+            AND pb2.event_time = pb.event_time
+    )
+    -- Idempotent / safe-to-rerun guard: never backfill a date that
+    -- already has a real pointer (whether from a normal live fetch or
+    -- an earlier run of this same migration).
+    AND NOT EXISTS (
+        SELECT 1 FROM price_bar_current pc
+        WHERE pc.ticker = pb.ticker AND pc.timeframe = pb.timeframe
+            AND pc.event_time = pb.event_time
+    );
+
+-- The ONE documented, unambiguous SQL-level path for "the current bar
+-- for (ticker, timeframe, event_time)" -- any future direct-SQL caller
+-- should query this VIEW rather than hand-rolling the
+-- price_bar_current/price_bars join (which must always resolve via the
+-- pointer, never a raw MAX(id)/ORDER BY event_time scan over
+-- price_bars alone -- that would pick up a superseded/non-current
+-- revision whenever one exists). get_latest_daily_bar_final_status /
+-- get_cached_price_bars in ingestion.py are the Python-level
+-- equivalents of this same resolution rule.
+CREATE VIEW IF NOT EXISTS price_bar_current_latest AS
+SELECT pc.ticker, pc.timeframe, pc.event_time, pc.is_final, pc.retrieved_at,
+    pb.id AS price_bar_id, pb.open, pb.high, pb.low, pb.close, pb.volume
+FROM price_bar_current pc
+JOIN price_bars pb ON pb.id = pc.price_bar_id;
+""",
+    ),
 ]
 
 
