@@ -9,12 +9,28 @@ import sqlite3
 
 import pytest
 
+from datetime import date, timedelta
+
+from app.core.trading_calendar import session_end_utc
 from app.ingestion import IngestionCatalog, StorageGuardPausedError, fingerprint, should_refetch
 from app.storage_guard import BACKGROUND, ONDEMAND
 
 
 def _catalog(tmp_path):
     return IngestionCatalog(str(tmp_path / "catalog.db"))
+
+
+# chart-data-integrity-fixes (2026-10-18, Issue 2) fixtures: a fixed real
+# trading date (Wednesday, a genuine NYSE session day) with its real
+# session-close instant, so "mid-session" vs. "after close" retrieved_at
+# values are deterministic rather than depending on when these tests
+# happen to run.
+_TRADING_DATE = date(2026, 10, 14)
+_CLOSE_UTC = session_end_utc(_TRADING_DATE)
+assert _CLOSE_UTC is not None, "2026-10-14 must be a real NYSE trading day for this fixture"
+_MID_SESSION = (_CLOSE_UTC - timedelta(hours=2)).isoformat()
+_AFTER_CLOSE = (_CLOSE_UTC + timedelta(minutes=5)).isoformat()
+_AFTER_CLOSE_LATER = (_CLOSE_UTC + timedelta(hours=1)).isoformat()
 
 
 
@@ -65,6 +81,111 @@ def test_catalog_price_bars_dedupe_on_repeated_fetch(tmp_path):
     second = cat.catalog_price_bars("NVDA", "1d", candles)
     assert first == 1
     assert second == 0
+
+
+# --- chart-data-integrity-fixes (2026-10-18, Issue 2 -- stale SPY daily
+# candle) regression tests. All use the fixed _TRADING_DATE/_MID_SESSION/
+# _AFTER_CLOSE fixtures above so finality is deterministic, never
+# dependent on when the test suite happens to run. ------------------------
+
+def test_catalog_price_bars_daily_incomplete_then_complete_replaces(tmp_path):
+    """The exact real-world shape of Issue 2: a daily bar cataloged
+    MID-SESSION (not yet final) must be REPLACED when a later, genuinely
+    different fetch for the SAME date arrives -- this is what would have
+    turned SPY's stale $771.36 into the real $763.25 close, had the old
+    INSERT-OR-IGNORE-forever bug not blocked it."""
+    cat = _catalog(tmp_path)
+    partial = [{"t": _TRADING_DATE.isoformat(), "o": 760.0, "h": 772.0, "l": 759.0, "c": 771.36, "v": 1000}]
+    final = [{"t": _TRADING_DATE.isoformat(), "o": 760.0, "h": 772.0, "l": 759.0, "c": 763.25, "v": 42_000_000}]
+
+    first = cat.catalog_price_bars("SPY", "1d", partial, retrieved_at=_MID_SESSION)
+    bars_after_partial = cat.get_cached_price_bars("SPY", "1d")
+    second = cat.catalog_price_bars("SPY", "1d", final, retrieved_at=_AFTER_CLOSE)
+    bars_after_final = cat.get_cached_price_bars("SPY", "1d")
+
+    assert first == 1
+    assert bars_after_partial == [{"t": _TRADING_DATE.isoformat(), "o": 760.0, "h": 772.0, "l": 759.0, "c": 771.36, "v": 1000}]
+    assert second == 1, "the more-complete post-close bar must be recognized as a real change"
+    assert bars_after_final == [{"t": _TRADING_DATE.isoformat(), "o": 760.0, "h": 772.0, "l": 759.0, "c": 763.25, "v": 42_000_000}]
+    assert len(bars_after_final) == 1, "exactly one bar for this date -- the old partial row must not also appear"
+
+
+def test_catalog_price_bars_daily_final_bar_locked_never_regressed(tmp_path):
+    """Once a daily bar is confirmed final (cataloged after the real
+    session close), it is PERMANENTLY locked -- a later fetch, even with
+    different content, must never replace it through this path."""
+    cat = _catalog(tmp_path)
+    final = [{"t": _TRADING_DATE.isoformat(), "o": 760.0, "h": 772.0, "l": 759.0, "c": 763.25, "v": 42_000_000}]
+    different_later = [{"t": _TRADING_DATE.isoformat(), "o": 760.0, "h": 772.0, "l": 759.0, "c": 999.99, "v": 1}]
+
+    first = cat.catalog_price_bars("SPY", "1d", final, retrieved_at=_AFTER_CLOSE)
+    second = cat.catalog_price_bars("SPY", "1d", different_later, retrieved_at=_AFTER_CLOSE_LATER)
+    bars = cat.get_cached_price_bars("SPY", "1d")
+
+    assert first == 1
+    assert second == 0, "a confirmed-final bar must never be regressed, however different the new fetch is"
+    assert bars[0]["c"] == 763.25
+
+
+def test_catalog_price_bars_daily_repeated_refresh_same_date_idempotent(tmp_path):
+    """Repeated refreshes of the SAME date with the SAME real value must
+    never create duplicate rows, before OR after finality."""
+    cat = _catalog(tmp_path)
+    bar = [{"t": _TRADING_DATE.isoformat(), "o": 760.0, "h": 772.0, "l": 759.0, "c": 765.0, "v": 500}]
+
+    first = cat.catalog_price_bars("SPY", "1d", bar, retrieved_at=_MID_SESSION)
+    second = cat.catalog_price_bars("SPY", "1d", bar, retrieved_at=_MID_SESSION)
+    third = cat.catalog_price_bars("SPY", "1d", bar, retrieved_at=_AFTER_CLOSE)  # unchanged content, now final
+    fourth = cat.catalog_price_bars("SPY", "1d", bar, retrieved_at=_AFTER_CLOSE_LATER)  # already final -> no-op
+
+    assert first == 1
+    assert second == 0
+    # `third` DOES count as a real change: the bar is now confirmed final
+    # for the first time (same price, but finality genuinely improved).
+    assert third == 1
+    assert fourth == 0
+    assert len(cat.get_cached_price_bars("SPY", "1d")) == 1
+
+    conn = sqlite3.connect(cat.db_path)
+    raw_row_count = conn.execute(
+        "SELECT COUNT(*) FROM price_bars WHERE ticker = 'SPY' AND timeframe = '1d'"
+    ).fetchone()[0]
+    conn.close()
+    assert raw_row_count == 2, "append-only: one row for the mid-session value, one for the final confirmation -- never more"
+
+
+def test_catalog_price_bars_daily_stale_older_refresh_rejected(tmp_path):
+    """An attempted refresh with an OLDER retrieved_at than what's
+    already cached must be rejected -- never regress to staler data,
+    even when not yet final."""
+    cat = _catalog(tmp_path)
+    newer = [{"t": _TRADING_DATE.isoformat(), "o": 760.0, "h": 772.0, "l": 759.0, "c": 770.0, "v": 900}]
+    older_different = [{"t": _TRADING_DATE.isoformat(), "o": 760.0, "h": 772.0, "l": 759.0, "c": 123.45, "v": 1}]
+
+    first = cat.catalog_price_bars("SPY", "1d", newer, retrieved_at=_AFTER_CLOSE_LATER)
+    second = cat.catalog_price_bars("SPY", "1d", older_different, retrieved_at=_MID_SESSION)
+    bars = cat.get_cached_price_bars("SPY", "1d")
+
+    assert first == 1
+    assert second == 0, "an older retrieved_at must never override the already-cached value"
+    assert bars[0]["c"] == 770.0
+
+
+def test_catalog_price_bars_intraday_timeframe_unaffected_by_daily_fix(tmp_path):
+    """Issue 2's fix is explicitly scoped to daily (1d) bars -- intraday
+    bars must keep their pre-existing plain dedupe-by-(ticker,timeframe,t)
+    behavior unchanged (same assertion shape as the pre-existing daily
+    dedupe test, just timeframe='5m')."""
+    cat = _catalog(tmp_path)
+    candles = [{"t": "2026-10-14T14:30:00+00:00", "o": 1, "h": 2, "l": 0.5, "c": 1.5, "v": 100}]
+    first = cat.catalog_price_bars("NVDA", "5m", candles)
+    second = cat.catalog_price_bars("NVDA", "5m", candles)
+    assert first == 1
+    assert second == 0
+    conn = sqlite3.connect(cat.db_path)
+    pointer_rows = conn.execute("SELECT COUNT(*) FROM price_bar_current WHERE ticker = 'NVDA'").fetchone()[0]
+    conn.close()
+    assert pointer_rows == 0, "the pointer table is a daily-bar-only mechanism -- intraday writes must never touch it"
 
 
 def test_catalog_signal_evaluation_links_evidence_rows(tmp_path):

@@ -41,10 +41,11 @@ import hashlib
 import json
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Iterable, Optional
 
+from .core.trading_calendar import session_end_utc
 from .migrations import run_migrations
 from .storage_guard import BACKGROUND, ONDEMAND, StorageGuard, default_mount_point
 
@@ -54,6 +55,80 @@ BACKGROUND_KIND = BACKGROUND
 
 def utcnow_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _parse_iso_dt(ts: Optional[str]) -> Optional[datetime]:
+    """Tolerant ISO8601 parse to a tz-aware UTC datetime. Returns None on
+    anything unparsable so callers can treat it as "unknown" rather than
+    crash -- same tolerant-parse convention as `should_refetch` below."""
+    if not ts:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(ts))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def _event_date_for_bar(event_time) -> Optional[date]:
+    """A price_bars `event_time` is either a plain 'YYYY-MM-DD' (daily
+    bar, UW's own date for that session) or a full ISO instant (intraday
+    bar's start_time) -- either way, the first 10 characters are always
+    the real trading date. Returns None when unparsable (caller treats
+    finality as unknown, never guesses)."""
+    try:
+        return datetime.fromisoformat(str(event_time)[:10]).date()
+    except ValueError:
+        return None
+
+
+def _bar_is_final(event_time, retrieved_at: Optional[str]) -> bool:
+    """chart-data-integrity-fixes (2026-10-18, Issue 2): True only when
+    this bar's real NYSE trading session had GENUINELY closed (per
+    trading_calendar.session_end_utc -- ET/DST-aware, the same real
+    calendar this codebase already trusts server-side) at the moment
+    this fetch happened (`retrieved_at`). A bar fetched mid-session is
+    not final; a bar fetched any time after that real session's close is
+    treated as final.
+
+    This is a PROXY, not a guarantee UW's own upstream data is done
+    revising at that instant -- see `catalog_price_bars`'s docstring and
+    this round's FINAL REPORT for the genuine limitation (UW's OHLC
+    endpoint exposes no explicit "this bar is final" flag of its own).
+    Always returns False (never-final / unknown) rather than guessing
+    True on any parse failure -- a False result is always SAFE here: it
+    only means "a later fetch is still allowed to replace this bar,"
+    never "this bar is wrong.\""""
+    trading_date = _event_date_for_bar(event_time)
+    if trading_date is None:
+        return False
+    fetched_at = _parse_iso_dt(retrieved_at)
+    if fetched_at is None:
+        return False
+    close_utc = session_end_utc(trading_date)
+    if close_utc is None:  # weekend/holiday -- not a real session, can't assess finality this way
+        return False
+    return fetched_at >= close_utc
+
+
+def _bars_content_equal(a: dict, b: dict) -> bool:
+    """O/H/L/C/V equality check (used only to decide whether a repeated
+    fetch for an already-cataloged date is a genuine no-op -- see
+    catalog_price_bars). A tiny float tolerance avoids a spurious
+    "changed" classification from harmless float round-tripping; this is
+    NOT where real price corrections are detected (those differ by far
+    more than this epsilon)."""
+    for key in ("o", "h", "l", "c"):
+        av, bv = a.get(key), b.get(key)
+        if av is None or bv is None:
+            if av != bv:
+                return False
+            continue
+        if abs(float(av) - float(bv)) > 1e-9:
+            return False
+    return a.get("v") == b.get("v")
 
 
 def fingerprint(*parts: object) -> str:
@@ -205,15 +280,105 @@ class IngestionCatalog:
         session-classification/delta-correction) -- never re-derives or
         second-guesses that logic, just stores its result. Candles carry
         no upstream id at all, so source_id is always a fingerprint over
-        (ticker, timeframe, t) -- stable across repeated requests for the
-        same bar."""
+        (ticker, timeframe, t[, retrieved_at] -- see below); dupes are
+        suppressed (not counted as a real change).
+
+        ISSUE 2 FIX (chart-data-integrity-fixes, 2026-10-18): for DAILY
+        (`timeframe == "1d"`) bars specifically, the OLD source_id was a
+        fingerprint of (ticker, timeframe, t) ONLY -- never the bar's own
+        OHLCV content. A bare INSERT OR IGNORE on that key meant a LATER
+        re-fetch for an already-cataloged date, however different (e.g.
+        the real post-close final bar replacing one cataloged
+        mid-session), produced the exact same source_id and was silently
+        discarded by UNIQUE(source_id) every time -- permanently locking
+        in whichever value was cataloged FIRST. Confirmed as the real
+        cause of a genuine cross-installation SPY Oct-16 discrepancy
+        ($771.36 mid-session vs. $763.25 the real final close).
+
+        Fix (daily bars only): resolve the CURRENT authoritative row for
+        (ticker, timeframe, event_time) via the `price_bar_current`
+        pointer table (added by this round's migration; see its own
+        comment for why a new table, not an ALTER on price_bars). `price_bars`
+        itself STAYS append-only -- a genuine replacement is always a
+        BRAND NEW row (new source_id, now content-sensitive via
+        `retrieved_at`), never an UPDATE of an existing one, so every
+        value this app ever legitimately saw for a date remains in the
+        table forever, exactly like every other catalog_* table's
+        append-only contract. Only the POINTER (which row is "current"
+        for this date) is updated in place -- the same bookkeeping
+        category as `scheduler_state`/`ingestion_jobs` above, not a raw
+        observation row.
+
+        Directional safety (never regress a good bar to a worse one):
+          - No existing pointer for this date -> always insert + point
+            (first real value seen for that date).
+          - Existing pointer's bar already confirmed FINAL (see
+            `_bar_is_final`) -> always skipped, permanently locked; no
+            later fetch replaces a confirmed-final bar through this path.
+          - Existing pointer not final, incoming `retrieved_at` OLDER
+            than the pointer's own -> rejected (never replace with
+            staler data).
+          - Existing pointer not final, incoming content AND finality
+            are both unchanged from the current pointer -> a harmless
+            repeated fetch, treated as a no-op (not counted as a real
+            change) -- preserves the pre-existing dedup-on-repeat-fetch
+            guarantee this function has always had.
+          - Otherwise (content changed, or finality newly achieved) ->
+            a real replacement: insert the new row, repoint, count it.
+
+        Intraday (`timeframe != "1d"`) bars are UNCHANGED (still plain
+        INSERT OR IGNORE, no pointer table involved) -- deliberately out
+        of this fix's scope; see this round's FINAL REPORT for why (each
+        intraday bucket closes every few minutes, a materially smaller
+        and different staleness window than a full trading day, and not
+        what the real reported discrepancy showed)."""
         self._check_guard(kind)
         retrieved_at = retrieved_at or utcnow_iso()
         inserted = 0
         with self._conn() as conn:
             for bar in candles or []:
-                source_id = fingerprint(ticker, timeframe, bar.get("t"))
                 event_time = bar.get("t") or retrieved_at
+                if timeframe != "1d":
+                    source_id = fingerprint(ticker, timeframe, bar.get("t"))
+                    cur = conn.execute(
+                        "INSERT OR IGNORE INTO price_bars "
+                        "(source_id, ticker, event_time, retrieved_at, timeframe, open, high, low, close, volume) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        (str(source_id), ticker, event_time, retrieved_at, timeframe,
+                         bar.get("o"), bar.get("h"), bar.get("l"), bar.get("c"), bar.get("v")),
+                    )
+                    if cur.rowcount:
+                        inserted += 1
+                    continue
+
+                new_is_final = 1 if _bar_is_final(event_time, retrieved_at) else 0
+                existing = conn.execute(
+                    "SELECT pc.price_bar_id, pc.is_final, pc.retrieved_at, "
+                    "pb.open, pb.high, pb.low, pb.close, pb.volume "
+                    "FROM price_bar_current pc JOIN price_bars pb ON pb.id = pc.price_bar_id "
+                    "WHERE pc.ticker = ? AND pc.timeframe = ? AND pc.event_time = ?",
+                    (ticker, timeframe, event_time),
+                ).fetchone()
+
+                if existing is not None:
+                    old_bar_id, old_is_final, old_retrieved_at, oo, oh, ol, oc, ov = existing
+                    if old_is_final:
+                        continue  # confirmed final -- permanently locked, never regressed
+                    old_dt, new_dt = _parse_iso_dt(old_retrieved_at), _parse_iso_dt(retrieved_at)
+                    if old_dt is not None and new_dt is not None and new_dt < old_dt:
+                        continue  # staler than what's already cached -- rejected
+                    unchanged = (
+                        bool(new_is_final) == bool(old_is_final)
+                        and _bars_content_equal(
+                            {"o": oo, "h": oh, "l": ol, "c": oc, "v": ov},
+                            {"o": bar.get("o"), "h": bar.get("h"), "l": bar.get("l"),
+                             "c": bar.get("c"), "v": bar.get("v")},
+                        )
+                    )
+                    if unchanged:
+                        continue  # harmless repeat fetch of the same real value -- not a change
+
+                source_id = fingerprint(ticker, timeframe, event_time, retrieved_at)
                 cur = conn.execute(
                     "INSERT OR IGNORE INTO price_bars "
                     "(source_id, ticker, event_time, retrieved_at, timeframe, open, high, low, close, volume) "
@@ -221,8 +386,18 @@ class IngestionCatalog:
                     (str(source_id), ticker, event_time, retrieved_at, timeframe,
                      bar.get("o"), bar.get("h"), bar.get("l"), bar.get("c"), bar.get("v")),
                 )
-                if cur.rowcount:
-                    inserted += 1
+                new_bar_id = conn.execute(
+                    "SELECT id FROM price_bars WHERE source_id = ?", (str(source_id),)
+                ).fetchone()[0]
+                conn.execute(
+                    "INSERT INTO price_bar_current (ticker, timeframe, event_time, price_bar_id, is_final, retrieved_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?) "
+                    "ON CONFLICT(ticker, timeframe, event_time) DO UPDATE SET "
+                    "price_bar_id = excluded.price_bar_id, is_final = excluded.is_final, "
+                    "retrieved_at = excluded.retrieved_at",
+                    (ticker, timeframe, event_time, new_bar_id, new_is_final, retrieved_at),
+                )
+                inserted += 1
             conn.commit()
         return inserted
 
@@ -237,11 +412,28 @@ class IngestionCatalog:
         """Real cataloged candles for (ticker, timeframe), chronological
         (ASC). When more than `limit` rows exist, returns the most
         RECENT `limit` (mirrors how a live fetch's own `limit` behaves --
-        "give me the most recent N bars"), never an arbitrary slice."""
+        "give me the most recent N bars"), never an arbitrary slice.
+
+        ISSUE 2 FIX (chart-data-integrity-fixes, 2026-10-18): daily bars
+        can now have MULTIPLE append-only rows for the same event_time
+        (see catalog_price_bars) -- a plain SELECT over price_bars alone
+        would return every historical value ever cataloged for a date,
+        double-(or more-)counting it. The LEFT JOIN against
+        `price_bar_current` resolves each (ticker, timeframe, event_time)
+        to ONLY its current authoritative row when a pointer exists;
+        intraday rows never have a pointer row at all (catalog_price_bars
+        never writes one for `timeframe != "1d"`), so `cur.price_bar_id
+        IS NULL` keeps every intraday row exactly as before -- this
+        fix changes nothing about intraday read behavior."""
         with self._conn() as conn:
             rows = conn.execute(
-                "SELECT event_time, open, high, low, close, volume FROM price_bars "
-                "WHERE ticker = ? AND timeframe = ? ORDER BY event_time ASC",
+                "SELECT pb.event_time, pb.open, pb.high, pb.low, pb.close, pb.volume "
+                "FROM price_bars pb "
+                "LEFT JOIN price_bar_current cur "
+                "  ON cur.ticker = pb.ticker AND cur.timeframe = pb.timeframe AND cur.event_time = pb.event_time "
+                "WHERE pb.ticker = ? AND pb.timeframe = ? "
+                "  AND (cur.price_bar_id IS NULL OR cur.price_bar_id = pb.id) "
+                "ORDER BY pb.event_time ASC",
                 (ticker, timeframe),
             ).fetchall()
         bars = [

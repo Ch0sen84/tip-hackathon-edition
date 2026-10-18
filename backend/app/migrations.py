@@ -318,6 +318,60 @@ CREATE TABLE IF NOT EXISTS scheduler_state (
 );
 """,
     ),
+    # chart-data-integrity-fixes (2026-10-18, Issue 2 -- stale daily price
+    # bar): root cause was `catalog_price_bars`'s plain INSERT OR IGNORE,
+    # keyed on a source_id that is a fingerprint of (ticker, timeframe,
+    # date) ONLY -- never the bar's own OHLC content. Once any row for a
+    # given date existed, a LATER re-fetch for that SAME date (e.g. after
+    # the real session closed and UW's own numbers settled) produced the
+    # exact same source_id and was silently discarded by the UNIQUE
+    # constraint every single time, permanently locking in whichever
+    # value -- complete or partial-session -- happened to be cataloged
+    # first. Confirmed as the real cause of a genuine cross-installation
+    # SPY Oct-16 discrepancy ($771.36 cataloged mid-session vs. $763.25
+    # the real final close).
+    #
+    # DELIBERATELY a NEW table, same design rule as every migration
+    # above (CREATE TABLE/INDEX IF NOT EXISTS only, never ALTER/DROP on
+    # an existing table -- see darkpool_coverage_status's own comment
+    # for this same pattern) -- and `price_bars` itself stays genuinely
+    # append-only (a corrected/more-complete bar for an existing date is
+    # inserted as a BRAND NEW row, never an UPDATE on the old one,
+    # consistent with this module's "never UPDATE a raw observation row"
+    # design rule stated in ingestion.py's own docstring). This table is
+    # a POINTER/bookkeeping table (same category as scheduler_state and
+    # ingestion_jobs above, which this codebase already updates in place
+    # -- it is not itself a raw observation row) recording, per
+    # (ticker, timeframe, event_time), which `price_bars.id` is currently
+    # the authoritative bar for that date and whether that bar is
+    # confirmed FINAL (its real trading session had genuinely closed, by
+    # NYSE calendar time, at the moment it was fetched -- see
+    # ingestion.py's `_bar_is_final`). Once a bar is confirmed final it
+    # is permanently locked: no later fetch, however different, is ever
+    # allowed to replace it through this path (a genuine post-close UW
+    # correction would need the existing, explicit, caller-reviewed
+    # reconcile_correction/source_corrections mechanism, same as
+    # darkpool/flow corrections already use -- never this automatic
+    # path). A non-final bar CAN be replaced, but only by a fetch that is
+    # not older/staler (directional: `retrieved_at` must not regress).
+    Migration(
+        version=5,
+        name="price_bar_freshness_tracking",
+        sql="""
+CREATE TABLE IF NOT EXISTS price_bar_current (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ticker TEXT NOT NULL,
+    timeframe TEXT NOT NULL,
+    event_time TEXT NOT NULL,
+    price_bar_id INTEGER NOT NULL REFERENCES price_bars(id),
+    is_final INTEGER NOT NULL DEFAULT 0,
+    retrieved_at TEXT NOT NULL,
+    UNIQUE(ticker, timeframe, event_time)
+);
+CREATE INDEX IF NOT EXISTS idx_price_bar_current_ticker_timeframe_event
+    ON price_bar_current(ticker, timeframe, event_time);
+""",
+    ),
 ]
 
 
