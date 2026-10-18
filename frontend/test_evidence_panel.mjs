@@ -110,8 +110,14 @@ check("empty table body initially (no rows pre-rendered in the markup itself)", 
 });
 
 check("excluded-marker disclosure note appears when excludedCount > 0", () => {
+  // R8-1 (chart-data-integrity-fixes round 9, 2026-10-18): wording now
+  // states the real total/plotted/excluded split explicitly (see
+  // renderEvidencePanel's own R8-1 comment) rather than a single bare
+  // "3 evidence marker(s)" count -- this fixture (3 excluded, 0 total
+  // allEvents) specifically exercises the all-excluded edge case.
   const html = lib.renderEvidencePanel([], 3);
-  assert.ok(html.includes("3 evidence marker"));
+  assert.ok(html.includes("3 fall outside that range"));
+  assert.ok(html.includes("remain listed"));
 });
 
 console.log("\n=== wireEvidencePanel: pagination never renders hundreds of rows at once ===");
