@@ -153,8 +153,14 @@ class TestOptionsOnlyBearish:
         finding as ZYNC), even when price corroborates its own direction."""
         scan = _scan("BRNX")
         assert scan["gates"]["options_flow_anomaly"]["passed"] is True
-        assert scan["gates"]["price_confirmation"]["metrics"]["direction_heuristic"] == "bearish-lean"
-        assert scan["gates"]["price_confirmation"]["metrics"]["confirmed"] is True
+        # Signal-integrity remediation (direction): BRNX's fixture flow is
+        # $2.2M put premium at the BID (put SELLING) vs $0.2M at the ask.
+        # The old combined-ask-share heuristic called that "bearish"; put
+        # selling is not bearish, and selling-dominated flow has no
+        # reliable lean -- see core/flow_direction.py.
+        assert scan["gates"]["price_confirmation"]["metrics"]["direction_heuristic"] is None
+        assert "selling" in scan["gates"]["price_confirmation"]["metrics"]["direction_ambiguity"]
+        assert scan["gates"]["price_confirmation"]["metrics"]["confirmed"] is None
         assert scan["gates"]["multi_signal_confirmation"]["passed"] is False
         assert scan["confidence"] == "medium"
         assert scan["signal_type"] == "single-signal-options-flow"
@@ -174,7 +180,9 @@ class TestDarkPoolWithDirection:
         assert scan["gates"]["historical_percentile"]["passed"] is False  # stays single-signal
         assert scan["gates"]["multi_signal_confirmation"]["passed"] is False
         assert scan["gates"]["price_confirmation"]["metrics"]["direction_heuristic"] == "bullish-lean"
-        assert scan["gates"]["price_confirmation"]["metrics"]["confirmed"] is True
+        # The lean is reported, but price_confirmation is only evaluated for
+        # QUALIFYING options flow (TEPID's is below the options threshold).
+        assert scan["gates"]["price_confirmation"]["metrics"]["confirmed"] is None
         assert scan["confidence"] == "medium"
         assert scan["signal_type"] == "single-signal-dark-pool"
 

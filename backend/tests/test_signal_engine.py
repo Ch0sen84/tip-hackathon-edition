@@ -65,12 +65,19 @@ class TestEvaluateGates:
         assert gates["persistence"]["passed"] is True
 
     def test_price_confirmation_bullish_lean_confirmed(self):
-        gates = se.evaluate_gates("ABC", price_move_pct=2.0, direction_heuristic="bullish-lean")
+        gates = se.evaluate_gates("ABC", options_flow_hit=True, price_move_pct=2.0, direction_heuristic="bullish-lean")
         assert gates["price_confirmation"]["passed"] is True
 
     def test_price_confirmation_bullish_lean_not_confirmed_when_price_down(self):
-        gates = se.evaluate_gates("ABC", price_move_pct=-2.0, direction_heuristic="bullish-lean")
+        gates = se.evaluate_gates("ABC", options_flow_hit=True, price_move_pct=-2.0, direction_heuristic="bullish-lean")
         assert gates["price_confirmation"]["passed"] is False
+
+    def test_price_confirmation_not_evaluated_without_qualifying_options_flow(self):
+        # Signal-integrity remediation: the lean of NON-qualifying flow is
+        # context only; price cannot "confirm" it.
+        gates = se.evaluate_gates("ABC", options_flow_hit=False, price_move_pct=2.0, direction_heuristic="bullish-lean")
+        assert gates["price_confirmation"]["passed"] is False
+        assert gates["price_confirmation"]["metrics"]["confirmed"] is None
 
     def test_multi_signal_confirmation_needs_two_of_four(self):
         gates = se.evaluate_gates(

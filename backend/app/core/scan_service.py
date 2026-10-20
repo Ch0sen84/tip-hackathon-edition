@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from . import signal_engine as se
+from . import flow_direction, signal_engine as se
 
 DARK_POOL_RATIO_HIT = 3.0  # matches tip_evidence.DP_STRONG_RATIO
 OPTIONS_FLOW_PREMIUM_MIN = 1_000_000
@@ -90,19 +90,11 @@ def _options_flow_metrics(flow_alerts: list) -> dict:
     }
 
 
-def _direction_heuristic(options_metrics: dict, darkpool_metrics: dict) -> Optional[str]:
-    """Bullish/bearish lean straight from which side (ask-dominant calls read
-    bullish) carried more premium this scan. None when there isn't enough
-    one-sided evidence to lean either way -- matches production's caution
-    about never inventing direction from ambiguous data."""
-    ask_share = options_metrics.get("metrics", {}).get("ask_share")
-    if ask_share is None:
-        return None
-    if ask_share >= OPTIONS_FLOW_ONE_SIDED_SHARE:
-        return "bullish-lean"
-    if ask_share <= 1 - OPTIONS_FLOW_ONE_SIDED_SHARE:
-        return "bearish-lean"
-    return None
+def _direction_heuristic(flow_alerts: list) -> Optional[str]:
+    """Inferred lean from call-vs-put aggressor BUYING only -- see
+    core/flow_direction.py for the observed/inferred split and why selling
+    and multi-leg flow are not used. None when ambiguous."""
+    return flow_direction.classify_flow(flow_alerts)["lean"]
 
 
 def build_gate_inputs(ticker: str, flow_alerts: list, darkpool_trades: list,
@@ -131,7 +123,8 @@ def build_gate_inputs(ticker: str, flow_alerts: list, darkpool_trades: list,
     existing tier1_* keyword arguments."""
     dp = catalog_dark_pool_baseline if catalog_dark_pool_baseline is not None else _darkpool_metrics(darkpool_trades or [])
     of = _options_flow_metrics(flow_alerts or [])
-    direction = _direction_heuristic(of, dp)
+    direction_detail = flow_direction.classify_flow(flow_alerts or [])
+    direction = direction_detail["lean"]
     today_premium = dp["total_premium"] + of["today_premium_from_alerts"]
     return dict(
         ticker=ticker,
@@ -143,6 +136,7 @@ def build_gate_inputs(ticker: str, flow_alerts: list, darkpool_trades: list,
         is_new_qualifying_day=is_new_qualifying_day,
         price_move_pct=price_move_pct, direction_heuristic=direction,
         catalyst_identified=catalyst_identified, api_errors=api_errors,
+        direction_detail=direction_detail,
     )
 
 
@@ -187,8 +181,11 @@ def evaluate_ticker_scan(ticker: str, flow_alerts: list, darkpool_trades: list,
         **inputs)
     confidence, signal_type, reason, qualifies = se.classify_confidence(
         gates, collection_complete=collection_complete)
+    # Invalidation uses the inferred lean only when it comes from options
+    # flow that actually qualified this scan.
+    lifecycle_direction = direction if gates["options_flow_anomaly"]["passed"] else None
     new_state, rule_id = se.determine_transition(
-        current_state, gates, qualifying_days_count, price_move_pct, direction,
+        current_state, gates, qualifying_days_count, price_move_pct, lifecycle_direction,
         collection_complete=collection_complete)
     gates_passed = [name for name, g in gates.items() if g["passed"]
                     and name not in ("multi_signal_confirmation", "catalyst_identified", "data_quality")]
@@ -205,6 +202,7 @@ def evaluate_ticker_scan(ticker: str, flow_alerts: list, darkpool_trades: list,
         "transition_rule": rule_id,
         "qualifying_days_count": qualifying_days_count,
         "direction_heuristic": direction,
+        "direction_detail": inputs.get("direction_detail"),
         "price_move_pct": price_move_pct,
         "collection_complete": collection_complete,
         "collection_failed_sources": failed,

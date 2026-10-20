@@ -240,7 +240,8 @@ def evaluate_gates(ticker: str, *, tier1_hit: bool = False, tier1_bootstrap: boo
                     percentile_gate_fn: Optional[PercentileGateFn] = None,
                     options_flow_available: bool = True,
                     darkpool_available: bool = True,
-                    collection_status: Optional[dict] = None) -> dict:
+                    collection_status: Optional[dict] = None,
+                    direction_detail: Optional[dict] = None) -> dict:
     """Evaluates every named gate for one ticker/scan. Returns
     {gate_name: {"passed": bool, "metrics": {...}}}. Pure function -- does
     not touch the DB or network. `percentile_gate_fn` defaults to the
@@ -282,15 +283,22 @@ def evaluate_gates(ticker: str, *, tier1_hit: bool = False, tier1_bootstrap: boo
                     "tier2_max_pct": tier2_max_pct, "is_new_qualifying_day": is_new_qualifying_day},
     }
 
+    # price_confirmation only means anything for the lean of QUALIFYING
+    # options flow (signal-integrity remediation): a lean inferred from
+    # flow that did not pass options_flow_anomaly is not evaluated.
     price_confirmed = None
-    if price_move_pct is not None and direction_heuristic in ("bullish-lean", "bearish-lean"):
+    if (options_flow_hit and options_flow_available and price_move_pct is not None
+            and direction_heuristic in ("bullish-lean", "bearish-lean")):
         expected_up = direction_heuristic == "bullish-lean"
         actual_up = price_move_pct > 0
         price_confirmed = (expected_up == actual_up)
     gates["price_confirmation"] = {
         "passed": bool(price_confirmed),
         "metrics": {"price_move_pct": price_move_pct, "direction_heuristic": direction_heuristic,
-                    "confirmed": price_confirmed},
+                    "confirmed": price_confirmed,
+                    "direction_basis": (direction_detail or {}).get("basis"),
+                    "direction_ambiguity": (direction_detail or {}).get("ambiguity"),
+                    "call_buy_share": (direction_detail or {}).get("call_buy_share")},
     }
 
     gates["catalyst_identified"] = {
