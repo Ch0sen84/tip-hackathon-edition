@@ -2295,7 +2295,7 @@ def _baseline_job_step(ticker: str, pages: int) -> dict:
     route call instead of overlapping it) and the per-ticker collection lock."""
     adapter = get_adapter()
     if not isinstance(adapter, LiveUWAdapter):
-        raise RuntimeError("Live Mode is no longer active")
+        raise baseline_jobs.JobBlocked("paused: the app is no longer in Live Mode -- switch back to Live and resume")
     with _baseline_backfill_lock:
         return _run_baseline_backfill(adapter, ticker, pages, "on_demand")
 

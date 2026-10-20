@@ -196,3 +196,46 @@ def test_job_and_interactive_refreshes_never_write_one_tickers_coverage_concurre
     final = live.get_baseline_job_store().get(job["id"])
     assert final["status"] == "completed", (final["last_error"], final["progress"])
     assert peak["n"] == 1
+
+
+def test_default_step_bounds_requests_after_a_pause_to_ten(live, monkeypatch):
+    uw = live.use_uw(build_uw())
+    client = TestClient(live.app)
+    real_step = live._baseline_job_step
+    calls_at_pause = {}
+
+    def step_then_pause(ticker, pages):
+        if "n" not in calls_at_pause:                      # user clicks Pause while step 1 is in flight
+            job = live.get_baseline_job_store().latest()
+            client.post(f"/api/baseline/jobs/{job['id']}/pause")
+            calls_at_pause["n"] = len(uw.calls)
+        return real_step(ticker, pages)
+
+    monkeypatch.setattr(live, "_baseline_job_step", step_then_pause)
+    live._baseline_job_runner = None
+    job = client.post("/api/baseline/jobs", json={"tickers": ["ABCD"]}).json()["job"]
+    assert job["step_pages"] == baseline_jobs.DEFAULT_STEP_PAGES == 10
+    live.get_baseline_job_runner().join(60)
+    final = live.get_baseline_job_store().get(job["id"])
+    provider_after_pause = [u for u, _ in uw.calls[calls_at_pause["n"]:] if "/api/darkpool/" in u or "flow-alerts" in u]
+    assert final["status"] == "paused" and len(provider_after_pause) <= 10
+
+
+def test_leaving_live_mode_pauses_the_job_with_a_clear_reason_and_no_more_requests(live, monkeypatch):
+    uw = live.use_uw(build_uw())
+    client = TestClient(live.app)
+    real_step = live._baseline_job_step
+    from app.adapters.synthetic_adapter import SyntheticDataAdapter
+
+    def step_then_leave_live(ticker, pages):
+        r = real_step(ticker, pages)
+        monkeypatch.setattr(live, "get_adapter", lambda: SyntheticDataAdapter(live.settings.fixtures_dir))
+        return r
+
+    monkeypatch.setattr(live, "_baseline_job_step", step_then_leave_live)
+    live._baseline_job_runner = None
+    job = run_job(live, client, max_pages_per_ticker=400)
+    n = len(uw.calls)
+    assert job["status"] == "paused" and "no longer in Live Mode" in job["last_error"]
+    assert "internal error" not in job["last_error"]
+    assert len(uw.calls) == n

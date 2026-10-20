@@ -45,8 +45,10 @@ paths below; with none of them, the gates stay "insufficient" indefinitely.
    and options-flow sessions against the 20-session requirement, and why it is still insufficient (including a
    provider history cutoff). **Build baseline** (one ticker) or **Build baselines for the whole watchlist** starts
    a bounded job:
-   - 40 UW pages per step, at most 400 per ticker, stopping at 20 complete sessions;
-   - progress, **Pause**, **Resume** and **Cancel** take effect between steps;
+   - 10 UW pages per step, at most 400 per ticker per build (click **Build** again to continue a busy
+     ticker), stopping at 20 complete sessions;
+   - progress, **Pause**, **Resume** and **Cancel** take effect between steps, so at most 10 more UW requests
+     follow a click;
    - a provider error pauses the job and shows the error;
    - an application restart leaves the job paused; it never auto-resumes;
    - already-verified sessions are never fetched again.

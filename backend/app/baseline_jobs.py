@@ -32,7 +32,10 @@ _log = logging.getLogger(__name__)
 
 ACTIVE = ("running", "pause_requested", "paused", "cancel_requested")
 DEFAULT_MAX_PAGES_PER_TICKER = 400
-DEFAULT_STEP_PAGES = 40
+# Pause/Cancel are honoured between steps, so the step size bounds how many more
+# provider requests can follow a click. 10 pages (5 per dataset) keeps that to a
+# few seconds; coverage is checkpointed per window, so small steps re-fetch nothing.
+DEFAULT_STEP_PAGES = 10
 MAX_PAGES_PER_TICKER_CAP = 2000
 STEP_PAGES_RANGE = (10, 200)
 
@@ -43,6 +46,11 @@ def _now() -> str:
 
 class JobConflict(Exception):
     pass
+
+
+class JobBlocked(Exception):
+    """A step cannot run right now for a reason the user must resolve (e.g. the app
+    left Live Mode). The job is paused with this message; nothing is retried."""
 
 
 class BaselineJobStore:
@@ -169,6 +177,8 @@ class BaselineJobRunner:
     def _run(self, job_id: int) -> None:
         try:
             self._loop(job_id)
+        except JobBlocked as exc:
+            self.store.update(job_id, status="paused", last_error=str(exc))
         except Exception as exc:  # noqa: BLE001 -- never leave a job stuck "running"
             _log.exception("baseline job %s crashed", job_id)
             self.store.update(job_id, status="paused", last_error=f"internal error: {exc}")

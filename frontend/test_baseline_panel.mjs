@@ -110,6 +110,20 @@ check("finished and cancelled jobs are not active and offer no controls", () => 
   assert.equal(lib.baselineJobIsActive(job("paused")), true);
 });
 
+check("panel states the request bound after Pause/Cancel and the per-build budget", () => {
+  const h = lib.renderBaselinePanel(overview());
+  assert.match(h, /at most 10 more UW requests/);
+  assert.match(h, /at most 400 UW pages per ticker; click Build again/);
+});
+
+check("a pausing or cancelling job shows how many more requests can still happen", () => {
+  for (const s of ["pause_requested", "cancel_requested"]) {
+    const h = lib.renderBaselineJob(job(s, { step_pages: 10 }), true);
+    assert.match(h, /at most 10 more UW requests/);
+  }
+  assert.doesNotMatch(lib.renderBaselineJob(job("running"), true), /baselineStepNote/);
+});
+
 check("ticker names are HTML-escaped", () => {
   const ov = overview();
   ov.tickers[0].ticker = "<img src=x>";
