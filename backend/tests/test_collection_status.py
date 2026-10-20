@@ -121,9 +121,14 @@ def test_outage_and_genuine_empty_answer_are_no_longer_identical(live_app):
     m.use_routes(routes(flow=ok([]), dp=ok([])))
     quiet = client.post("/api/ticker/SPY/refresh").json()
     assert outage["gates"]["options_flow_anomaly"]["status"] == "unavailable"
-    assert quiet["gates"]["options_flow_anomaly"].get("status") != "unavailable"
-    assert outage["state"] == "BUILDING"           # held
-    assert quiet["state"] == "FADING"              # a real, complete, empty answer is evidence
+    assert outage["transition_rule"] == "held_incomplete_collection"
+    assert outage["collection_complete"] is False
+    # A complete, empty answer IS collected data: the gate is evaluated by
+    # its method (here: insufficient baseline history on a fresh install),
+    # never reported as unavailable.
+    assert quiet["collection_complete"] is True
+    assert quiet["gates"]["options_flow_anomaly"]["status"] == "insufficient"
+    assert quiet["transition_rule"] == "held_insufficient_evidence"
 
 
 def test_failed_first_scan_creates_no_lifecycle_record(live_app):

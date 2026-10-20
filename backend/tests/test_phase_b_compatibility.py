@@ -285,14 +285,16 @@ def _strip_collection_timestamps(body):
     coverage/baseline detail, which is stripped here after asserting it."""
     def scrub(entry):
         if isinstance(entry, dict):
-            dp = (entry.get("gates") or {}).get("dark_pool_anomaly")
-            if isinstance(dp, dict):
-                assert dp["passed"] is False and dp["status"] == "insufficient", dp
-                dp["metrics"] = "<baseline detail>"
-            dpc = (entry.get("collection") or {}).get("darkpool")
-            if isinstance(dpc, dict):
-                for k in ("coverage", "detail", "pages", "source", "http_status", "row_count"):
-                    dpc.pop(k, None)
+            for gate_name in ("dark_pool_anomaly", "options_flow_anomaly"):
+                g = (entry.get("gates") or {}).get(gate_name)
+                if isinstance(g, dict):
+                    assert g["passed"] is False and g["status"] == "insufficient", g
+                    g["metrics"] = "<baseline detail>"
+            for source in ("darkpool", "options_flow"):
+                c = (entry.get("collection") or {}).get(source)
+                if isinstance(c, dict):
+                    for k in ("coverage", "detail", "pages", "source", "http_status", "row_count"):
+                        c.pop(k, None)
             entry.pop("last_successful_collection_at", None)
             for h in entry.get("history") or []:
                 if isinstance(h, dict):

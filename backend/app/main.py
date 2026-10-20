@@ -611,7 +611,7 @@ def _catalog_scan_best_effort(adapter: UWDataAdapter, ticker: str, flow_alerts: 
 
 
 RAW_ROW_CAP = 500
-BASELINE_DATASETS = ("darkpool",)
+BASELINE_DATASETS = ("darkpool", "options_flow")
 BACKFILL_MAX_PAGES_PER_REQUEST = 200
 BACKFILL_TICKERS_PER_CYCLE = int(os.environ.get("TIP_BASELINE_BACKFILL_TICKERS_PER_CYCLE", "2"))
 _backfill_rotation = {"i": 0}
@@ -695,6 +695,15 @@ def _collect_session_dataset(adapter: LiveUWAdapter, dataset: str, ticker: str, 
         return result
 
 
+def _options_baseline(ticker: str, session_date, as_of_utc) -> dict:
+    try:
+        b = session_baseline.compute(get_catalog(), "options_flow", ticker, session_date, as_of_utc=as_of_utc)
+        return {"status": b.status, "metrics": b.as_metrics()}
+    except Exception:  # noqa: BLE001 -- unavailable baseline => insufficient
+        logging.getLogger(__name__).info("options baseline unavailable for %s", ticker)
+        return {"status": "insufficient", "metrics": {"reason": "baseline computation unavailable"}}
+
+
 def _session_baseline_gate_inputs(dataset: str, ticker: str, session_date, as_of_utc) -> Optional[dict]:
     try:
         return session_baseline.compute(get_catalog(), dataset, ticker, session_date,
@@ -766,7 +775,8 @@ def _run_scan(adapter: UWDataAdapter, store: QualifyingDaysStore, ticker: str, k
     session_date = trading_calendar.evidence_session_date(scanned_at)
     is_live = isinstance(adapter, LiveUWAdapter)
     collections = {
-        "options_flow": adapter.collect_flow_alerts(ticker),
+        "options_flow": (_collect_session_dataset(adapter, "options_flow", ticker, session_date, scanned_at, kind)
+                         if is_live else adapter.collect_flow_alerts(ticker)),
         "darkpool": (_collect_session_dataset(adapter, "darkpool", ticker, session_date, scanned_at, kind)
                      if is_live else adapter.collect_darkpool_trades(ticker)),
         "stock_state": adapter.collect_stock_state(ticker),
@@ -786,6 +796,7 @@ def _run_scan(adapter: UWDataAdapter, store: QualifyingDaysStore, ticker: str, k
     # verified session coverage only (core/session_baseline.py).
     catalog_dark_pool_baseline = (_session_baseline_gate_inputs("darkpool", ticker, session_date, scanned_at)
                                   if is_live else None)
+    options_flow_baseline = (_options_baseline(ticker, session_date, scanned_at) if is_live else None)
     result = scan_service.evaluate_ticker_scan(
         ticker=ticker,
         flow_alerts=flow_alerts,
@@ -795,6 +806,7 @@ def _run_scan(adapter: UWDataAdapter, store: QualifyingDaysStore, ticker: str, k
         price_move_pct=_price_move_pct(stock_state),
         catalyst_identified=adapter.get_catalyst_identified(ticker),
         catalog_dark_pool_baseline=catalog_dark_pool_baseline,
+        options_flow_baseline=options_flow_baseline,
         collection_status=collection_status,
         mode=_mode_of(adapter),
         lifecycle_context=lifecycle_ctx,

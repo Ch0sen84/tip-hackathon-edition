@@ -106,7 +106,8 @@ def build_gate_inputs(ticker: str, flow_alerts: list, darkpool_trades: list,
                        api_errors: int = 0,
                        catalyst_identified: bool = False,
                        catalog_dark_pool_baseline: Optional[dict] = None,
-                       mode: str = "demo") -> dict:
+                       mode: str = "demo",
+                       options_flow_baseline: Optional[dict] = None) -> dict:
     """Pure transform: raw UW-shaped lists -> the keyword arguments
     signal_engine.evaluate_gates expects. Exposed separately from
     evaluate_ticker_scan so tests can assert on the intermediate shape.
@@ -140,6 +141,24 @@ def build_gate_inputs(ticker: str, flow_alerts: list, darkpool_trades: list,
         dp = _darkpool_metrics(darkpool_trades or [])
         dp_source = "demo_fixture_baseline"
     of = _options_flow_metrics(flow_alerts or [])
+    # options_flow_anomaly method (signal-integrity remediation, audit B8/E2):
+    #   Live -> session baseline of UW flow-alert premium (core/session_baseline.py,
+    #           same verified-coverage, time-of-day, prior-complete-sessions test
+    #           as dark pool). The single-snapshot threshold below passed on 100%
+    #           of the captured Live scans and is NOT used to decide in Live.
+    #   Demo -> the snapshot threshold over fixture alerts, labeled as such.
+    if mode == "live":
+        b = options_flow_baseline or {"status": "insufficient",
+                                      "metrics": {"reason": "no options-flow session baseline available"}}
+        of_status = b["status"]
+        of_metrics = {"observed": of["metrics"], "baseline": b.get("metrics")}
+        of_source = "uw_flow_alerts_session_baseline"
+    else:
+        of_status = "pass" if of["options_flow_hit"] else "fail"
+        of_metrics = dict(of["metrics"], method="demo_snapshot_threshold",
+                          note="Demo fixture heuristic: >= $1M alert premium with a sweep or one-sided "
+                               "flow in the fixture batch; not a baseline test")
+        of_source = "demo_fixture_snapshot_threshold"
     direction_detail = flow_direction.classify_flow(flow_alerts or [])
     direction = direction_detail["lean"]
     today_premium = (dp.get("total_premium") or 0.0) + of["today_premium_from_alerts"]
@@ -148,7 +167,7 @@ def build_gate_inputs(ticker: str, flow_alerts: list, darkpool_trades: list,
         tier1_hit=dp["tier1_hit"], tier1_bootstrap=dp["tier1_bootstrap"],
         tier1_ratio=dp["tier1_ratio"], tier1_z=dp["tier1_z"],
         tier2_hit=False, tier2_qualifying_prints=0, tier2_max_pct=0.0,
-        options_flow_hit=of["options_flow_hit"], options_flow_metrics=of["metrics"],
+        options_flow_hit=of_status == "pass", options_flow_metrics=of_metrics,
         today_premium=today_premium if today_premium > 0 else None,
         is_new_qualifying_day=is_new_qualifying_day,
         price_move_pct=price_move_pct, direction_heuristic=direction,
@@ -158,8 +177,8 @@ def build_gate_inputs(ticker: str, flow_alerts: list, darkpool_trades: list,
         dark_pool_source=dp_source,
         dark_pool_metrics={k: v for k, v in dp.items()
                            if k not in ("tier1_hit", "tier1_bootstrap", "tier1_ratio", "tier1_z")},
-        options_flow_source=("demo_fixture_snapshot_threshold" if mode != "live"
-                             else "uw_flow_alerts_snapshot_threshold"),
+        options_flow_source=of_source,
+        options_flow_status=of_status,
     )
 
 
@@ -173,6 +192,7 @@ def evaluate_ticker_scan(ticker: str, flow_alerts: list, darkpool_trades: list,
                           catalog_dark_pool_baseline: Optional[dict] = None,
                           collection_status: Optional[dict] = None,
                           mode: str = "demo",
+                          options_flow_baseline: Optional[dict] = None,
                           lifecycle_context: Optional["lifecycle.LifecycleContext"] = None,
                           session_date: Optional[date] = None,
                           price_last: Optional[float] = None,
@@ -190,7 +210,8 @@ def evaluate_ticker_scan(ticker: str, flow_alerts: list, darkpool_trades: list,
                                 api_errors=api_errors,
                                 catalyst_identified=catalyst_identified,
                                 catalog_dark_pool_baseline=catalog_dark_pool_baseline,
-                                mode=mode)
+                                mode=mode,
+                                options_flow_baseline=options_flow_baseline)
     # Collection status (audit B4/E9): a source that could not be collected
     # is "unavailable", never an empty-but-successful observation.
     collection_status = dict(collection_status or {})
