@@ -32,6 +32,10 @@ This is a clean-room extraction/port for the hackathon -- it does not import
 or depend on the production TIP app, has no Postgres/TimescaleDB/Databento
 dependency, and makes no calls to the production TIP service.
 
+## Signal integrity (read before interpreting any label)
+
+Confidence and lifecycle labels are rule-based evidence-coverage descriptions, **not probabilities and not predictions**. In Live Mode both real gates (dark pool, options flow) need at least 20 fully collected prior trading sessions before they can pass or fail; until then they honestly report "insufficient". A provider failure is reported as unavailable data, never as a quiet market. See [docs/SIGNAL_INTEGRITY_RULES.md](docs/SIGNAL_INTEGRITY_RULES.md), [docs/GATE_PROOF.md](docs/GATE_PROOF.md) and [docs/TRADING_VALIDITY.md](docs/TRADING_VALIDITY.md).
+
 ## Why this exists / what's ported vs. rebuilt
 
 | Component | Source | What changed |

@@ -1,0 +1,62 @@
+# Release, migration and rollback plan: signal-integrity remediation
+
+**Status: not released.** This document is a plan only. Nothing here has been pushed, deployed or run against
+a real installation. Each step needs explicit owner approval.
+
+## What changes for an existing install
+1. **Schema (additive only).**
+   - Migration 7: `lifecycle_episodes`, `lifecycle_session_evidence`, `lifecycle_scans`.
+   - Migration 8: `session_coverage`.
+   - No existing table is altered or dropped.
+   - Before migration 7 runs on an existing DB, `migrations.backup_db_file` writes
+     `<db>.pre-migration-<timestamp>.bak` using SQLite's online backup API. Names are unique and never
+     overwrite each other.
+2. **Lifecycle restart (intentional).**
+   - Live lifecycle state starts empty in the new episode tables.
+   - Legacy `ticker_scan_log` / `ticker_current_state` rows stay in place as audit history but are no longer
+     read: they were unscoped, counted server-calendar dates, and contained Demo rows. The captured
+     pre-05c47ca DB holds 92 Demo-attributed scan rows and 11 Demo state rows, FLUX/CATX CONFIRMED among them.
+   - Run `tools/audit_demo_live_contamination.py --db <live.db>` (read-only) to see what is there.
+3. **Demo database.**
+   - Demo now writes to `TIP_DEMO_DB_PATH`, which defaults to `<TIP_DB_PATH>.demo.db` in the same volume.
+   - The Docker volume layout is unchanged.
+4. **Live behaviour change users will see.**
+   - Until ≥ 20 complete prior sessions are collected for a ticker, both real gates report
+     `insufficient` and nothing qualifies.
+   - This replaces the previous always-passing options gate. Expect a quiet radar after upgrade.
+5. **New UW request volume in Live.**
+   - Each refresh uses up to 4 pages per dataset for the evidence session.
+   - Each evaluating scheduler cycle backfills up to 60 pages for each of 2 rotating watchlist tickers.
+   - The explicit backfill route is clamped to 200 pages.
+   - All of it goes through the existing 2-concurrent-request gate.
+   - Tunable: `TIP_SCAN_COVERAGE_PAGES`, `TIP_BASELINE_BACKFILL_PAGES`,
+     `TIP_BASELINE_BACKFILL_TICKERS_PER_CYCLE`, `TIP_BASELINE_LOOKBACK_SESSIONS`.
+
+## Pre-release checklist (needs approval)
+- [ ] Decide whether `fixtures/recorded_uw/` (real UW data, commit `8015621`) may be published. If not, drop
+      that commit before pushing; tests that need it skip cleanly.
+- [ ] One bounded, approved live verification run with a real key, to confirm UW honours `older_than` on
+      flow-alerts and `date` + `older_than` on dark pool. The collector already marks coverage `unknown` if
+      not, so this verifies capability rather than correctness.
+- [ ] Back up the deployed volume (`tip_hackathon.db`, `settings.json`, `.auth_token`).
+- [ ] Review and merge the branch via PR (not a direct push to main).
+
+## Deployment steps (after approval)
+1. Stop the container. Copy the DB file aside: `docker cp <container>:/srv/data/tip_hackathon.db ./backup/`.
+2. Build and start the new image. The migrations run automatically, and migration 7 writes its own backup
+   file first.
+3. Verify:
+   - `GET /api/health` returns `replay_clock: null`.
+   - `GET /api/ticker/SPY/baseline` returns coverage (0 sessions at first).
+   - A refresh shows `insufficient`, not `medium`.
+4. Optionally run `tools/audit_demo_live_contamination.py` against the migrated DB (read-only).
+
+## Rollback
+- **Code.** Redeploy the 05c47ca image. The extra tables are ignored by the old code, and the legacy tables
+  it reads were never modified, so the old app resumes exactly where it was.
+- **Data.** If a full restore is wanted, stop the container and replace `tip_hackathon.db` with the backup
+  copy or the automatic `*.pre-migration-*.bak`. The Demo DB file can simply be deleted.
+- **Nothing is deleted by this change**, so no data recovery is needed for a code-only rollback.
+
+## Explicitly not done
+- No push, PR, release, deployment, live-DB migration, or live UW / paid-AI request.
