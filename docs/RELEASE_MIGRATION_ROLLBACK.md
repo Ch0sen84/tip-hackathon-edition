@@ -99,14 +99,23 @@ port or a local replay:
   byte-identical to the original.
 - **Re-upgrade after a restore:** succeeds.
 
-## Optimization branch (perf/baseline-cache-and-backfill-ux, not part of the review PR)
-- **Migration 9** (additive): `session_value_curves` (derived cache) and `baseline_jobs`. The automatic
-  `.bak` is taken as for 7–8. Upgrading a copy of the deployed volume 6 → 9 in Docker changed only
-  `schema_version`.
-- **Rollback to the reviewed release** on a schema-9 volume: starts and changes no table (verified in
-  Docker).
-- **Retention is off by default.** If raw rows were ever pruned with `tools/retention.py`, run
-  `retention restore` before running any older code.
+## Release 2: baseline cache, baseline builder, retention tools (migration 9)
+- **Migration 9** (additive): `session_value_curves` (derived cache, plus `sealed` / `archive_ref` used only by
+  `tools/retention.py`) and `baseline_jobs`. The automatic pre-migration `.bak` is taken before it runs, as for
+  7–8.
+- **Before upgrading:** stop the container and take the same read-only volume tar as for release 1.
+- **After upgrading:**
+  - nothing collects by itself;
+  - the scheduler mode is untouched;
+  - baselines are built only from Settings → Historical baselines (Live), by an explicit click, in bounded steps.
+- **Code-only rollback** to the release-1 image (`c1570dd`) on a schema-9 volume: starts and changes no table
+  (verified in Docker); the old code ignores the new tables. Valid **only if `tools/retention.py prune` was never
+  run.**
+- **Full rollback:** stop, then either copy the migration-9 `.bak` over the DB or restore the volume tar.
+- **If pruning was ever run:** `python tools/retention.py --db <db> restore --archive-dir <dir>` before running
+  any older code.
+- **Retention is never run by the app.** `prune` is a double-opt-in prototype; do not run it on deployed data
+  without a separate decision.
 
 ## Rollback
 - **Code.** Redeploy the 05c47ca image. The extra tables are ignored by the old code, and the migrations

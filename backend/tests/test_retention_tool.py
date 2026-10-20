@@ -114,6 +114,22 @@ def test_evidence_sessions_of_recorded_evaluations_are_never_pruned(db, tmp_path
                and s["why"] == "evidence session of a recorded evaluation") == 2      # both datasets
 
 
+def test_legacy_evaluations_without_evidence_session_still_protect_their_days(db, tmp_path, monkeypatch):
+    days = sessions_before(EVIDENCE, 24)
+    target = days[5]                                         # a legacy v1 scan retrieved during this session
+    conn = sqlite3.connect(db)
+    conn.execute("INSERT INTO signal_evaluations (source_id, ticker, event_time, retrieved_at, state, confidence, "
+                 "engine_rule_version, raw_json) VALUES ('legacy', ?, 'x', ?, 'BUILDING', 'medium', 'v1', '{}')",
+                 (T, f"{target.isoformat()}T18:00:00+00:00"))
+    conn.commit()
+    arch = tmp_path / "arch"
+    retention.cmd_archive(db, KEEP, arch)
+    monkeypatch.setenv("TIP_RETENTION_ENABLED", "1")
+    out = retention.cmd_prune(db, KEEP, arch, confirmed=True)
+    protected = {s["session_date"] for s in out["skipped"] if s["why"] == "evidence session of a recorded evaluation"}
+    assert {target.isoformat(), days[4].isoformat()} <= protected
+
+
 def test_late_row_in_a_pruned_session_is_excluded_never_miscounted_and_restore_recovers(db, tmp_path, monkeypatch):
     before = baselines(db, monkeypatch, "0")
     arch = tmp_path / "arch"

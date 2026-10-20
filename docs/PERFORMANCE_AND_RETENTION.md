@@ -78,6 +78,17 @@ Equivalence: all 8 benchmark cases are bit-identical to the unmodified engine (s
 deviation, ratio, percentile, per-session history). Equivalence, invalidation and fallback are tested in
 `tests/test_session_curve_cache.py`.
 
+**Cold cache, honestly.** The first baseline computation after a session becomes complete (or after its raw
+rows change) builds that session's curve from raw rows. A full first build for an SPY-scale ticker with 30 prior
+sessions took ~17 s, about the old per-refresh cost, once. Upgrading therefore makes the first refresh of each
+ticker no faster than before; later refreshes are fast.
+
+**Curve storage policy.** Curves are derived data, about 2% of the raw rows they summarize (~1 MB per
+SPY-scale session per dataset; 31 MB for 31 sessions). They are kept alongside the raw rows, with no separate
+growth policy, and rebuilt automatically whenever invalid. Dropping the table (with the app stopped) is always
+safe: curves rebuild on demand. The only exception is curves *sealed* by retention, which must be kept while their
+raw rows exist only in archives.
+
 **Remaining bottleneck.** The evidence session itself is still read from raw rows (~0.4–0.6 s for 50 k prints),
 dominated again by composite-key hashing. Possible next step: reuse the stored `source_id` (which *is* the composite
 key for rows written since the identity fix) and hash only legacy rows. Deferred, because it touches deduplication
@@ -90,13 +101,14 @@ semantics.
 | Data | Needed for | Policy |
 |---|---|---|
 | Raw observations of recent sessions | current evaluation, evidence display | **keep** at least the newest 90 complete sessions per ticker (CLI minimum 30) |
-| Raw observations of the evidence session of any recorded evaluation | reproducing that decision | **never pruned** |
+| Raw observations of the evidence session of any recorded evaluation | reproducing that decision | **never pruned**. For legacy (pre-v2) evaluations, which do not record an evidence session, the New York retrieval date and the preceding trading session are both protected. |
 | Completed-session curves | anomaly baselines | keep indefinitely (~1 MB per session per SPY-scale ticker); **sealed** when raw rows are pruned |
 | Older raw observations | audit, research, re-derivation | **archive before delete**: per-session gzip JSONL + sha256 manifest, re-verified, restorable with original ids |
 | Evaluations and lifecycle history | audit trail | keep. Recommended follow-up: store references instead of the 500-row raw copy (~668 KB per SPY-scale refresh). |
 | Research / predictive validation | future outcome studies | the archives are the research corpus; keep them off the live volume (cold storage) |
 
-**Prototype `tools/retention.py`** (operator-run, never by the app):
+**Prototype `tools/retention.py`** (operator-run, never by the app; not in the Docker image; no startup,
+migration, scheduler or background path calls it):
 - **`plan`**: read-only.
 - **`archive`**: non-destructive.
 - **`prune`**: requires `TIP_RETENTION_ENABLED=1` **and** `--i-understand-this-deletes-raw-rows`. It only prunes
@@ -104,6 +116,9 @@ semantics.
   evaluation's evidence session, and have no cited rows. It also re-checks that every already-sealed session of that
   ticker is unchanged.
 - **`restore`**: re-inserts the archived rows.
+
+The engine does **not** populate `signal_evaluation_evidence` (per-observation citations), so that table alone
+protects nothing in practice; the evidence-session rule above is what keeps decisions reproducible.
 
 If new raw rows ever arrive for a sealed session, the baseline **excludes** it (`unknown:sealed_session_changed`)
 rather than mixing partial data, until it is restored. Tested in `tests/test_retention_tool.py`.
@@ -133,6 +148,16 @@ rather than mixing partial data, until it is restored. Tested in `tests/test_ret
   starts and changes no table.
 - **After any prune, do not run code older than this branch until the archives are restored with
   `retention restore`.** Older code has no sealed curves and would compute baselines from incomplete raw rows.
+
+**Status and recommendation.** Ship `plan`, `archive` and `restore` as operator tools. `prune` is a
+**prototype**: it is off by default, double opt-in, and has been verified only on synthetic data. Do not use it on
+the deployed data without a separate owner decision.
+
+Known limitations of pruning:
+- chart markers for pruned days disappear;
+- raw-row audit lives in the archives, not the DB;
+- predictive research must read the archives;
+- a sealed session that later receives late rows is excluded from baselines until restored.
 
 **Operating defaults:**
 - Retention **disabled**. Run `plan` monthly.

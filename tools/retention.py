@@ -90,12 +90,27 @@ def _evidence_sessions(conn, ticker) -> set:
     ticker. Their raw rows are what that decision read directly, so they are never
     pruned (the engine does not record per-observation citations; see
     signal_evaluation_evidence, which stays empty in practice)."""
+    out = set()
     try:
-        return {r[0] for r in conn.execute(
-            "SELECT DISTINCT json_extract(raw_json, '$.evidence_session') FROM signal_evaluations "
-            "WHERE ticker = ? AND json_valid(raw_json)", (ticker,)) if r[0]}
+        rows = conn.execute(
+            "SELECT json_extract(raw_json, '$.evidence_session'), retrieved_at FROM signal_evaluations "
+            "WHERE ticker = ?", (ticker,)).fetchall()
     except sqlite3.OperationalError:
-        return set()
+        return out
+    for ev, retrieved_at in rows:
+        if ev:
+            out.add(ev)
+            continue
+        # Legacy (pre-v2) evaluations carry no evidence_session: protect, conservatively,
+        # the New York date they were retrieved on and the trading session before it.
+        try:
+            ts = datetime.fromisoformat(str(retrieved_at).replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        ny = (ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)).astimezone(tc.NY_TZ).date()
+        out.add(ny.isoformat())
+        out.add(tc.previous_trading_day(ny).isoformat())
+    return out
 
 
 def cmd_plan(db, keep):
