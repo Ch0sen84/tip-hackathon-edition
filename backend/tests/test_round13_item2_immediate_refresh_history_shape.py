@@ -85,7 +85,9 @@ def test_immediate_refresh_and_subsequent_cached_get_agree_on_transition_rule_fo
     # produce the IDENTICAL shape for the newest entry, not merely the
     # same final value by coincidence.
     assert newest_from_refresh["transition_rule"] == newest_from_get["transition_rule"]
-    assert newest_from_refresh["state"] == newest_from_get["state"] == "NEW"
+    # No qualifying evidence => no qualification episode opens (state None),
+    # never a "NEW" label (signal-integrity remediation).
+    assert newest_from_refresh["state"] is None and newest_from_get["state"] is None
 
     assert mock_session.get.call_count > 0  # the one real fetch this test deliberately triggers
 
@@ -107,14 +109,16 @@ def test_second_zero_gate_evaluation_also_gets_enriched_on_the_immediate_refresh
 
     first = client.post(f"/api/ticker/{ticker}/refresh").json()
     assert first["transition_rule"] == "no_qualifying_evidence_yet"
-    assert first["state"] == "NEW"
+    assert first["state"] is None
 
+    # A second zero-evidence scan still opens nothing (episode model).
     second = client.post(f"/api/ticker/{ticker}/refresh").json()
-    assert second["transition_rule"] == "no_gate_passed_remains_new", (
-        f"expected the L1 guard's second zero-gate reason, got {second['transition_rule']!r}"
+    assert second["transition_rule"] == "no_qualifying_evidence_yet", (
+        f"expected the zero-gate reason, got {second['transition_rule']!r}"
     )
+    assert second["state"] is None
     newest = second["history"][-1]
-    assert newest["transition_rule"] == "no_gate_passed_remains_new", (
+    assert newest["transition_rule"] == "no_qualifying_evidence_yet", (
         "the SECOND zero-gate reason's immediate-refresh history entry must also carry "
         "its real transition_rule, not just the first evaluation's"
     )

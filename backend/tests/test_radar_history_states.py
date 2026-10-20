@@ -38,6 +38,12 @@ def test_radar_entries_carry_a_real_state_field():
     all_entries = data["highest"] + data["other"]
     valid_states = {"NEW", "BUILDING", "CONFIRMED", "STABLE", "FADING", "INVALIDATED"}
     for entry in all_entries:
+        if entry.get("zero_gate"):
+            # Signal-integrity remediation: an evaluated ticker with no
+            # qualifying evidence has NO open qualification episode -- it is
+            # not "NEW" (NEW now means a qualification actually began).
+            assert entry.get("state") is None, entry
+            continue
         assert entry.get("state") in valid_states, entry
 
 

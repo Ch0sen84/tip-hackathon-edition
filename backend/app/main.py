@@ -17,7 +17,7 @@ import logging
 import os
 import sys
 import threading
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
 from pathlib import Path
@@ -61,7 +61,7 @@ from .auth import (
     is_loopback,
 )
 from .config import settings
-from .core import dark_pool_baseline, discovery, scan_service, tip_evidence
+from .core import dark_pool_baseline, discovery, lifecycle, scan_service, tip_evidence, trading_calendar
 from .core import local_mode as local_mode_module
 from .core import scheduler_freshness, single_process_guard, uw_concurrency
 from .core.scheduler_store import InvalidModeError, MODES as SCHEDULER_MODES, SchedulerStore, new_worker_id
@@ -704,8 +704,12 @@ def _run_scan(adapter: UWDataAdapter, store: QualifyingDaysStore, ticker: str, k
     else:
         stock_state = {"unavailable": True, "reason": collection_summary(collections["stock_state"])}
     collection_status = {name: c["status"] for name, c in collections.items()}
-    current_state = store.current_state(ticker)
-    qualifying_days = store.qualifying_days_count(ticker)
+    # Episode-scoped, NYSE-session-attributed lifecycle (core/lifecycle.py).
+    scanned_at = datetime.now(timezone.utc)
+    session_date = trading_calendar.evidence_session_date(scanned_at)
+    lifecycle_ctx = store.context(ticker, session_date.isoformat())
+    current_state = lifecycle_ctx.state if lifecycle_ctx.state is not None else lifecycle_ctx.display_state
+    qualifying_days = len(lifecycle_ctx.qualifying_sessions)
     catalog_dark_pool_baseline = _catalog_dark_pool_baseline_best_effort(adapter, ticker)
     result = scan_service.evaluate_ticker_scan(
         ticker=ticker,
@@ -718,6 +722,12 @@ def _run_scan(adapter: UWDataAdapter, store: QualifyingDaysStore, ticker: str, k
         catalog_dark_pool_baseline=catalog_dark_pool_baseline,
         collection_status=collection_status,
         mode=_mode_of(adapter),
+        lifecycle_context=lifecycle_ctx,
+        session_date=session_date,
+        price_last=(stock_state or {}).get("last_price") if not (stock_state or {}).get("unavailable") else None,
+        # Demo fixtures are static: no evidence identity to compare.
+        evidence_fingerprint=(lifecycle.evidence_fingerprint(flow_alerts, darkpool_trades)
+                              if _mode_of(adapter) == "live" else None),
     )
     result["collection"] = {name: collection_summary(c) for name, c in collections.items()}
     # When this scan's data was collected (newest per-source retrieval).
@@ -726,9 +736,9 @@ def _run_scan(adapter: UWDataAdapter, store: QualifyingDaysStore, ticker: str, k
     try:
         # An incomplete collection is recorded as an attempt in the catalog
         # (below) but never written into lifecycle history: it is neither a
-        # qualifying nor a non-qualifying observation.
-        if result["collection_complete"] and result["state"] is not None:
-            store.record_scan(ticker, any_gate_passed, result["state"], kind=kind)
+        # qualifying nor a non-qualifying observation (apply() skips it).
+        store.apply(ticker, lifecycle.LifecycleDecision(**result["lifecycle"]), kind=kind,
+                    scanned_at=scanned_at.isoformat())
     except StorageGuardPausedError as e:
         if kind != "on_demand":
             raise  # background caller: let it propagate for its own handling, never shaped as an HTTP 507

@@ -180,59 +180,204 @@ class QualifyingDaysStore:
             # everything is already applied. See app/migrations.py.
             run_migrations(conn, self.db_path)
 
-    def record_scan(self, ticker: str, any_gate_passed: bool, state: str,
-                     scan_date: Optional[str] = None, kind: str = ONDEMAND) -> None:
-        # Phase D: `kind` lets a background-sourced scan (the scheduler's
-        # bounded per-ticker evaluation) check the SAME storage_guard
-        # circuit breaker other background writes already use (the
-        # earlier, more conservative BACKGROUND threshold -- see
-        # app/storage_guard.py) instead of always checking the on-demand
-        # threshold regardless of who's actually writing. Every existing
-        # caller is unaffected: the default stays ONDEMAND, byte-for-byte
-        # the same behavior as before this phase.
+    # --- episode-scoped lifecycle (signal-integrity remediation) ---------
+    #
+    # Lifecycle state now lives in lifecycle_episodes /
+    # lifecycle_session_evidence / lifecycle_scans (migration 7, see
+    # core/lifecycle.py for the model). The legacy ticker_scan_log /
+    # ticker_current_state tables are no longer read or written: they hold
+    # unscoped, server-calendar-dated history (and, before the Demo/Live
+    # split, Demo rows) and are kept only as audit history.
+
+    def _guard(self, kind: str) -> None:
         if self._storage_guard is not None:
             result = self._storage_guard.check_before_write(kind)
             if not result.allowed:
                 raise StorageGuardPausedError(result)
-        scan_date = scan_date or date_cls.today().isoformat()
+
+    @staticmethod
+    def _now() -> str:
+        from datetime import datetime, timezone
+        return datetime.now(timezone.utc).isoformat()
+
+    def _latest_episode(self, conn, ticker: str):
+        return conn.execute(
+            "SELECT id, state, opened_session, reference_price, last_qualifying_session, "
+            "closed_at, closed_session, close_reason FROM lifecycle_episodes "
+            "WHERE ticker = ? ORDER BY id DESC LIMIT 1", (ticker,)).fetchone()
+
+    def context(self, ticker: str, session_date: str):
+        """LifecycleContext for `ticker` as seen from trading session
+        `session_date` (ISO)."""
+        from .core.lifecycle import LifecycleContext
+        import json as _json
         with self._conn() as conn:
-            conn.execute(
-                "INSERT INTO ticker_scan_log (ticker, scan_date, any_gate_passed, state) "
-                "VALUES (?, ?, ?, ?)",
-                (ticker, scan_date, int(any_gate_passed), state),
-            )
-            conn.execute(
-                "INSERT INTO ticker_current_state (ticker, state, updated_at) "
-                "VALUES (?, ?, datetime('now')) "
-                "ON CONFLICT(ticker) DO UPDATE SET state=excluded.state, updated_at=datetime('now')",
-                (ticker, state),
-            )
+            ep = self._latest_episode(conn, ticker)
+            if ep is None:
+                return LifecycleContext()
+            ep_id, state, opened, ref, last_q, closed_at, closed_sess, reason = ep
+            if closed_at is not None:
+                return LifecycleContext(
+                    last_closed_reason=reason, last_closed_session=closed_sess,
+                    display_state="INVALIDATED" if reason == "invalidated" else None)
+            rows = conn.execute(
+                "SELECT session_date, qualifying, confirmed, fingerprints FROM lifecycle_session_evidence "
+                "WHERE episode_id = ?", (ep_id,)).fetchall()
+            prev = conn.execute(
+                "SELECT closed_session, close_reason FROM lifecycle_episodes WHERE ticker = ? AND id < ? "
+                "ORDER BY id DESC LIMIT 1", (ticker, ep_id)).fetchone()
+        earlier = set()
+        for sd, _q, _c, fps in rows:
+            if sd != session_date:
+                earlier.update(_json.loads(fps or "[]"))
+        return LifecycleContext(
+            episode_id=ep_id, state=state, opened_session=opened, reference_price=ref,
+            qualifying_sessions=tuple(sorted(r[0] for r in rows if r[1])),
+            confirmed_sessions=tuple(sorted(r[0] for r in rows if r[2])),
+            last_qualifying_session=last_q,
+            earlier_fingerprints=tuple(sorted(earlier)),
+            last_closed_reason=prev[1] if prev else None,
+            last_closed_session=prev[0] if prev else None,
+        )
+
+    def apply(self, ticker: str, decision, kind: str = ONDEMAND, scanned_at: Optional[str] = None) -> None:
+        """Persist one lifecycle decision atomically."""
+        import json as _json
+        if decision.action == "hold" and not decision.write_scan_row:
+            return
+        self._guard(kind)
+        now = scanned_at or self._now()
+        sd = decision.session_date
+        with self._conn() as conn:
+            ep = self._latest_episode(conn, ticker)
+            open_id = ep[0] if ep is not None and ep[5] is None else None
+            if decision.expire_open_episode and open_id is not None:
+                conn.execute(
+                    "UPDATE lifecycle_episodes SET closed_at = ?, closed_session = ?, close_reason = 'expired', "
+                    "updated_at = ? WHERE id = ?", (now, sd, now, open_id))
+                open_id = None
+            episode_id = open_id
+            if decision.action == "open":
+                cur = conn.execute(
+                    "INSERT INTO lifecycle_episodes (ticker, opened_at, opened_session, state, reference_price, "
+                    "last_qualifying_session, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (ticker, now, sd, decision.state_after, decision.reference_price,
+                     sd if decision.qualifying else None, now))
+                episode_id = cur.lastrowid
+            elif decision.action == "update" and episode_id is not None:
+                conn.execute("UPDATE lifecycle_episodes SET state = ?, updated_at = ? WHERE id = ?",
+                             (decision.state_after, now, episode_id))
+                if decision.qualifying:
+                    conn.execute("UPDATE lifecycle_episodes SET last_qualifying_session = ? WHERE id = ? "
+                                 "AND (last_qualifying_session IS NULL OR last_qualifying_session < ?)",
+                                 (sd, episode_id, sd))
+            elif decision.action == "close_invalidated" and episode_id is not None:
+                conn.execute(
+                    "UPDATE lifecycle_episodes SET state = 'INVALIDATED', closed_at = ?, closed_session = ?, "
+                    "close_reason = 'invalidated', updated_at = ? WHERE id = ?", (now, sd, now, episode_id))
+            if episode_id is not None and decision.action in ("open", "update"):
+                row = conn.execute(
+                    "SELECT qualifying, confirmed, scans, fingerprints FROM lifecycle_session_evidence "
+                    "WHERE episode_id = ? AND session_date = ?", (episode_id, sd)).fetchone()
+                fps = set(_json.loads(row[3])) if row else set()
+                if decision.fingerprint:
+                    fps.add(decision.fingerprint)
+                if row is None:
+                    conn.execute(
+                        "INSERT INTO lifecycle_session_evidence (episode_id, session_date, qualifying, confirmed, "
+                        "scans, fingerprints, first_seen_at, last_seen_at) VALUES (?, ?, ?, ?, 1, ?, ?, ?)",
+                        (episode_id, sd, int(decision.qualifying), int(decision.confirmed),
+                         _json.dumps(sorted(fps)), now, now))
+                else:
+                    conn.execute(
+                        "UPDATE lifecycle_session_evidence SET qualifying = ?, confirmed = ?, scans = ?, "
+                        "fingerprints = ?, last_seen_at = ? WHERE episode_id = ? AND session_date = ?",
+                        (int(bool(row[0]) or decision.qualifying), int(bool(row[1]) or decision.confirmed),
+                         row[2] + 1, _json.dumps(sorted(fps)), now, episode_id, sd))
+            if decision.write_scan_row:
+                conn.execute(
+                    "INSERT INTO lifecycle_scans (ticker, episode_id, scanned_at, session_date, qualifying, "
+                    "confirmed, state_before, state_after, rule, evidence_fingerprint) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (ticker, episode_id, now, sd, int(decision.qualifying), int(decision.confirmed),
+                     decision.state_before, decision.state_after, decision.rule, decision.fingerprint))
             conn.commit()
 
-    def qualifying_days_count(self, ticker: str) -> int:
+    def record_scan(self, ticker: str, any_gate_passed: bool, state: str,
+                     scan_date: Optional[str] = None, kind: str = ONDEMAND) -> None:
+        """Direct state write -- for seeding and tests only (the scan
+        pipeline uses context()/apply()). Records `state` for `ticker` on
+        trading session `scan_date` (default: the current evidence session)
+        inside the episode model: opens an episode if none is open, closes
+        it when `state` is INVALIDATED."""
+        from .core.lifecycle import LifecycleDecision
+        if state is None:
+            return
+        if scan_date is None:
+            from datetime import datetime, timezone
+            from .core.trading_calendar import evidence_session_date
+            scan_date = evidence_session_date(datetime.now(timezone.utc)).isoformat()
         with self._conn() as conn:
+            ep = self._latest_episode(conn, ticker)
+        is_open = ep is not None and ep[5] is None
+        before = ep[1] if ep is not None else None
+        if not is_open:
+            action = "open"
+        elif state == "INVALIDATED":
+            action = "close_invalidated"
+        else:
+            action = "update"
+        decision = LifecycleDecision(
+            state_before=before, state_after=state, rule="recorded_directly", action=action,
+            session_date=scan_date, qualifying=bool(any_gate_passed),
+            confirmed=bool(any_gate_passed) and state in ("CONFIRMED", "STABLE"))
+        self.apply(ticker, decision, kind=kind)
+        if action == "open" and state == "INVALIDATED":
+            self.apply(ticker, LifecycleDecision(
+                state_before=state, state_after=state, rule="recorded_directly", action="close_invalidated",
+                session_date=scan_date, write_scan_row=False), kind=kind)
+
+    def qualifying_days_count(self, ticker: str) -> int:
+        """Distinct NYSE trading sessions with qualifying independent
+        evidence in the CURRENT open episode (0 when none is open)."""
+        with self._conn() as conn:
+            ep = self._latest_episode(conn, ticker)
+            if ep is None or ep[5] is not None:
+                return 0
             row = conn.execute(
-                "SELECT COUNT(DISTINCT scan_date) FROM ticker_scan_log "
-                "WHERE ticker = ? AND any_gate_passed = 1",
-                (ticker,),
-            ).fetchone()
-            return row[0] or 0
+                "SELECT COUNT(*) FROM lifecycle_session_evidence WHERE episode_id = ? AND qualifying = 1",
+                (ep[0],)).fetchone()
+        return row[0] or 0
 
     def current_state(self, ticker: str) -> Optional[str]:
+        """State of the open episode; "INVALIDATED" when the latest episode
+        was invalidated (until a new episode opens); None when there is no
+        episode or the latest one expired."""
         with self._conn() as conn:
-            row = conn.execute(
-                "SELECT state FROM ticker_current_state WHERE ticker = ?", (ticker,)
-            ).fetchone()
-            return row[0] if row else None
+            ep = self._latest_episode(conn, ticker)
+        if ep is None:
+            return None
+        if ep[5] is None:
+            return ep[1]
+        return "INVALIDATED" if ep[7] == "invalidated" else None
 
     def history(self, ticker: str) -> list:
         with self._conn() as conn:
             rows = conn.execute(
-                "SELECT scan_date, any_gate_passed, state, created_at FROM ticker_scan_log "
-                "WHERE ticker = ? ORDER BY id ASC",
+                "SELECT session_date, qualifying, state_after, scanned_at, rule, episode_id, state_before "
+                "FROM lifecycle_scans WHERE ticker = ? ORDER BY id ASC",
                 (ticker,),
             ).fetchall()
-            return [
-                {"scan_date": r[0], "any_gate_passed": bool(r[1]), "state": r[2], "created_at": r[3]}
-                for r in rows
-            ]
+        return [
+            {"scan_date": r[0], "any_gate_passed": bool(r[1]), "state": r[2] if r[2] is not None else r[6],
+             "created_at": r[3], "transition_rule": r[4], "episode_id": r[5]}
+            for r in rows
+        ]
+
+    def episodes(self, ticker: str) -> list:
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT id, opened_at, opened_session, state, closed_at, closed_session, close_reason "
+                "FROM lifecycle_episodes WHERE ticker = ? ORDER BY id", (ticker,)).fetchall()
+        return [{"id": r[0], "opened_at": r[1], "opened_session": r[2], "state": r[3], "closed_at": r[4],
+                 "closed_session": r[5], "close_reason": r[6]} for r in rows]

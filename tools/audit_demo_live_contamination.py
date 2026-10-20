@@ -82,9 +82,10 @@ def audit(db_path: str, fixtures_dir: str) -> dict:
             "scan_log_rows_ambiguous": counts["ambiguous"],
             "current_state_rows_for_fixture_tickers": len(report["current_state"]),
             "recommendation": (
-                "New Demo activity is written to a separate database (TIP_DEMO_DB_PATH). These "
-                "legacy rows are left in place as audit history; deleting them is optional and must "
-                "be an explicit operator decision -- back up the DB first."),
+                "No action is required for correctness: Demo activity is written to a separate "
+                "database (TIP_DEMO_DB_PATH) and lifecycle decisions no longer read these legacy tables "
+                "(episode tables, migration 7). The rows are left in place as audit history; deleting "
+                "them is optional and must be an explicit operator decision -- back up the DB first."),
         }
         return report
     finally:

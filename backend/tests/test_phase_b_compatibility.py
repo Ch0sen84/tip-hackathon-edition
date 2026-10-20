@@ -278,6 +278,9 @@ def _strip_collection_timestamps(body):
     def scrub(entry):
         if isinstance(entry, dict):
             entry.pop("last_successful_collection_at", None)
+            for h in entry.get("history") or []:
+                if isinstance(h, dict):
+                    h.pop("created_at", None)
             for c in (entry.get("collection") or {}).values():
                 if isinstance(c, dict):
                     c.pop("retrieved_at", None)

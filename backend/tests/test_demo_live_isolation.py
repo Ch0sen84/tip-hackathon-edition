@@ -96,10 +96,17 @@ def test_contamination_audit_tool_is_read_only_and_attributes_fixture_rows(tmp_p
 
     from app.storage import QualifyingDaysStore
 
+    import sqlite3
+
     db = tmp_path / "legacy.db"
-    store = QualifyingDaysStore(str(db))
-    store.record_scan("FLUX", True, "CONFIRMED", scan_date="2026-10-15")  # demo-era row in a Live file
-    store.record_scan("SPY", True, "NEW", scan_date="2026-10-15")         # genuine Live ticker
+    QualifyingDaysStore(str(db))  # creates the legacy + current schema
+    conn = sqlite3.connect(db)
+    # pre-isolation rows as the old single-store code wrote them
+    conn.execute("INSERT INTO ticker_scan_log (ticker, scan_date, any_gate_passed, state) "
+                 "VALUES ('FLUX', '2026-10-15', 1, 'CONFIRMED'), ('SPY', '2026-10-15', 1, 'NEW')")
+    conn.execute("INSERT INTO ticker_current_state (ticker, state) VALUES ('FLUX', 'CONFIRMED'), ('SPY', 'NEW')")
+    conn.commit()
+    conn.close()
     before = hashlib.sha256(db.read_bytes()).hexdigest()
 
     root = Path(__file__).resolve().parents[2]

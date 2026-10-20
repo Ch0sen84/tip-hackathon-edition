@@ -399,6 +399,13 @@ def evaluate_gates(ticker: str, *, tier1_hit: bool = False, tier1_bootstrap: boo
     return gates
 
 
+def persistence_context_gate(qualifying_sessions: int) -> dict:
+    return _gate(qualifying_sessions >= 2, "context", "lifecycle_episode", {
+        "qualifying_sessions_in_episode": qualifying_sessions,
+        "note": "distinct trading sessions with qualifying evidence in the current episode; "
+                "not independent evidence"}, "persistence")
+
+
 def independent_gates_passed(gates: dict) -> list:
     return [g for g in INDEPENDENT_SIGNAL_GATES if gates.get(g, {}).get("passed")]
 
@@ -483,6 +490,11 @@ def classify_confidence(gates: dict, is_watchlist: bool = False, collection_comp
 
 # --- State machine ------------------------------------------------------------
 
+# NOTE (signal-integrity remediation): the running app's lifecycle decisions
+# are made by core/lifecycle.py (episode-scoped, NYSE-session-counted,
+# duplicate-evidence aware). determine_transition below is the single-scan
+# rule table kept for callers that evaluate one scan without episode
+# context (unit tests, pure-function callers).
 def determine_transition(current_state: Optional[str], gates: dict,
                           qualifying_days_count: int, price_move_pct: Optional[float],
                           direction_heuristic: Optional[str], collection_complete: bool = True) -> tuple:

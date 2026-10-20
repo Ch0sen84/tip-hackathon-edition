@@ -19,7 +19,10 @@ from __future__ import annotations
 
 from typing import Optional
 
-from . import flow_direction, signal_engine as se
+from dataclasses import asdict
+from datetime import date
+
+from . import flow_direction, lifecycle, signal_engine as se
 
 DARK_POOL_RATIO_HIT = 3.0  # matches tip_evidence.DP_STRONG_RATIO
 OPTIONS_FLOW_PREMIUM_MIN = 1_000_000
@@ -169,7 +172,11 @@ def evaluate_ticker_scan(ticker: str, flow_alerts: list, darkpool_trades: list,
                           percentile_gate_fn=None,
                           catalog_dark_pool_baseline: Optional[dict] = None,
                           collection_status: Optional[dict] = None,
-                          mode: str = "demo") -> dict:
+                          mode: str = "demo",
+                          lifecycle_context: Optional["lifecycle.LifecycleContext"] = None,
+                          session_date: Optional[date] = None,
+                          price_last: Optional[float] = None,
+                          evidence_fingerprint: Optional[str] = None) -> dict:
     """End-to-end: raw adapter data -> gates -> confidence -> state
     transition. Returns everything the API layer needs to render both
     Market Radar and Ticker Analysis for one ticker.
@@ -206,9 +213,23 @@ def evaluate_ticker_scan(ticker: str, flow_alerts: list, darkpool_trades: list,
     # Invalidation uses the inferred lean only when it comes from options
     # flow that actually qualified this scan.
     lifecycle_direction = direction if gates["options_flow_anomaly"]["passed"] else None
-    new_state, rule_id = se.determine_transition(
-        current_state, gates, qualifying_days_count, price_move_pct, lifecycle_direction,
-        collection_complete=collection_complete)
+    lifecycle_detail = None
+    if lifecycle_context is not None:
+        # Episode-scoped, trading-session-counted lifecycle (core/lifecycle.py).
+        decision = lifecycle.decide(
+            lifecycle_context, gates, session_date=session_date or date.today(),
+            collection_complete=collection_complete, lean=lifecycle_direction,
+            price_last=price_last, price_move_pct=price_move_pct,
+            fingerprint=evidence_fingerprint)
+        current_state = decision.state_before
+        new_state, rule_id = decision.state_after, decision.rule
+        qualifying_days_count = decision.qualifying_sessions
+        gates["persistence"] = se.persistence_context_gate(decision.qualifying_sessions)
+        lifecycle_detail = asdict(decision)
+    else:
+        new_state, rule_id = se.determine_transition(
+            current_state, gates, qualifying_days_count, price_move_pct, lifecycle_direction,
+            collection_complete=collection_complete)
     # Display list: real evidence that passed (independent + corroborating
     # price_confirmation). Zero-weight gates (synthetic percentile,
     # persistence) never appear here. Lifecycle bookkeeping uses
@@ -236,4 +257,5 @@ def evaluate_ticker_scan(ticker: str, flow_alerts: list, darkpool_trades: list,
         "price_move_pct": price_move_pct,
         "collection_complete": collection_complete,
         "collection_failed_sources": failed,
+        "lifecycle": lifecycle_detail,
     }

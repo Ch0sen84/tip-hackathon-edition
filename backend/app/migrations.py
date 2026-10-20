@@ -469,7 +469,72 @@ FROM price_bar_current pc
 JOIN price_bars pb ON pb.id = pc.price_bar_id;
 """,
     ),
+    # Signal-integrity remediation (audit B5/B6/B7/E7/E8): episode-scoped,
+    # trading-session-counted lifecycle. ADDITIVE ONLY -- the legacy
+    # ticker_scan_log / ticker_current_state tables are left exactly as
+    # they are (audit history, possibly containing pre-isolation Demo rows;
+    # see tools/audit_demo_live_contamination.py) and are no longer read
+    # or written by lifecycle decisions.
+    #   lifecycle_episodes        one row per qualification episode
+    #   lifecycle_session_evidence per (episode, NYSE trading session):
+    #                              whether a complete scan in that session
+    #                              had qualifying / confirmed evidence, plus
+    #                              the evidence fingerprints seen
+    #   lifecycle_scans            every complete scan's decision (audit log)
+    Migration(
+        version=7,
+        name="lifecycle_episodes",
+        sql="""
+CREATE TABLE IF NOT EXISTS lifecycle_episodes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ticker TEXT NOT NULL,
+    opened_at TEXT NOT NULL,
+    opened_session TEXT NOT NULL,
+    state TEXT NOT NULL,
+    reference_price REAL,
+    last_qualifying_session TEXT,
+    closed_at TEXT,
+    closed_session TEXT,
+    close_reason TEXT,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_lifecycle_episodes_ticker ON lifecycle_episodes(ticker, id DESC);
+
+CREATE TABLE IF NOT EXISTS lifecycle_session_evidence (
+    episode_id INTEGER NOT NULL REFERENCES lifecycle_episodes(id),
+    session_date TEXT NOT NULL,
+    qualifying INTEGER NOT NULL DEFAULT 0,
+    confirmed INTEGER NOT NULL DEFAULT 0,
+    scans INTEGER NOT NULL DEFAULT 0,
+    fingerprints TEXT NOT NULL DEFAULT '[]',
+    first_seen_at TEXT NOT NULL,
+    last_seen_at TEXT NOT NULL,
+    PRIMARY KEY (episode_id, session_date)
+);
+
+CREATE TABLE IF NOT EXISTS lifecycle_scans (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ticker TEXT NOT NULL,
+    episode_id INTEGER,
+    scanned_at TEXT NOT NULL,
+    session_date TEXT NOT NULL,
+    qualifying INTEGER NOT NULL,
+    confirmed INTEGER NOT NULL,
+    state_before TEXT,
+    state_after TEXT,
+    rule TEXT,
+    evidence_fingerprint TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_lifecycle_scans_ticker ON lifecycle_scans(ticker, id);
+""",
+    ),
 ]
+
+# Migrations at or above this version take a fresh pre-migration backup of an
+# existing, non-empty database file before they are applied (in addition to
+# the one-time first-run backup), so upgrading a real Live install is always
+# reversible by restoring that file.
+BACKUP_BEFORE_VERSION = 7
 
 
 def _utcnow_iso() -> str:
@@ -501,8 +566,12 @@ def backup_db_file(db_path: str) -> Optional[str]:
     src = Path(db_path)
     if not src.exists():
         return None
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
     backup_path = src.with_name(f"{src.name}.pre-migration-{stamp}.bak")
+    n = 1
+    while backup_path.exists():  # never overwrite an earlier backup
+        backup_path = src.with_name(f"{src.name}.pre-migration-{stamp}-{n}.bak")
+        n += 1
     src_conn = sqlite3.connect(str(src))
     try:
         dst_conn = sqlite3.connect(str(backup_path))
@@ -557,6 +626,10 @@ def run_migrations(conn: sqlite3.Connection, db_path: str) -> list:
     conn.commit()
 
     applied_already = _applied_versions(conn)
+    pending = [m for m in MIGRATIONS if m.version not in applied_already]
+    if (not first_run_ever and applied_already
+            and any(m.version >= BACKUP_BEFORE_VERSION for m in pending)):
+        backup_db_file(db_path)
     newly_applied: list = []
     for migration in sorted(MIGRATIONS, key=lambda m: m.version):
         if migration.version in applied_already:
