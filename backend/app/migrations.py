@@ -599,6 +599,7 @@ CREATE TABLE IF NOT EXISTS baseline_jobs (
     tickers_json TEXT NOT NULL,
     max_pages_per_ticker INTEGER NOT NULL,
     step_pages INTEGER NOT NULL,
+    target_sessions INTEGER NOT NULL DEFAULT 20,
     pages_used INTEGER NOT NULL DEFAULT 0,
     progress_json TEXT NOT NULL,
     last_error TEXT,

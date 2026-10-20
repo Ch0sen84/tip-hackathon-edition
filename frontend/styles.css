@@ -396,6 +396,8 @@ pre.raw { background: var(--panel3); padding: 12px; border-radius: 8px; overflow
   color: var(--accent, #22d3a8); text-decoration: none; font-weight: 600;
 }
 .how-body a:hover, .ai-disabled-note a:hover { text-decoration: underline; }
+.baseline-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.baseline-table th, .baseline-table td { text-align: left; padding: 4px 6px; border-bottom: 1px solid var(--border, #2a2f3a); vertical-align: top; }
 .settings-card h3 { margin: 0 0 10px; font-size: 14px; letter-spacing: .2px; }
 .settings-card input, .settings-card select { width: 100%; display: block; margin: 8px 0; }
 .settings-row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 6px; }
