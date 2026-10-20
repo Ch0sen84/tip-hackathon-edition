@@ -191,3 +191,15 @@ def test_upgrading_an_existing_db_to_the_lifecycle_migration_takes_a_backup(tmp_
     check = sqlite3.connect(db)
     assert check.execute("SELECT COUNT(*) FROM ticker_scan_log").fetchone()[0] == 1   # legacy rows untouched
     check.close()
+
+
+def test_fresh_empty_database_gets_no_pointless_backup(tmp_path):
+    import sqlite3
+
+    from app import migrations
+
+    db = tmp_path / "fresh.db"
+    conn = sqlite3.connect(db)
+    migrations.run_migrations(conn, str(db))
+    conn.close()
+    assert not list(tmp_path.glob("*.bak"))

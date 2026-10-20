@@ -621,6 +621,13 @@ def _schema_version_table_exists(conn: sqlite3.Connection) -> bool:
     return row is not None
 
 
+def _has_user_rows(conn: sqlite3.Connection) -> bool:
+    for (name,) in conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"):
+        if conn.execute(f"SELECT 1 FROM [{name}] LIMIT 1").fetchone():
+            return True
+    return False
+
+
 def _ensure_schema_version_table(conn: sqlite3.Connection) -> None:
     conn.execute(
         """
@@ -650,7 +657,9 @@ def run_migrations(conn: sqlite3.Connection, db_path: str) -> list:
     migration here only ever adds new tables/indexes.
     """
     first_run_ever = not _schema_version_table_exists(conn)
-    if first_run_ever:
+    if first_run_ever and _has_user_rows(conn):
+        # (a brand-new, empty database has nothing to protect -- backing it
+        # up only left meaningless .bak files on every fresh install)
         backup_db_file(db_path)
     _ensure_schema_version_table(conn)
     conn.commit()
