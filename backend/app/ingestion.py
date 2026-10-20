@@ -41,7 +41,7 @@ import hashlib
 import json
 import sqlite3
 from contextlib import contextmanager
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterable, Optional
 
@@ -50,6 +50,15 @@ from .migrations import run_migrations
 from .storage_guard import BACKGROUND, ONDEMAND, StorageGuard, default_mount_point
 
 ON_DEMAND = ONDEMAND  # re-exported under the name this module's own docs/tests use
+
+# Stamped on every signal_evaluations row this build writes. Rows written by the
+# pre-remediation engine carry "v1": their gates had no explicit status, failed
+# collections read as zero activity and synthetic gates carried weight. Those rows
+# stay in the table as an audit trail, but they are never served as a ticker's
+# *current* read (get_latest_signal_evaluation) or used to annotate new lifecycle
+# history (list_signal_evaluation_rules). Found by the Phase 3 Docker upgrade
+# rehearsal: after upgrading, Live showed 05c47ca's BUILDING/INVALIDATED verdicts.
+ENGINE_RULE_VERSION = "v2-signal-integrity"
 BACKGROUND_KIND = BACKGROUND
 
 
@@ -249,6 +258,21 @@ def _prune_superseded_price_bar_revisions(
         conn.executemany("DELETE FROM price_bars WHERE id = ?", [(i,) for i in stale_ids])
 
 
+def _num(v):
+    try:
+        return round(float(v), 6)
+    except (TypeError, ValueError):
+        return v
+
+
+def darkpool_print_key(ticker: str, trade: dict) -> str:
+    """Verified-unique, re-fetch-stable identity of one UW dark-pool print."""
+    return "dp:" + fingerprint(
+        str(ticker).upper(), trade.get("tracking_id"), trade.get("executed_at"),
+        _num(trade.get("price")), _num(trade.get("size")), _num(trade.get("volume")),
+    )
+
+
 def fingerprint(*parts: object) -> str:
     """Deterministic dedup key for an upstream record that carries no
     genuine unique id of its own. Order-sensitive and type-stable (every
@@ -372,13 +396,15 @@ class IngestionCatalog:
         inserted = 0
         with self._conn() as conn:
             for trade in darkpool_trades or []:
-                source_id = (
-                    trade.get("id") or trade.get("trade_id")
-                    or fingerprint(
-                        ticker, trade.get("executed_at"), trade.get("price"),
-                        trade.get("size"), trade.get("premium"),
-                    )
-                )
+                # Print identity (VERIFIED against live UW + the captured DB):
+                # UW `tracking_id` is NOT unique -- distinct prints share it
+                # (500-row live page: 432 distinct tracking_ids). The tuple
+                # (tracking_id, executed_at, price, size, volume) is unique on
+                # every page and stable across re-fetches; `volume` (day
+                # volume at the print) is what separates same-second,
+                # same-size prints that 05c47ca's value fingerprint collapsed
+                # (437 real prints lost in the captured DB).
+                source_id = trade.get("id") or trade.get("trade_id") or darkpool_print_key(ticker, trade)
                 event_time = trade.get("executed_at") or retrieved_at
                 cur = conn.execute(
                     "INSERT OR IGNORE INTO darkpool_observations "
@@ -702,7 +728,7 @@ class IngestionCatalog:
         return snapshot_id
 
     def catalog_signal_evaluation(
-        self, ticker: str, scan: dict, engine_rule_version: str = "v1",
+        self, ticker: str, scan: dict, engine_rule_version: str = ENGINE_RULE_VERSION,
         retrieved_at: Optional[str] = None, kind: str = ON_DEMAND,
         evidence_refs: Optional[list] = None,
     ) -> Optional[int]:
@@ -725,7 +751,9 @@ class IngestionCatalog:
                 "INSERT OR IGNORE INTO signal_evaluations "
                 "(source_id, ticker, event_time, retrieved_at, state, confidence, engine_rule_version, raw_json) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (source_id, ticker, event_time, retrieved_at, scan.get("state"),
+                # NO_STATE: an evaluation attempt whose collection failed for a
+                # ticker with no lifecycle record yet (state stays None in raw_json).
+                (source_id, ticker, event_time, retrieved_at, scan.get("state") or "NO_STATE",
                  scan.get("confidence"), engine_rule_version, json.dumps(scan, default=str)),
             )
             row = conn.execute(
@@ -974,8 +1002,8 @@ class IngestionCatalog:
         with self._conn() as conn:
             rows = conn.execute(
                 "SELECT event_time, state, raw_json FROM signal_evaluations "
-                "WHERE ticker = ? ORDER BY retrieved_at ASC, id ASC",
-                (ticker,),
+                "WHERE ticker = ? AND engine_rule_version = ? ORDER BY retrieved_at ASC, id ASC",
+                (ticker, ENGINE_RULE_VERSION),
             ).fetchall()
         result = []
         for event_time, state, raw_json in rows:
@@ -990,13 +1018,112 @@ class IngestionCatalog:
             })
         return result
 
-    def get_latest_signal_evaluation(self, ticker: str) -> Optional[dict]:
+    # --- session coverage (signal-integrity remediation) -------------------
+
+    def get_session_coverage(self, dataset: str, ticker: str, session_date: str) -> Optional[dict]:
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT status, covered_from_utc, covered_through_utc, pages_walked, rows_seen, last_error, "
+                "retrieved_at FROM session_coverage WHERE dataset = ? AND ticker = ? AND session_date = ?",
+                (dataset, ticker, session_date)).fetchone()
+        if not row:
+            return None
+        return {"dataset": dataset, "ticker": ticker, "session_date": session_date, "status": row[0],
+                "covered_from_utc": row[1], "covered_through_utc": row[2], "pages_walked": row[3],
+                "rows_seen": row[4], "last_error": row[5], "retrieved_at": row[6]}
+
+    def upsert_session_coverage(self, dataset: str, ticker: str, session_date: str, status: str,
+                                covered_from_utc: Optional[str], covered_through_utc: Optional[str],
+                                pages_walked: int, rows_seen: int, last_error: Optional[str] = None,
+                                kind: str = ON_DEMAND) -> None:
+        if status not in ("complete", "partial", "unknown", "unavailable"):
+            raise ValueError(f"invalid session coverage status: {status!r}")
+        self._check_guard(kind)
+        with self._conn() as conn:
+            conn.execute(
+                "INSERT INTO session_coverage (dataset, ticker, session_date, status, covered_from_utc, "
+                "covered_through_utc, pages_walked, rows_seen, last_error, retrieved_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(dataset, ticker, session_date) DO UPDATE SET status=excluded.status, "
+                "covered_from_utc=excluded.covered_from_utc, covered_through_utc=excluded.covered_through_utc, "
+                "pages_walked=session_coverage.pages_walked + excluded.pages_walked, "
+                "rows_seen=excluded.rows_seen, last_error=excluded.last_error, retrieved_at=excluded.retrieved_at",
+                (dataset, ticker, session_date, status, covered_from_utc, covered_through_utc,
+                 pages_walked, rows_seen, last_error, utcnow_iso()))
+            conn.commit()
+
+    def list_session_coverage(self, dataset: str, ticker: str) -> list:
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT session_date, status, covered_from_utc, covered_through_utc, pages_walked, rows_seen, "
+                "last_error, retrieved_at FROM session_coverage WHERE dataset = ? AND ticker = ? "
+                "ORDER BY session_date", (dataset, ticker)).fetchall()
+        return [{"dataset": dataset, "ticker": ticker, "session_date": r[0], "status": r[1],
+                 "covered_from_utc": r[2], "covered_through_utc": r[3], "pages_walked": r[4],
+                 "rows_seen": r[5], "last_error": r[6], "retrieved_at": r[7]} for r in rows]
+
+    def observations_between(self, dataset: str, ticker: str, start_utc: datetime, end_utc: datetime) -> list:
+        """Deduplicated observation dicts for `ticker` with start <= event_time
+        <= end. Dark-pool rows are deduplicated by the verified print key
+        (darkpool_print_key -- also covers legacy rows stored under older
+        source_id schemes) and CANCELED prints are excluded -- a canceled
+        print is not market activity."""
+        table = {"darkpool": "darkpool_observations", "options_flow": "options_flow_observations"}[dataset]
+        lo = (start_utc - timedelta(days=1)).date().isoformat()
+        hi = (end_utc + timedelta(days=1)).date().isoformat()
+        with self._conn() as conn:
+            rows = conn.execute(
+                f"SELECT event_time, raw_json FROM {table} WHERE ticker = ? AND event_time >= ? AND event_time < ? "
+                f"ORDER BY event_time", (ticker, lo, hi)).fetchall()
+        out, seen = [], set()
+        for event_time, raw_json in rows:
+            ts = _parse_iso_dt(str(event_time).replace("Z", "+00:00"))
+            if ts is None or ts < start_utc or ts > end_utc:
+                continue
+            try:
+                data = json.loads(raw_json) if raw_json else {}
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if dataset == "darkpool":
+                if data.get("canceled") in (True, "true", "True", 1):
+                    continue
+                key = darkpool_print_key(ticker, data)
+            else:
+                key = ("i", data.get("id")) if data.get("id") is not None else (
+                    "f", data.get("created_at"), _num(data.get("total_premium")), data.get("type"))
+            if key in seen:
+                continue
+            seen.add(key)
+            data["_event_time_utc"] = ts.isoformat()
+            out.append(data)
+        return out
+
+    def get_last_successful_collection_at(self, ticker: str) -> Optional[str]:
+        """collected_at of the newest evaluation whose data collection was
+        explicitly complete. Evaluations recorded before collection status
+        existed carry no such flag and are NOT counted (their completeness
+        is unknown -- the pre-remediation adapter turned failures into
+        empty lists)."""
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT MAX(json_extract(raw_json, '$.collected_at')) FROM signal_evaluations "
+                "WHERE ticker = ? AND json_extract(raw_json, '$.collection_complete') = 1",
+                (ticker,),
+            ).fetchone()
+        return row[0] if row and row[0] else None
+
+    def get_latest_signal_evaluation(self, ticker: str,
+                                     engine_rule_version: Optional[str] = ENGINE_RULE_VERSION) -> Optional[dict]:
+        """Latest evaluation written by `engine_rule_version` (default: this build's
+        engine; None = any version, for audit reads only)."""
+        version_sql, params = ("", (ticker,)) if engine_rule_version is None else (
+            " AND engine_rule_version = ?", (ticker, engine_rule_version))
         with self._conn() as conn:
             row = conn.execute(
                 "SELECT id, ticker, event_time, retrieved_at, state, confidence, "
                 "engine_rule_version, raw_json FROM signal_evaluations "
-                "WHERE ticker = ? ORDER BY retrieved_at DESC, id DESC LIMIT 1",
-                (ticker,),
+                "WHERE ticker = ?" + version_sql + " ORDER BY retrieved_at DESC, id DESC LIMIT 1",
+                params,
             ).fetchone()
         if not row:
             return None
@@ -1005,6 +1132,16 @@ class IngestionCatalog:
             "state": row[4], "confidence": row[5], "engine_rule_version": row[6],
             "raw_json": json.loads(row[7]) if row[7] else None,
         }
+
+    def count_superseded_signal_evaluations(self, ticker: str) -> int:
+        """Evaluations of `ticker` written by an earlier engine version (kept as history,
+        never served as a current read)."""
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) FROM signal_evaluations WHERE ticker = ? AND engine_rule_version != ?",
+                (ticker, ENGINE_RULE_VERSION),
+            ).fetchone()
+        return int(row[0]) if row else 0
 
     # --- freshness decision (used by backfill/pagination jobs ONLY --
     # never by the on-demand Radar/Ticker-Analysis/Discovery routes,

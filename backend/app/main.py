@@ -17,7 +17,7 @@ import logging
 import os
 import sys
 import threading
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
 from pathlib import Path
@@ -41,7 +41,7 @@ from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from .adapters.base import UWDataAdapter
+from .adapters.base import UWDataAdapter, collection_result, collection_summary
 from .adapters.live_uw_adapter import DISCOVERY_LIMIT_CAP, ERROR, UNAUTHORIZED, UNAVAILABLE, LiveUWAdapter, UWRestClient
 from .adapters.synthetic_adapter import SyntheticDataAdapter
 from .ai import orchestrator as ai_orchestrator
@@ -61,7 +61,8 @@ from .auth import (
     is_loopback,
 )
 from .config import settings
-from .core import dark_pool_baseline, discovery, scan_service, tip_evidence
+from .core import dark_pool_baseline, discovery, lifecycle, scan_service, session_baseline, tip_evidence, trading_calendar
+from . import session_collection
 from .core import local_mode as local_mode_module
 from .core import scheduler_freshness, single_process_guard, uw_concurrency
 from .core.scheduler_store import InvalidModeError, MODES as SCHEDULER_MODES, SchedulerStore, new_worker_id
@@ -180,6 +181,7 @@ _adapter_sig: Optional[tuple] = None
 _last_live_client = None
 _last_live_client_key_sig: Optional[tuple] = None
 _store: Optional[QualifyingDaysStore] = None
+_demo_store: Optional[QualifyingDaysStore] = None  # Demo-only lifecycle DB (settings.demo_db_path)
 _catalog: Optional[IngestionCatalog] = None
 _settings_store = SettingsStore(os.environ.get("TIP_SETTINGS_PATH", "./data/settings.json"))
 _last_uw_test_result: Optional[str] = None  # in-memory only, informational; never persisted
@@ -406,22 +408,50 @@ def get_adapter() -> UWDataAdapter:
     return _adapter
 
 
-def get_store() -> QualifyingDaysStore:
-    global _store
-    if _store is None:
-        _store = QualifyingDaysStore(settings.db_path)
-        # Backfill the one demo scenario (PRSX) that needs genuinely
-        # distinct historical scan_date rows to show a real multi-day
-        # BUILDING -> CONFIRMED trajectory -- see seed_demo_history.py's
-        # module docstring. Idempotent, non-fatal (demo-only convenience;
-        # never block app startup on it), and runs on real fixture data
-        # through the real scan_service, not a hardcoded state.
+def _mode_of(adapter: UWDataAdapter) -> str:
+    """The data domain an adapter belongs to. Only a real LiveUWAdapter is
+    "live"; everything else (SyntheticDataAdapter) is "demo"."""
+    return "live" if isinstance(adapter, LiveUWAdapter) else "demo"
+
+
+class StorageIsolationError(RuntimeError):
+    pass
+
+
+def get_store(mode: Optional[str] = None) -> QualifyingDaysStore:
+    """Lifecycle store for one data domain. Demo/Live isolation is
+    storage-level: Live uses settings.db_path, Demo uses
+    settings.demo_db_path (a separate SQLite file), so no Demo scan, seed
+    or page view can ever read or write Live qualification state/history
+    and vice versa. `mode` defaults to the currently selected app mode;
+    callers that already hold an adapter pass `_mode_of(adapter)` so the
+    store always matches the data source actually being scanned."""
+    global _store, _demo_store
+    if mode is None:
+        mode = "live" if _settings_store.get_mode() == "live" else "demo"
+    if mode not in ("live", "demo"):
+        raise ValueError(f"unknown data domain {mode!r}")
+    if (settings.db_path != ":memory:" and
+            os.path.abspath(settings.db_path) == os.path.abspath(settings.demo_db_path)):
+        raise StorageIsolationError(
+            "TIP_DEMO_DB_PATH must not be the same file as TIP_DB_PATH -- Demo and Live "
+            "lifecycle data are required to live in separate databases."
+        )
+    if mode == "live":
+        if _store is None:
+            _store = QualifyingDaysStore(settings.db_path)
+        return _store
+    if _demo_store is None:
+        _demo_store = QualifyingDaysStore(settings.demo_db_path)
+        # Backfill the demo scenarios that need genuinely distinct
+        # historical scan_date rows -- see seed_demo_history.py. DEMO STORE
+        # ONLY: never written into the Live database.
         try:
             from .seed_demo_history import seed_persistence_progression
-            seed_persistence_progression(_store, settings.fixtures_dir)
+            seed_persistence_progression(_demo_store, settings.fixtures_dir)
         except Exception:
             pass
-    return _store
+    return _demo_store
 
 
 def get_catalog() -> IngestionCatalog:
@@ -446,7 +476,7 @@ def _scheduler_run_ticker_scan(adapter: UWDataAdapter, ticker: str) -> dict:
     (see storage_guard.py) instead of the on-demand one. Intentionally
     NOT a new evaluation pipeline -- see app/scheduler.py's module
     docstring and Chad's item 6."""
-    return _run_scan(adapter, get_store(), ticker, kind="background")
+    return _run_scan(adapter, get_store(_mode_of(adapter)), ticker, kind="background")
 
 
 _scheduler_runner: Optional[scheduler_module.SchedulerRunner] = None
@@ -462,6 +492,7 @@ def get_scheduler_runner() -> scheduler_module.SchedulerRunner:
             get_adapter=get_adapter,
             get_catalog=get_catalog,
             run_ticker_scan=_scheduler_run_ticker_scan,
+            run_baseline_backfill=_scheduler_baseline_backfill,
         )
     return _scheduler_runner
 
@@ -579,32 +610,129 @@ def _catalog_scan_best_effort(adapter: UWDataAdapter, ticker: str, flow_alerts: 
         )
 
 
-def _catalog_dark_pool_baseline_best_effort(adapter: UWDataAdapter, ticker: str) -> Optional[dict]:
-    """Phase C: computes a real historical dark-pool baseline PURELY from
-    whatever Phase B has already cataloged for `ticker` (never a live UW
-    call, never a backfill) and shapes it into the exact keyword-argument
-    form signal_engine.evaluate_gates already expects for its
-    dark_pool_anomaly gate -- see scan_service.build_gate_inputs'
-    `catalog_dark_pool_baseline` parameter and
-    dark_pool_baseline.BaselineResult.as_gate_inputs().
+RAW_ROW_CAP = 500
+BASELINE_DATASETS = ("darkpool", "options_flow")
+BACKFILL_MAX_PAGES_PER_REQUEST = 200
+BACKFILL_TICKERS_PER_CYCLE = int(os.environ.get("TIP_BASELINE_BACKFILL_TICKERS_PER_CYCLE", "2"))
+_backfill_rotation = {"i": 0}
 
-    Only meaningful for a LiveUWAdapter scan (the synthetic/demo adapter's
-    data is never cataloged, same precondition `_catalog_scan_best_effort`
-    already uses). Returns None -- never raises -- on ANY failure
-    (including an empty/nonexistent catalog for a ticker never scanned
-    before): this must never be allowed to block or alter the scan it
-    feeds into, exactly like `_catalog_scan_best_effort` below."""
-    if not isinstance(adapter, LiveUWAdapter):
+
+def _replay_clock() -> Optional[datetime]:
+    """TIP_REPLAY_CLOCK pins the scan pipeline's clock for offline replay of
+    RECORDED data (tools/uw_replay_server.py). Honored ONLY when the UW base
+    URL is a loopback address, so it can never be combined with the real
+    Unusual Whales API."""
+    raw = os.environ.get("TIP_REPLAY_CLOCK")
+    if not raw:
+        return None
+    from urllib.parse import urlparse
+    host = (urlparse(settings.uw_base_url).hostname or "").lower()
+    if host not in ("127.0.0.1", "localhost", "::1"):
+        logging.getLogger(__name__).warning("TIP_REPLAY_CLOCK ignored: UW_BASE_URL is not loopback")
         return None
     try:
-        catalog = get_catalog()
-        result = dark_pool_baseline.compute_baseline_for_ticker(catalog, ticker)
-        return result.as_gate_inputs()
-    except Exception:  # noqa: BLE001 -- best-effort, same invariant as _catalog_scan_best_effort
-        logging.getLogger(__name__).info(
-            "Phase C dark-pool baseline computation skipped for %s (non-fatal, falls back to bootstrap)", ticker
-        )
+        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
         return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+def _utcnow() -> datetime:
+    """The scan pipeline's clock (one indirection so tests/replay can pin it)."""
+    return _replay_clock() or datetime.now(timezone.utc)
+
+
+def _baseline_report(ticker: str, session_date, as_of_utc) -> dict:
+    catalog = get_catalog()
+    out = {}
+    for dataset in BASELINE_DATASETS:
+        coverage = catalog.list_session_coverage(dataset, ticker)
+        b = session_baseline.compute(catalog, dataset, ticker, session_date, as_of_utc=as_of_utc)
+        out[dataset] = {
+            "baseline": b.as_metrics(),
+            "complete_prior_sessions": sum(1 for c in coverage if c["status"] == "complete"
+                                           and c["session_date"] < session_date.isoformat()),
+            "coverage": coverage[-40:],
+        }
+    return out
+
+
+def _run_baseline_backfill(adapter, ticker: str, max_pages: int, kind: str) -> dict:
+    now = _utcnow()
+    session_date = trading_calendar.evidence_session_date(now)
+    per_dataset = max(1, max_pages // len(BASELINE_DATASETS))
+    return {dataset: session_collection.backfill_baseline(
+                adapter.client, get_catalog(), dataset, ticker, session_date, max_pages=per_dataset,
+                kind=kind, now_utc=now)
+            for dataset in BASELINE_DATASETS}
+
+
+def _scheduler_baseline_backfill(adapter) -> Optional[dict]:
+    """One bounded slice of baseline backfill per scheduler cycle, rotating
+    through the Live watchlist (Live adapters only)."""
+    if not isinstance(adapter, LiveUWAdapter):
+        return None
+    tickers = adapter.get_universe()
+    if not tickers:
+        return None
+    picked = []
+    for _ in range(min(BACKFILL_TICKERS_PER_CYCLE, len(tickers))):
+        picked.append(tickers[_backfill_rotation["i"] % len(tickers)])
+        _backfill_rotation["i"] += 1
+    return {t: _run_baseline_backfill(adapter, t, session_collection.DEFAULT_BACKFILL_PAGES, "background")
+            for t in picked}
+
+
+def _collect_session_dataset(adapter: LiveUWAdapter, dataset: str, ticker: str, session_date, now_utc,
+                             kind: str) -> dict:
+    """Live collection of one dataset for the evidence session through the
+    session-coverage collector (app/session_collection.py): extends VERIFIED
+    coverage within a small page budget, catalogs every page, and returns the
+    session-to-date rows (deduplicated, canceled prints excluded) in the same
+    shape as adapter.collect_*. A provider failure keeps its explicit status.
+    If the catalog itself is unusable, falls back to a single direct page
+    (coverage then stays unverified, so the baseline gate is insufficient)."""
+    try:
+        update = session_collection.update_session_coverage(
+            adapter.client, get_catalog(), dataset, ticker, session_date, now_utc=now_utc, kind=kind)
+        cov = update.coverage or {}
+        # Every cataloged observation dated on the session's NY calendar day
+        # (pre-market .. after-hours), up to now.
+        day_start = datetime.combine(session_date, datetime.min.time(), tzinfo=trading_calendar.NY_TZ)
+        day_end = min(day_start + timedelta(days=1), now_utc)
+        rows = get_catalog().observations_between(dataset, ticker, day_start.astimezone(timezone.utc), day_end)
+        result = collection_result(update.collection_status, rows=rows, detail=update.detail,
+                                   source="unusual_whales_session_collector")
+        result["coverage"] = cov
+        result["pages"] = update.pages
+        return result
+    except Exception:  # noqa: BLE001 -- catalog unusable: one plain page, coverage unverified
+        logging.getLogger(__name__).info("session collector unavailable for %s %s; single-page fallback", dataset, ticker)
+        result = (adapter.collect_darkpool_trades(ticker) if dataset == "darkpool"
+                  else adapter.collect_flow_alerts(ticker))
+        result["coverage"] = {"status": "unknown", "last_error": "session collector unavailable"}
+        result["pages"] = 1
+        return result
+
+
+def _options_baseline(ticker: str, session_date, as_of_utc) -> dict:
+    try:
+        b = session_baseline.compute(get_catalog(), "options_flow", ticker, session_date, as_of_utc=as_of_utc)
+        return {"status": b.status, "metrics": b.as_metrics()}
+    except Exception:  # noqa: BLE001 -- unavailable baseline => insufficient
+        logging.getLogger(__name__).info("options baseline unavailable for %s", ticker)
+        return {"status": "insufficient", "metrics": {"reason": "baseline computation unavailable"}}
+
+
+def _session_baseline_gate_inputs(dataset: str, ticker: str, session_date, as_of_utc) -> Optional[dict]:
+    try:
+        return session_baseline.compute(get_catalog(), dataset, ticker, session_date,
+                                        as_of_utc=as_of_utc).as_dark_pool_gate_inputs()
+    except Exception:  # noqa: BLE001 -- baseline unavailable => insufficient, never a fabricated value
+        logging.getLogger(__name__).info("session baseline unavailable for %s %s", dataset, ticker)
+        return {"tier1_hit": False, "tier1_bootstrap": True, "tier1_ratio": None, "tier1_z": None,
+                "total_premium": 0.0, "baseline": {"status": "insufficient",
+                                                     "reason": "baseline computation unavailable"}}
 
 
 def _catalog_discovery_best_effort(adapter: UWDataAdapter, filters: dict, result: dict, kind: str = "on_demand") -> None:
@@ -658,12 +786,37 @@ def _run_scan(adapter: UWDataAdapter, store: QualifyingDaysStore, ticker: str, k
     (see app.main._scheduler_run_ticker_scan) rather than get the
     on-demand-route-shaped HTTPException(507) below, which only makes
     sense for an interactive HTTP request."""
-    flow_alerts = adapter.get_flow_alerts(ticker)
-    darkpool_trades = adapter.get_darkpool_trades(ticker)
-    stock_state = adapter.get_stock_state(ticker)
-    current_state = store.current_state(ticker)
-    qualifying_days = store.qualifying_days_count(ticker)
-    catalog_dark_pool_baseline = _catalog_dark_pool_baseline_best_effort(adapter, ticker)
+    # Collection status (signal-integrity remediation, audit B4/E9): each
+    # source reports ok / error / rate_limited / unauthorized /
+    # unavailable_on_tier / malformed / circuit_open. Only "ok" rows are a
+    # real answer; a failure is carried through as "unavailable", never as
+    # an empty observation, and never moves the lifecycle.
+    scanned_at = _utcnow()
+    session_date = trading_calendar.evidence_session_date(scanned_at)
+    is_live = isinstance(adapter, LiveUWAdapter)
+    collections = {
+        "options_flow": (_collect_session_dataset(adapter, "options_flow", ticker, session_date, scanned_at, kind)
+                         if is_live else adapter.collect_flow_alerts(ticker)),
+        "darkpool": (_collect_session_dataset(adapter, "darkpool", ticker, session_date, scanned_at, kind)
+                     if is_live else adapter.collect_darkpool_trades(ticker)),
+        "stock_state": adapter.collect_stock_state(ticker),
+    }
+    flow_alerts = collections["options_flow"]["rows"]
+    darkpool_trades = collections["darkpool"]["rows"]
+    if collections["stock_state"]["ok"]:
+        stock_state = collections["stock_state"]["record"]
+    else:
+        stock_state = {"unavailable": True, "reason": collection_summary(collections["stock_state"])}
+    collection_status = {name: c["status"] for name, c in collections.items()}
+    # Episode-scoped, NYSE-session-attributed lifecycle (core/lifecycle.py).
+    lifecycle_ctx = store.context(ticker, session_date.isoformat())
+    current_state = lifecycle_ctx.state if lifecycle_ctx.state is not None else lifecycle_ctx.display_state
+    qualifying_days = len(lifecycle_ctx.qualifying_sessions)
+    # Computed AFTER this scan's prints were cataloged by the collector, from
+    # verified session coverage only (core/session_baseline.py).
+    catalog_dark_pool_baseline = (_session_baseline_gate_inputs("darkpool", ticker, session_date, scanned_at)
+                                  if is_live else None)
+    options_flow_baseline = (_options_baseline(ticker, session_date, scanned_at) if is_live else None)
     result = scan_service.evaluate_ticker_scan(
         ticker=ticker,
         flow_alerts=flow_alerts,
@@ -673,10 +826,26 @@ def _run_scan(adapter: UWDataAdapter, store: QualifyingDaysStore, ticker: str, k
         price_move_pct=_price_move_pct(stock_state),
         catalyst_identified=adapter.get_catalyst_identified(ticker),
         catalog_dark_pool_baseline=catalog_dark_pool_baseline,
+        options_flow_baseline=options_flow_baseline,
+        collection_status=collection_status,
+        mode=_mode_of(adapter),
+        lifecycle_context=lifecycle_ctx,
+        session_date=session_date,
+        price_last=(stock_state or {}).get("last_price") if not (stock_state or {}).get("unavailable") else None,
+        # Demo fixtures are static: no evidence identity to compare.
+        evidence_fingerprint=(lifecycle.evidence_fingerprint(flow_alerts, darkpool_trades)
+                              if _mode_of(adapter) == "live" else None),
     )
-    any_gate_passed = len(result["gates_passed"]) > 0
+    result["collection"] = {name: collection_summary(c) for name, c in collections.items()}
+    # When this scan's data was collected (newest per-source retrieval).
+    result["collected_at"] = max(c["retrieved_at"] for c in collections.values())
+    any_gate_passed = len(result["independent_gates_passed"]) > 0
     try:
-        store.record_scan(ticker, any_gate_passed, result["state"], kind=kind)
+        # An incomplete collection is recorded as an attempt in the catalog
+        # (below) but never written into lifecycle history: it is neither a
+        # qualifying nor a non-qualifying observation (apply() skips it).
+        store.apply(ticker, lifecycle.LifecycleDecision(**result["lifecycle"]), kind=kind,
+                    scanned_at=scanned_at.isoformat())
     except StorageGuardPausedError as e:
         if kind != "on_demand":
             raise  # background caller: let it propagate for its own handling, never shaped as an HTTP 507
@@ -687,7 +856,12 @@ def _run_scan(adapter: UWDataAdapter, store: QualifyingDaysStore, ticker: str, k
         # qualifying-days history until free space recovers.
         raise HTTPException(status_code=507, detail=str(e)) from e
     result["stock_state"] = stock_state
-    result["raw"] = {"flow_alerts": flow_alerts, "darkpool_trades": darkpool_trades}
+    result["evidence_session"] = session_date.isoformat()
+    # Session-to-date rows can be large: the response/catalog keep the newest
+    # RAW_ROW_CAP of each, and disclose the true counts.
+    result["raw"] = {"flow_alerts": flow_alerts[-RAW_ROW_CAP:], "darkpool_trades": darkpool_trades[-RAW_ROW_CAP:]}
+    result["raw_counts"] = {"flow_alerts": len(flow_alerts), "darkpool_trades": len(darkpool_trades),
+                            "cap": RAW_ROW_CAP}
     # Phase B: added persistence layer, never changes `result` above --
     # this call happens AFTER result is fully built and must never be
     # allowed to alter it (see _catalog_scan_best_effort's docstring).
@@ -733,7 +907,9 @@ def _to_evidence_item(scan: dict) -> dict:
 @app.get("/api/health")
 def health():
     adapter = get_adapter()
-    return {"ok": True, "mode": _settings_store.get_mode(), "adapter": adapter.health()}
+    rc = _replay_clock()
+    return {"ok": True, "mode": _settings_store.get_mode(), "adapter": adapter.health(),
+            "replay_clock": rc.isoformat() if rc else None}
 
 
 @app.get("/api/mode")
@@ -870,6 +1046,9 @@ def get_settings():
             "last_test_result": _last_uw_test_result,
             "verified": _settings_store.is_key_verified(uw_key),
             "env_fallback_present": env_key_present,
+            # Non-secret: lets test harnesses refuse to run a real-network
+            # "Test Connection" step against the public UW host by accident.
+            "base_url_is_default": settings.uw_base_url.rstrip("/") == "https://api.unusualwhales.com",
             "env_fallback_disclosure": (
                 "UI-saved key removed. A .env-configured key is still present and will be used."
                 if env_key_present and not ui_key_present
@@ -1383,6 +1562,25 @@ def _cached_scan_for_ticker(catalog: IngestionCatalog, store: QualifyingDaysStor
     return latest["raw_json"], freshness
 
 
+def _last_successful_collection_at(catalog: IngestionCatalog, ticker: str) -> Optional[str]:
+    try:
+        return catalog.get_last_successful_collection_at(ticker)
+    except Exception:  # noqa: BLE001 -- disclosure only, never fail the route
+        return None
+
+
+def _scan_last_successful_collection_at(scan: dict, catalog: IngestionCatalog, ticker: str,
+                                        is_live: bool, just_fetched: bool) -> Optional[str]:
+    """When this response's own scan collected everything successfully,
+    that scan IS the last successful collection (read from the scan, never
+    from a best-effort catalog write). Otherwise ask the catalog."""
+    if scan.get("collection_complete") and scan.get("collected_at") and (just_fetched or not is_live):
+        return scan["collected_at"]
+    if not is_live:
+        return None
+    return _last_successful_collection_at(catalog, ticker)
+
+
 def _not_evaluated_evidence_item(ticker: str, state: Optional[str] = None) -> dict:
     """Placeholder evidence item for a watchlist ticker that has never
     been evaluated yet (no cataloged signal_evaluations row at all) --
@@ -1456,7 +1654,7 @@ def _radar_impl(refresh: bool):
     ordinary nav) never fabricate a fresh-looking scan time for data that
     was not actually just re-fetched."""
     adapter = get_adapter()
-    store = get_store()
+    store = get_store(_mode_of(adapter))
     catalog = get_catalog()
     universe = adapter.get_universe()
     if not universe:
@@ -1499,10 +1697,13 @@ def _radar_impl(refresh: bool):
     for ticker in universe:
         if live_fetch:
             scan = _run_scan(adapter, store, ticker)
-            # Freshness after a real fetch is always "current" by definition
-            # (it was just retrieved) -- avoid a second catalog round-trip.
+            # A real fetch is "current" ONLY if its data collection actually
+            # succeeded; a failed collection is reported as such.
             freshness_by_ticker[ticker] = scheduler_freshness.FreshnessResult(
-                ticker=ticker, state=scheduler_freshness.CURRENT, evaluation=None, age_s=0.0,
+                ticker=ticker,
+                state=(scheduler_freshness.CURRENT if scan.get("collection_complete", True)
+                       else scheduler_freshness.COLLECTION_FAILED),
+                evaluation=None, age_s=0.0,
                 window_s=scheduler_freshness.freshness_window_s(),
             )
         else:
@@ -1662,6 +1863,9 @@ def _radar_impl(refresh: bool):
         else:
             entry["eval_freshness"] = "current"
             entry["last_evaluated_at"] = None
+        entry["collection"] = s.get("collection")
+        entry["last_successful_collection_at"] = _scan_last_successful_collection_at(
+            s, catalog, entry["ticker"], is_live, just_fetched=live_fetch)
         return entry
 
     # W2-a fix: only a REAL live fetch may write a new last_scan_at/
@@ -1804,6 +2008,13 @@ def _validate_ticker_for_analysis(adapter: UWDataAdapter, ticker: str) -> str:
         raise HTTPException(status_code=400, detail=str(e))
 
 
+def _superseded_evaluation_count(ticker: str) -> int:
+    try:
+        return get_catalog().count_superseded_signal_evaluations(ticker)
+    except Exception:  # noqa: BLE001 -- disclosure only, never fail the route
+        return 0
+
+
 def _not_evaluated_ticker_analysis_response(ticker: str, store: QualifyingDaysStore) -> dict:
     """W2-b honest cache-miss response: a watchlist-style placeholder for
     Ticker Analysis, never fabricating gates/evidence/confidence for a
@@ -1834,6 +2045,7 @@ def _not_evaluated_ticker_analysis_response(ticker: str, store: QualifyingDaysSt
     that real state is still shown honestly, unchanged -- this is not a
     never-evaluated case and must not be mislabeled as one."""
     real_state = store.current_state(ticker)
+    superseded = _superseded_evaluation_count(ticker)
     return {
         "ticker": ticker,
         "state": real_state,
@@ -1847,8 +2059,13 @@ def _not_evaluated_ticker_analysis_response(ticker: str, store: QualifyingDaysSt
         "qualifying_days_count": store.qualifying_days_count(ticker),
         "gates": {},
         "headline": "Not yet evaluated",
-        "current_read": "This ticker has not been scanned yet in this session. Use the explicit "
-                         "Refresh action to run a real evaluation.",
+        "current_read": ("Earlier evaluations of this ticker were made by a previous version of the "
+                         "signal engine; they are kept only as history and are not shown as a current "
+                         "read. Use the explicit Refresh action to run a real evaluation."
+                         if superseded else
+                         "This ticker has not been scanned yet in this session. Use the explicit "
+                         "Refresh action to run a real evaluation."),
+        "superseded_evaluations": superseded,
         "evidence": [],
         "stock_state": None,
         "history": store.history(ticker),
@@ -1881,7 +2098,7 @@ def _ticker_analysis_impl(ticker: str, refresh: bool) -> dict:
     isn't live at all (Demo Mode keeps its existing always-fresh
     behavior, same rationale as _radar_impl)."""
     adapter = get_adapter()
-    store = get_store()
+    store = get_store(_mode_of(adapter))
     catalog = get_catalog()
     ticker = _validate_ticker_for_analysis(adapter, ticker)
 
@@ -1907,7 +2124,7 @@ def _ticker_analysis_impl(ticker: str, refresh: bool) -> dict:
         # best-effort catalog write underneath it happens to succeed.
         fetched_at = _ingestion_utcnow_iso()
         scan = _run_scan(adapter, store, ticker)
-        eval_freshness = "current"
+        eval_freshness = "current" if scan.get("collection_complete", True) else "collection_failed"
         last_evaluated_at = fetched_at
         served_from_cache = False
     else:
@@ -1989,7 +2206,55 @@ def _ticker_analysis_impl(ticker: str, refresh: bool) -> dict:
         "eval_freshness": eval_freshness,
         "last_evaluated_at": last_evaluated_at,
         "served_from_cache": served_from_cache,
+        # Per-source collection status of the evaluation shown, and when
+        # data was last collected successfully -- distinct from
+        # last_evaluated_at, which also counts failed attempts.
+        "collection": scan.get("collection"),
+        "collection_complete": scan.get("collection_complete", True),
+        "evidence_session": scan.get("evidence_session"),
+        "raw_counts": scan.get("raw_counts"),
+        "last_successful_collection_at": _scan_last_successful_collection_at(
+            scan, catalog, ticker, is_live, just_fetched=live_fetch),
     }
+
+
+@app.get("/api/ticker/{ticker}/baseline")
+def ticker_baseline(ticker: str):
+    """Read-only: verified session coverage and baseline status per dataset
+    for this ticker's evidence session. Zero UW calls."""
+    adapter = get_adapter()
+    ticker = _validate_ticker_for_analysis(adapter, ticker)
+    if not isinstance(adapter, LiveUWAdapter):
+        return {"ticker": ticker, "mode": "demo", "datasets": {},
+                "note": "Session baselines exist only in Live Mode; Demo uses fixture-authored inputs."}
+    now = _utcnow()
+    session_date = trading_calendar.evidence_session_date(now)
+    return {"ticker": ticker, "mode": "live", "evidence_session": session_date.isoformat(),
+            "datasets": _baseline_report(ticker, session_date, now)}
+
+
+_baseline_backfill_lock = threading.Lock()
+
+
+@app.post("/api/ticker/{ticker}/baseline/backfill", dependencies=[Depends(require_auth)])
+def ticker_baseline_backfill(ticker: str, max_pages: int = 60):
+    """Explicit, authenticated, bounded backfill of COMPLETE session coverage
+    for prior trading sessions (real UW requests, at most `max_pages`,
+    clamped to BACKFILL_MAX_PAGES_PER_REQUEST)."""
+    adapter = get_adapter()
+    ticker = _validate_ticker_for_analysis(adapter, ticker)
+    if not isinstance(adapter, LiveUWAdapter):
+        raise HTTPException(status_code=400, detail="Baseline backfill is only available in Live Mode.")
+    if not _baseline_backfill_lock.acquire(blocking=False):
+        raise HTTPException(status_code=409, detail="A baseline backfill is already running.")
+    try:
+        budget = max(1, min(int(max_pages), BACKFILL_MAX_PAGES_PER_REQUEST))
+        result = _run_baseline_backfill(adapter, ticker, budget, "on_demand")
+        now = _utcnow()
+        return {"ticker": ticker, "max_pages": budget, "backfill": result,
+                "datasets": _baseline_report(ticker, trading_calendar.evidence_session_date(now), now)}
+    finally:
+        _baseline_backfill_lock.release()
 
 
 @app.get("/api/ticker/{ticker}")
@@ -2141,8 +2406,17 @@ def _ticker_ohlc_impl(ticker: str, timeframe: str, limit: int, range: Optional[s
         # live_uw_adapter.stock_ohlc()'s docstring for the full bug
         # writeup.
         ohlc = adapter.get_ohlc(ticker, timeframe=timeframe, limit=limit, window=range)
-        flow_alerts = adapter.get_flow_alerts(ticker)
-        darkpool_trades = adapter.get_darkpool_trades(ticker)
+        flow_collection = adapter.collect_flow_alerts(ticker)
+        darkpool_collection = adapter.collect_darkpool_trades(ticker)
+        flow_alerts = flow_collection["rows"]
+        darkpool_trades = darkpool_collection["rows"]
+        # Marker provenance: this chart's markers come from THIS fetch; a
+        # failed source is disclosed, never shown as "no activity".
+        marker_sources = {
+            "origin": "live_fetch",
+            "options_flow": collection_summary(flow_collection),
+            "darkpool": collection_summary(darkpool_collection),
+        }
         candles = ohlc.get("candles", [])
         unavailable = ohlc.get("unavailable", False)
         reason = ohlc.get("reason")
@@ -2181,6 +2455,14 @@ def _ticker_ohlc_impl(ticker: str, timeframe: str, limit: int, range: Optional[s
         flow_alerts = catalog.get_cached_flow_observations(ticker)
         darkpool_trades = catalog.get_cached_darkpool_observations(ticker)
         cached_at = catalog.get_price_bars_cached_at(ticker, timeframe)
+        # Marker provenance: a cache read shows EVERY cataloged observation
+        # for this ticker (all scans/refreshes so far), which is generally a
+        # wider set than any single signal evaluation's snapshot.
+        marker_sources = {
+            "origin": "catalog",
+            "options_flow": {"row_count": len(flow_alerts)},
+            "darkpool": {"row_count": len(darkpool_trades)},
+        }
         # Honest: an empty cache is reported as genuinely unavailable
         # (never fabricated/padded), with a reason that makes clear this
         # is a "nothing cataloged yet" state, not a real UW-side failure
@@ -2283,6 +2565,7 @@ def _ticker_ohlc_impl(ticker: str, timeframe: str, limit: int, range: Optional[s
         # show a scoped "refresh last bar" affordance even when the
         # range is otherwise fully cached/satisfied.
         "latest_bar_is_final": latest_bar_is_final,
+        "marker_sources": marker_sources,
     }
 
 
@@ -2384,7 +2667,7 @@ def investigate_ticker(ticker: str):
         )
 
     adapter = get_adapter()
-    store = get_store()
+    store = get_store(_mode_of(adapter))
     try:
         scan = _run_scan(adapter, store, safe_ticker)
         evidence = _to_evidence_item(scan)

@@ -63,7 +63,7 @@ def test_ticker_with_real_prior_state_but_no_fresh_catalog_entry_keeps_real_stat
     ticker = "AMD"
     app_main._settings_store.set_watchlist([ticker])
     _wire_live_adapter_with_mock_session(app_main, monkeypatch, [ticker])
-    app_main.get_store().record_scan(ticker, any_gate_passed=True, state="BUILDING")
+    app_main.get_store("live").record_scan(ticker, any_gate_passed=True, state="BUILDING")
     client = TestClient(app_main.app)
     resp = client.get(f"/api/ticker/{ticker}")
     assert resp.status_code == 200

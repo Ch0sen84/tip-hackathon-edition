@@ -5,6 +5,8 @@ never the real deployed token file or any real credential.
 """
 from __future__ import annotations
 
+import os
+
 import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
@@ -218,6 +220,7 @@ def test_auth_token_store_generates_and_persists(tmp_path):
     assert token1 == token2  # re-reads the same persisted token, doesn't regenerate
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX file modes are not enforced on NTFS")
 def test_auth_token_store_file_mode_is_0600(tmp_path):
     import stat
 

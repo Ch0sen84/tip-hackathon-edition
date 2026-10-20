@@ -34,7 +34,7 @@ from typing import Optional
 
 import requests
 
-from .base import UWDataAdapter
+from .base import COLLECTION_OK, UWDataAdapter, collection_result
 from ..core.candles import (
     build_candles, clamp_limit, raw_limit_for_trading_days, select_regular_session_bars,
 )
@@ -485,10 +485,16 @@ class UWRestClient:
 
     def flow_alerts(self, ticker: Optional[str] = None, limit: int = 100,
                      min_premium: Optional[int] = None, is_call: Optional[bool] = None,
-                     is_put: Optional[bool] = None, is_sweep: Optional[bool] = None) -> dict:
+                     is_put: Optional[bool] = None, is_sweep: Optional[bool] = None,
+                     older_than: Optional[str] = None, newer_than: Optional[str] = None) -> dict:
+        # older_than/newer_than: UW's documented time cursors for this
+        # endpoint. NOT live-verified in this repository (no live calls were
+        # made while adding them) -- app/session_collection.py checks every
+        # page and marks coverage "unknown" if the cursor is not honored.
         return self.get("/api/option-trades/flow-alerts", {
             "ticker_symbol": ticker, "limit": limit, "min_premium": min_premium,
             "is_call": is_call, "is_put": is_put, "is_sweep": is_sweep,
+            "older_than": older_than, "newer_than": newer_than,
         })
 
     def net_prem_ticks(self, ticker: str, limit: int = 500) -> dict:
@@ -631,26 +637,99 @@ class LiveUWAdapter(UWDataAdapter):
     def get_universe(self) -> list:
         return list(self.watchlist)
 
+    collection_source = "unusual_whales"
+
+    @staticmethod
+    def _failure_status(body) -> Optional[tuple]:
+        """(status, detail, http_status) when `body` is one of UWRestClient's
+        structured failure shapes (or not a dict at all), else None. Maps the
+        client's coarse kinds onto the explicit collection statuses in
+        adapters/base.py so a 429 / 5xx / timeout / malformed body / open
+        circuit is never mistaken for an empty-but-successful answer."""
+        if not isinstance(body, dict):
+            return ("malformed", "response body was not a JSON object", None)
+        kind = body.get("status")
+        if kind not in (UNAVAILABLE, UNAUTHORIZED, ERROR):
+            return None
+        code = body.get("status_code")
+        detail = str(body.get("detail") or body.get("message") or "")[:300]
+        if kind == UNAUTHORIZED:
+            return ("unauthorized", detail, code)
+        if kind == UNAVAILABLE:
+            return ("unavailable_on_tier", detail, code)
+        if detail.startswith("Circuit breaker open"):
+            return ("circuit_open", detail, code)
+        if code == 429:
+            return ("rate_limited", detail, code)
+        if code is not None and 200 <= int(code) < 300:
+            return ("malformed", detail or "unparseable response body", code)
+        return ("error", detail, code)
+
+    @staticmethod
+    def _rows_for_ticker(rows: list, ticker: str) -> tuple:
+        """Ticker-mapping integrity: keep only rows that either carry no
+        ticker field or carry the requested one (case-insensitive)."""
+        want = ticker.upper()
+        kept, dropped = [], 0
+        for r in rows:
+            if not isinstance(r, dict):
+                dropped += 1
+                continue
+            own = r.get("ticker") or r.get("ticker_symbol") or r.get("underlying_symbol")
+            if own and str(own).strip().upper() != want:
+                dropped += 1
+                continue
+            kept.append(r)
+        return kept, dropped
+
+    def _collect_list(self, body, ticker: str, normalize=None) -> dict:
+        failure = self._failure_status(body)
+        if failure:
+            status, detail, code = failure
+            return collection_result(status, detail=detail, http_status=code, source=self.collection_source)
+        data = body.get("data")
+        if not isinstance(data, list):
+            return collection_result("malformed", detail="response 'data' field is not a list",
+                                     http_status=200, source=self.collection_source)
+        rows, dropped = self._rows_for_ticker(data, ticker)
+        if normalize is not None:
+            rows = [normalize(r) for r in rows]
+        return collection_result(COLLECTION_OK, rows=rows, http_status=200,
+                                 source=self.collection_source, dropped_rows=dropped)
+
+    def collect_flow_alerts(self, ticker: str) -> dict:
+        return self._collect_list(self.client.flow_alerts(ticker=ticker), ticker, _normalize_flow_alert)
+
+    def collect_darkpool_trades(self, ticker: str) -> dict:
+        return self._collect_list(self.client.darkpool_ticker(ticker), ticker)
+
+    def collect_stock_state(self, ticker: str) -> dict:
+        body = self.client.stock_state(ticker)
+        failure = self._failure_status(body)
+        if failure:
+            status, detail, code = failure
+            return collection_result(status, detail=detail, http_status=code, source=self.collection_source)
+        data = body.get("data") if isinstance(body.get("data"), dict) else body
+        if not isinstance(data, dict) or not data:
+            return collection_result("malformed", detail="stock-state response had no data object",
+                                     http_status=200, source=self.collection_source)
+        return collection_result(COLLECTION_OK, record=_normalize_stock_state(data), http_status=200,
+                                 source=self.collection_source)
+
+    # Legacy list/dict-returning accessors, kept for callers that only need
+    # the rows (Investigate tools, chart markers). The scan pipeline uses the
+    # collect_* methods above so failures stay distinguishable.
     def get_flow_alerts(self, ticker: str) -> list:
-        body = self.client.flow_alerts(ticker=ticker)
-        if body.get("status") in (UNAVAILABLE, UNAUTHORIZED, ERROR):
-            return []
-        return [_normalize_flow_alert(r) for r in (body.get("data") or [])]
+        return self.collect_flow_alerts(ticker)["rows"]
 
     def get_darkpool_trades(self, ticker: str) -> list:
-        body = self.client.darkpool_ticker(ticker)
-        if body.get("status") in (UNAVAILABLE, UNAUTHORIZED, ERROR):
-            return []
-        return list(body.get("data") or [])
+        return self.collect_darkpool_trades(ticker)["rows"]
 
     def get_stock_state(self, ticker: str) -> Optional[dict]:
-        body = self.client.stock_state(ticker)
-        if body.get("status") in (UNAVAILABLE, UNAUTHORIZED, ERROR):
-            return {"unavailable": True, "reason": body}
-        data = body.get("data") or body
-        if not data:
-            return None
-        return _normalize_stock_state(data)
+        result = self.collect_stock_state(ticker)
+        if not result["ok"]:
+            return {"unavailable": True, "reason": {"status": result["status"], "detail": result["detail"]}}
+        return result["record"]
 
     def get_ohlc(self, ticker: str, timeframe: str = "1d", limit: int = 180,
                  window: Optional[str] = None) -> dict:

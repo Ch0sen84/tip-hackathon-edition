@@ -109,6 +109,7 @@ class SchedulerRunner:
         get_catalog: Callable[[], object],
         run_ticker_scan: Callable[[object, str], dict],
         worker_id: Optional[str] = None,
+        run_baseline_backfill: Optional[Callable[[object], dict]] = None,
         top_n: Optional[int] = None,
         scan_interval_s: Optional[int] = None,
         lease_ttl_s: Optional[int] = None,
@@ -119,6 +120,11 @@ class SchedulerRunner:
         self.get_adapter = get_adapter
         self.get_catalog = get_catalog
         self.run_ticker_scan = run_ticker_scan
+        # Signal-integrity remediation (audit B1): the bounded, background-
+        # priority session-coverage backfill that makes the real baseline
+        # gates reachable in normal Live operation. Runs only on cycles that
+        # evaluate (scheduler mode "enabled" / depth plus-evaluation).
+        self.run_baseline_backfill = run_baseline_backfill
         self.worker_id = worker_id or new_worker_id("scheduler")
         self.top_n = top_n if top_n is not None else _env_int("TIP_SCHEDULER_TOP_N", DEFAULT_TOP_N)
         self.scan_interval_s = (
@@ -352,6 +358,7 @@ class SchedulerRunner:
         catalog = self.get_catalog()
         candidates_evaluated = 0
         pause_reason = None
+        backfill_result = None
         try:
             with uw_concurrency.background_priority():
                 disc = discovery_module.run_discovery(adapter, {})
@@ -398,6 +405,12 @@ class SchedulerRunner:
                         break  # storage guard paused mid-cycle -- stop evaluating further tickers
                     except Exception:  # noqa: BLE001 -- one bad ticker must never kill the whole cycle
                         logger.exception("scheduler: per-ticker evaluation failed for %s", ticker)
+            if evaluate and not pause_reason and self.run_baseline_backfill is not None:
+                try:
+                    with uw_concurrency.background_priority():
+                        backfill_result = self.run_baseline_backfill(adapter)
+                except Exception:  # noqa: BLE001 -- backfill must never kill the cycle
+                    logger.exception("scheduler: baseline backfill failed")
         finally:
             if persist_next_run:
                 next_run_at = (now.timestamp() + self.scan_interval_s)
@@ -416,5 +429,5 @@ class SchedulerRunner:
             )
         return {
             "ran": True, "mode": reported_mode, "candidates_evaluated": candidates_evaluated,
-            "pause_reason": pause_reason,
+            "pause_reason": pause_reason, "baseline_backfill": backfill_result,
         }

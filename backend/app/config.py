@@ -24,6 +24,15 @@ def _bool(val, default: bool = False) -> bool:
     return str(val).strip().lower() in ("1", "true", "yes", "on")
 
 
+def derive_demo_db_path(db_path: str) -> str:
+    """`./data/tip_hackathon.db` -> `./data/tip_hackathon.demo.db`. An
+    in-memory Live DB gets its own, separate in-memory Demo DB."""
+    if db_path == ":memory:":
+        return ":memory:"
+    base, ext = os.path.splitext(db_path)
+    return f"{base}.demo{ext or '.db'}"
+
+
 class Settings:
     def __init__(self):
         self.mode = os.environ.get("TIP_MODE", "demo").strip().lower()  # "demo" | "live" (initial seed only; see settings_store)
@@ -40,6 +49,11 @@ class Settings:
         _transport = os.environ.get("INVESTIGATE_TRANSPORT", "rest").strip().lower()
         self.investigate_transport = _transport if _transport in ("rest", "mcp") else "rest"
         self.db_path = os.environ.get("TIP_DB_PATH", "./data/tip_hackathon.db")
+        # Demo/Live storage isolation (signal-integrity remediation): Demo
+        # Mode lifecycle state/history lives in its OWN SQLite file, never in
+        # the Live database -- a real ticker that also appears in a demo
+        # fixture (FLUX, CATX, ...) must never inherit synthetic state.
+        self.demo_db_path = os.environ.get("TIP_DEMO_DB_PATH") or derive_demo_db_path(self.db_path)
         self.fixtures_dir = os.environ.get(
             "TIP_FIXTURES_DIR",
             # backend/app/config.py -> backend/app -> backend -> repo root, then /fixtures.

@@ -348,6 +348,18 @@ async function main() {
   // fail (network_error or unauthorized against the real UW API) -- the
   // point of this check is that it STAYS disabled/rejected after a real,
   // non-stubbed test attempt, not that a fake key magically passes.
+  // NETWORK SAFETY (signal-integrity remediation): this step makes the
+  // backend perform a REAL Test Connection request to whatever UW base URL
+  // it was started with. Refuse to run it against the public UW host
+  // unless the operator explicitly opted in -- start the backend with
+  // UW_BASE_URL=http://127.0.0.1:9 (a dead local port) for normal runs.
+  const netSettings = await (await fetch(`${BASE}/api/settings`)).json();
+  if (netSettings.uw && netSettings.uw.base_url_is_default !== false && process.env.TIP_ALLOW_UW_NETWORK !== "1") {
+    throw new Error(
+      "Refusing to run the real Test Connection step: the backend under test still points at the public " +
+      "Unusual Whales API. Restart it with UW_BASE_URL=http://127.0.0.1:9, or set TIP_ALLOW_UW_NETWORK=1 to opt in."
+    );
+  }
   await liveB.testUwKey();
   check("Activate Live Mode still disabled after a real (failing) Test Connection attempt on a fake key", () => {
     assert.equal(liveButtonDisabled(), true);

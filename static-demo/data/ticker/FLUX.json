@@ -1,73 +1,104 @@
 {
   "ticker": "FLUX",
   "state": "CONFIRMED",
-  "previous_state": "NEW",
-  "transition_rule": "multi_signal_confirmation_two_independent_categories",
+  "previous_state": "CONFIRMED",
+  "transition_rule": "still_confirmed",
   "confidence": "high",
   "signal_type": "multi-signal",
-  "confidence_reason": "Multi-signal confirmation (>=2 independent categories): dark_pool_anomaly, options_flow_anomaly",
+  "confidence_reason": "Two independent evidence categories passed on this scan: dark_pool_anomaly, options_flow_anomaly",
   "qualifies": true,
   "qualifying_days_count": 1,
   "gates": {
     "dark_pool_anomaly": {
       "passed": true,
+      "status": "pass",
+      "source": "demo_fixture_baseline",
+      "decision_weight": "independent",
       "metrics": {
         "ratio": 3.808,
         "z_score": 11.231,
-        "bootstrap": false
+        "bootstrap": false,
+        "total_premium": 19800000.0
       }
     },
     "options_flow_anomaly": {
       "passed": true,
+      "status": "pass",
+      "source": "demo_fixture_snapshot_threshold",
+      "decision_weight": "independent",
       "metrics": {
         "total_premium": 5400000.0,
         "total_ask_premium": 5100000.0,
         "total_bid_premium": 300000.0,
         "ask_share": 0.944,
         "has_sweep": true,
-        "has_multileg": false
+        "has_multileg": false,
+        "method": "demo_snapshot_threshold",
+        "note": "Demo fixture heuristic: >= $1M alert premium with a sweep or one-sided flow in the fixture batch; not a baseline test"
       }
     },
     "historical_percentile": {
-      "passed": true,
+      "passed": false,
+      "status": "synthetic",
+      "source": "synthetic_estimator",
+      "decision_weight": "none",
       "metrics": {
-        "passed": true,
-        "percentile": 0.98,
-        "window_days": 30,
         "synthetic": true,
         "ticker": "FLUX",
         "today_premium": 25200000.0,
-        "note": "synthetic baseline, not the production historical-percentile model"
+        "note": "illustrative only: a fixed premium-size bucket, not a historical percentile; zero weight in every decision",
+        "illustrative_percentile": 0.98,
+        "bucket_passed": true
       }
     },
     "persistence": {
       "passed": false,
+      "status": "context",
+      "source": "lifecycle_episode",
+      "decision_weight": "none",
       "metrics": {
-        "tier2_qualifying_prints": 0,
-        "tier2_max_pct": 0.0,
-        "is_new_qualifying_day": false
+        "qualifying_sessions_in_episode": 1,
+        "note": "distinct trading sessions with qualifying evidence in the current episode; not independent evidence"
       }
     },
     "price_confirmation": {
       "passed": true,
+      "status": "pass",
+      "source": "uw_stock_state",
+      "decision_weight": "corroborating",
       "metrics": {
         "price_move_pct": 2.1,
         "direction_heuristic": "bullish-lean",
-        "confirmed": true
+        "confirmed": true,
+        "direction_basis": "aggressor-side (ask) buying in single-leg alerts: call premium vs put premium",
+        "direction_ambiguity": null,
+        "call_buy_share": 1.0,
+        "note": "a same-direction price move is coincident, not proof the lean was right"
       }
     },
     "catalyst_identified": {
       "passed": false,
+      "status": "fail",
+      "source": "fixture_flag",
+      "decision_weight": "independent",
       "metrics": {
-        "note": "not auto-computed -- set explicitly when a real catalyst is found"
+        "note": "Demo fixture flag, not auto-detected"
       }
     },
     "multi_signal_confirmation": {
       "passed": true,
+      "status": "pass",
+      "source": "derived",
+      "decision_weight": "derived",
       "metrics": {
         "contributing_gates": [
           "dark_pool_anomaly",
           "options_flow_anomaly"
+        ],
+        "evaluable_independent_gates": [
+          "dark_pool_anomaly",
+          "options_flow_anomaly",
+          "catalyst_identified"
         ],
         "excluded_from_tally": [
           "historical_percentile",
@@ -78,26 +109,28 @@
     },
     "data_quality": {
       "passed": true,
+      "status": "pass",
+      "source": "collection",
+      "decision_weight": "none",
       "metrics": {
         "api_errors": 0,
-        "bootstrap": false
+        "failed_sources": [],
+        "collection_status": {
+          "options_flow": "ok",
+          "darkpool": "ok",
+          "stock_state": "ok"
+        }
       }
     }
   },
-  "headline": "Dark pool ~3.8x recent average (short history) \u00b7 Options flow anomaly \u00b7 Synthetic baseline estimate: 98% (static premium-size model, not real historical data)",
-  "current_read": "Dark-pool activity well above normal; stock rose 2.1%; a synthetic baseline estimate also flagged elevated premium, but it carries no decision weight.",
+  "headline": "Dark pool ~3.8x recent average (short history) \u00b7 Options flow anomaly",
+  "current_read": "Dark-pool activity well above normal; stock rose 2.1%.",
   "evidence": [
     {
       "family": "dark_pool",
       "text": "Dark pool ~3.8x its recent average; short history",
       "key": true,
       "short": "Dark pool ~3.8x recent average (short history)"
-    },
-    {
-      "family": "synthetic_baseline",
-      "text": "Synthetic baseline estimate: 98% (static premium-size model, not real historical data) -- this is a static estimator built into this demo build, not a real trailing-history comparison.",
-      "key": false,
-      "short": "Synthetic baseline estimate: 98% (static premium-size model, not real historical data)"
     },
     {
       "family": "lifecycle",
@@ -119,16 +152,20 @@
   },
   "history": [
     {
-      "scan_date": "2026-10-15",
-      "any_gate_passed": true,
-      "state": "NEW",
-      "created_at": "2026-10-15 21:36:05"
-    },
-    {
-      "scan_date": "2026-10-15",
+      "scan_date": "2026-10-19",
       "any_gate_passed": true,
       "state": "CONFIRMED",
-      "created_at": "2026-10-15 21:36:05"
+      "created_at": "2026-10-20T03:55:11.401067+00:00",
+      "transition_rule": "opened_confirmed_two_independent_categories",
+      "episode_id": 6
+    },
+    {
+      "scan_date": "2026-10-19",
+      "any_gate_passed": true,
+      "state": "CONFIRMED",
+      "created_at": "2026-10-20T03:55:11.447069+00:00",
+      "transition_rule": "still_confirmed",
+      "episode_id": 6
     }
   ],
   "raw": {
@@ -156,5 +193,48 @@
         "avg_premium_baseline": 5200000
       }
     ]
-  }
+  },
+  "eval_freshness": "current",
+  "last_evaluated_at": "2026-10-20T03:55:11.447069+00:00",
+  "served_from_cache": false,
+  "collection": {
+    "options_flow": {
+      "status": "ok",
+      "ok": true,
+      "retrieved_at": "2026-10-20T03:55:11.447069+00:00",
+      "row_count": 1,
+      "detail": null,
+      "http_status": null,
+      "source": "synthetic_fixture",
+      "dropped_rows": 0
+    },
+    "darkpool": {
+      "status": "ok",
+      "ok": true,
+      "retrieved_at": "2026-10-20T03:55:11.447069+00:00",
+      "row_count": 1,
+      "detail": null,
+      "http_status": null,
+      "source": "synthetic_fixture",
+      "dropped_rows": 0
+    },
+    "stock_state": {
+      "status": "ok",
+      "ok": true,
+      "retrieved_at": "2026-10-20T03:55:11.447069+00:00",
+      "row_count": 1,
+      "detail": null,
+      "http_status": null,
+      "source": "synthetic_fixture",
+      "dropped_rows": 0
+    }
+  },
+  "collection_complete": true,
+  "evidence_session": "2026-10-19",
+  "raw_counts": {
+    "flow_alerts": 1,
+    "darkpool_trades": 1,
+    "cap": 500
+  },
+  "last_successful_collection_at": "2026-10-20T03:55:11.447069+00:00"
 }

@@ -1,60 +1,91 @@
 {
   "ticker": "DRFT",
-  "state": "BUILDING",
-  "previous_state": "NEW",
-  "transition_rule": "single_signal_reevaluated",
+  "state": null,
+  "previous_state": null,
+  "transition_rule": "no_qualifying_evidence_yet",
   "confidence": "low",
   "signal_type": "t1-bootstrap",
-  "confidence_reason": "Bootstrap-only, insufficient history -- not auto-qualified",
+  "confidence_reason": "Dark-pool baseline has insufficient history; the independent categories that could be evaluated did not pass -- not qualified",
   "qualifies": false,
   "qualifying_days_count": 0,
   "gates": {
     "dark_pool_anomaly": {
       "passed": false,
+      "status": "insufficient",
+      "source": "demo_fixture_baseline",
+      "decision_weight": "independent",
       "metrics": {
         "ratio": null,
         "z_score": null,
-        "bootstrap": true
+        "bootstrap": true,
+        "total_premium": 0.0
       }
     },
     "options_flow_anomaly": {
       "passed": false,
+      "status": "fail",
+      "source": "demo_fixture_snapshot_threshold",
+      "decision_weight": "independent",
       "metrics": {
-        "reason": "no flow alerts this scan"
+        "reason": "no flow alerts this scan",
+        "method": "demo_snapshot_threshold",
+        "note": "Demo fixture heuristic: >= $1M alert premium with a sweep or one-sided flow in the fixture batch; not a baseline test"
       }
     },
     "historical_percentile": {
       "passed": false,
+      "status": "not_evaluated",
+      "source": "synthetic_estimator",
+      "decision_weight": "none",
       "metrics": {
-        "reason": "not evaluated (no today_premium supplied)"
+        "reason": "no premium supplied"
       }
     },
     "persistence": {
       "passed": false,
+      "status": "context",
+      "source": "lifecycle_episode",
+      "decision_weight": "none",
       "metrics": {
-        "tier2_qualifying_prints": 0,
-        "tier2_max_pct": 0.0,
-        "is_new_qualifying_day": false
+        "qualifying_sessions_in_episode": 0,
+        "note": "distinct trading sessions with qualifying evidence in the current episode; not independent evidence"
       }
     },
     "price_confirmation": {
       "passed": false,
+      "status": "not_evaluated",
+      "source": "uw_stock_state",
+      "decision_weight": "corroborating",
       "metrics": {
         "price_move_pct": -0.2,
         "direction_heuristic": null,
-        "confirmed": null
+        "confirmed": null,
+        "direction_basis": "aggressor-side (ask) buying in single-leg alerts: call premium vs put premium",
+        "direction_ambiguity": "no aggressive (ask-side) single-leg buying observed",
+        "call_buy_share": null,
+        "note": "a same-direction price move is coincident, not proof the lean was right"
       }
     },
     "catalyst_identified": {
       "passed": false,
+      "status": "fail",
+      "source": "fixture_flag",
+      "decision_weight": "independent",
       "metrics": {
-        "note": "not auto-computed -- set explicitly when a real catalyst is found"
+        "note": "Demo fixture flag, not auto-detected"
       }
     },
     "multi_signal_confirmation": {
       "passed": false,
+      "status": "fail",
+      "source": "derived",
+      "decision_weight": "derived",
       "metrics": {
         "contributing_gates": [],
+        "evaluable_independent_gates": [
+          "options_flow_anomaly",
+          "catalyst_identified"
+        ],
         "excluded_from_tally": [
           "historical_percentile",
           "persistence",
@@ -63,22 +94,24 @@
       }
     },
     "data_quality": {
-      "passed": false,
+      "passed": true,
+      "status": "pass",
+      "source": "collection",
+      "decision_weight": "none",
       "metrics": {
         "api_errors": 0,
-        "bootstrap": true
+        "failed_sources": [],
+        "collection_status": {
+          "options_flow": "ok",
+          "darkpool": "ok",
+          "stock_state": "ok"
+        }
       }
     }
   },
-  "headline": "Unusual activity",
+  "headline": "No qualifying evidence this scan",
   "current_read": "Unusual activity; stock little changed.",
   "evidence": [
-    {
-      "family": "lifecycle",
-      "text": "TIP signal state BUILDING",
-      "key": false,
-      "short": "TIP signal state BUILDING"
-    },
     {
       "family": "price",
       "text": "Price -0.2% at 55.02",
@@ -93,20 +126,67 @@
   },
   "history": [
     {
-      "scan_date": "2026-10-15",
+      "scan_date": "2026-10-19",
       "any_gate_passed": false,
-      "state": "NEW",
-      "created_at": "2026-10-15 21:36:05"
+      "state": null,
+      "created_at": "2026-10-20T03:55:11.401067+00:00",
+      "transition_rule": "no_qualifying_evidence_yet",
+      "episode_id": null
     },
     {
-      "scan_date": "2026-10-15",
+      "scan_date": "2026-10-19",
       "any_gate_passed": false,
-      "state": "BUILDING",
-      "created_at": "2026-10-15 21:36:05"
+      "state": null,
+      "created_at": "2026-10-20T03:55:11.440148+00:00",
+      "transition_rule": "no_qualifying_evidence_yet",
+      "episode_id": null
     }
   ],
   "raw": {
     "flow_alerts": [],
     "darkpool_trades": []
-  }
+  },
+  "eval_freshness": "current",
+  "last_evaluated_at": "2026-10-20T03:55:11.440148+00:00",
+  "served_from_cache": false,
+  "collection": {
+    "options_flow": {
+      "status": "ok",
+      "ok": true,
+      "retrieved_at": "2026-10-20T03:55:11.440148+00:00",
+      "row_count": 0,
+      "detail": null,
+      "http_status": null,
+      "source": "synthetic_fixture",
+      "dropped_rows": 0
+    },
+    "darkpool": {
+      "status": "ok",
+      "ok": true,
+      "retrieved_at": "2026-10-20T03:55:11.440148+00:00",
+      "row_count": 0,
+      "detail": null,
+      "http_status": null,
+      "source": "synthetic_fixture",
+      "dropped_rows": 0
+    },
+    "stock_state": {
+      "status": "ok",
+      "ok": true,
+      "retrieved_at": "2026-10-20T03:55:11.440148+00:00",
+      "row_count": 1,
+      "detail": null,
+      "http_status": null,
+      "source": "synthetic_fixture",
+      "dropped_rows": 0
+    }
+  },
+  "collection_complete": true,
+  "evidence_session": "2026-10-19",
+  "raw_counts": {
+    "flow_alerts": 0,
+    "darkpool_trades": 0,
+    "cap": 500
+  },
+  "last_successful_collection_at": "2026-10-20T03:55:11.440148+00:00"
 }

@@ -13,3 +13,8 @@ venv/
 *.db-journal
 .idea/
 .vscode/
+
+# Real Unusual Whales captures are PRIVATE test data (third-party market data;
+# not redistributed). Build locally with tools/build_recorded_uw_fixture.py.
+fixtures/recorded_uw/*.json.gz
+.capture_settings_tmp*.json

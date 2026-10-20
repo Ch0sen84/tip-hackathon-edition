@@ -251,3 +251,49 @@ def session_end_utc(trading_date: date_cls) -> Optional[datetime]:
     if not info.is_trading_day:
         return None
     return info.session_close_et.astimezone(timezone.utc)
+
+
+# --- session attribution (signal-integrity remediation, audit B6) ----------
+#
+# Lifecycle history counts distinct EXCHANGE TRADING SESSIONS, never the
+# server's calendar date. A scan's evidence belongs to the most recent NYSE
+# session that had OPENED by the time of the scan: a Saturday scan, a
+# holiday scan, or a pre-open Monday scan all re-read the previous session's
+# data, so they are attributed to that previous session (and therefore can
+# never create a "new" qualifying session out of stale data).
+
+def previous_trading_day(d: date_cls) -> date_cls:
+    d = d - timedelta(days=1)
+    while not is_trading_day(d):
+        d -= timedelta(days=1)
+    return d
+
+
+def next_trading_day(d: date_cls) -> date_cls:
+    d = d + timedelta(days=1)
+    while not is_trading_day(d):
+        d += timedelta(days=1)
+    return d
+
+
+def evidence_session_date(as_of_utc: datetime) -> date_cls:
+    if as_of_utc.tzinfo is None:
+        as_of_utc = as_of_utc.replace(tzinfo=timezone.utc)
+    ny = as_of_utc.astimezone(NY_TZ)
+    info = session_info(ny.date())
+    if info.is_trading_day and ny >= info.session_open_et:
+        return ny.date()
+    return previous_trading_day(ny.date())
+
+
+def trading_sessions_between(earlier: date_cls, later: date_cls) -> int:
+    """Number of trading sessions strictly after `earlier` up to and
+    including `later` (0 when later <= earlier)."""
+    if later <= earlier:
+        return 0
+    n, d = 0, earlier
+    while d < later:
+        d = next_trading_day(d)
+        if d <= later:
+            n += 1
+    return n

@@ -47,6 +47,10 @@ from typing import Optional
 CURRENT = "current"
 STALE = "stale"
 UNEVALUATED = "unevaluated"
+# The newest evaluation attempt could not collect its required data (UW
+# 429/5xx/timeout/malformed/unentitled). Never presented as "current",
+# however recent the attempt was.
+COLLECTION_FAILED = "collection_failed"
 
 DEFAULT_FRESHNESS_WINDOW_S = 20 * 60  # 20 minutes -- see module docstring
 
@@ -96,6 +100,9 @@ def classify_freshness(latest_evaluation: Optional[dict], ticker: str,
     # over is STALE (>) -- see test_scheduler_freshness.py's boundary
     # tests for both sides of this exact inequality.
     state = CURRENT if age_s <= window_s else STALE
+    raw = latest_evaluation.get("raw_json") if isinstance(latest_evaluation.get("raw_json"), dict) else {}
+    if raw.get("collection_complete") is False:
+        state = COLLECTION_FAILED
     return FreshnessResult(ticker=ticker, state=state, evaluation=latest_evaluation, age_s=age_s, window_s=window_s)
 
 

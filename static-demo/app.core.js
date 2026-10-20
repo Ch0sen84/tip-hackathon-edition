@@ -745,7 +745,18 @@ const FRESHNESS_LABELS = {
   current: "Current",
   stale: "Stale",
   unevaluated: "Unevaluated",
+  // Signal-integrity remediation: the newest evaluation attempt could not
+  // collect its data (UW 429/5xx/timeout/malformed) -- never shown as Current.
+  collection_failed: "Data collection failed",
 };
+
+// Small freshness/collection badge shown next to any confidence value, so a
+// stale or failed evaluation's confidence is never presented as current.
+function freshnessBadgeHtml(entry) {
+  const f = entry && entry.eval_freshness;
+  if (!f || f === "current") return "";
+  return ` <span class="tag freshness-${esc(f)}" title="Confidence and state shown are from the last evaluation, not a current one.">${esc(FRESHNESS_LABELS[f] || f)}</span>`;
+}
 
 // UX round (2026-10-16 round 5), item 1: "Why TIP surfaced this" --
 // REAL discovery-pipeline fields only (see backend/app/core/discovery.py's
@@ -997,7 +1008,14 @@ function fmtChangeCell(px) {
 // covers the same real condition for any entry that didn't go through
 // that specific code path.
 function isNotEvaluated(entry) {
-  return !!entry.not_evaluated || !entry.state;
+  // Signal-integrity remediation: an evaluated ticker with no qualifying
+  // evidence now legitimately has state === null (no qualification episode
+  // is open) -- that is NOT "never evaluated". Only the explicit backend
+  // marker, or an entry with neither a state nor any evaluation result,
+  // counts as never evaluated.
+  if (entry.not_evaluated === true) return true;
+  if (entry.not_evaluated === false) return false;
+  return !entry.state && !entry.confidence && !entry.signal_type;
 }
 // Round 13 item 1: a genuinely-evaluated zero-qualifying-gate entry
 // (backend `zero_gate: true`, or any entry whose real transition_rule
@@ -1013,7 +1031,12 @@ function stateTagHtml(entry) {
   if (isNotEvaluated(entry)) {
     return `<span class="tag state-unevaluated" title="This ticker has never been evaluated -- no real signal-detection scan has run for it yet.">Not evaluated</span>`;
   }
-  const tag = `<span class="tag state-${esc(entry.state)}">${esc(entry.state)}</span>`;
+  const tag = entry.state
+    ? `<span class="tag state-${esc(entry.state)}">${esc(entry.state)}</span>`
+    : `<span class="tag state-none" title="Evaluated, but no qualification episode is open for this ticker.">No active qualification</span>`;
+  if (entry.confidence === "insufficient") {
+    return `${tag} <span class="muted zero-gate-note" title="No independent evidence category could be evaluated (missing baseline history or data collection failed) -- not evidence either way.">(insufficient evidence)</span>`;
+  }
   if (isZeroGateEntry(entry)) {
     return `${tag} <span class="muted zero-gate-note" title="Evaluated this scan -- zero qualifying gates passed, not a qualifying/noteworthy signal.">(no qualifying signal)</span>`;
   }
@@ -1031,7 +1054,7 @@ function renderCard(entry) {
       <div class="tags">
         <span class="tag">${esc(entry.label)}</span>
         ${stateTagHtml(entry)}
-        <span class="tag">confidence: ${esc(entry.confidence)}</span>
+        <span class="tag">confidence: ${esc(entry.confidence)}</span>${freshnessBadgeHtml(entry)}
       </div>
       <div class="read card-headline">${esc(entry.headline)}</div>
       ${renderHistoryChip(entry.history_states)}
@@ -1097,7 +1120,7 @@ function renderRow(entry) {
     <tr data-ticker="${esc(entry.ticker)}">
       <td><strong>${esc(entry.ticker)}</strong></td>
       <td>${stateTagHtml(entry)}</td>
-      <td>${isNotEvaluated(entry) ? `<span class="muted">n/a</span>` : esc(entry.confidence)}</td>
+      <td>${isNotEvaluated(entry) ? `<span class="muted">n/a</span>` : `${esc(entry.confidence)}${freshnessBadgeHtml(entry)}`}</td>
       <td class="col-family">${renderFamilyLabel(entry)}</td>
       <td class="col-price">${fmtPriceCell(px)}</td>
       <td class="col-chg">${fmtChangeCell(px)}</td>
@@ -1211,7 +1234,10 @@ function collapseHistory(history) {
   const entries = Array.isArray(history) ? history : [];
   const segments = [];
   entries.forEach((raw) => {
-    const e = (typeof raw === "string") ? { state: raw } : (raw || {});
+    // Signal-integrity remediation: an evaluated scan with no open
+    // qualification episode has state null -- shown as NONE, never "null".
+    const e0 = (typeof raw === "string" || raw === null) ? { state: raw } : (raw || {});
+    const e = e0.state ? e0 : { ...e0, state: "NONE" };
     const last = segments[segments.length - 1];
     if (last && last.state === e.state) {
       last.scanCount += 1;
@@ -1784,14 +1810,15 @@ function renderFeaturedSignal(entry) {
       </div>
       <div class="tags">
         <span class="tag tag-lg">${esc(entry.label)}</span>
-        <span class="tag state-${esc(entry.state)}">${esc(entry.state || "")}</span>
-        <span class="tag">signal type: ${esc(entry.signal_type)}</span>
+        <span class="tag state-${esc(entry.state)}">${esc(entry.state || "No active qualification")}</span>
+        <span class="tag">signal type: ${esc(entry.signal_type)}</span>${freshnessBadgeHtml(entry)}
         <span class="tag">evidence categories: ${esc(cats)}</span>
       </div>
       ${renderHistoryChip(entry.history_states)}
       <div class="featured-confidence conf-${esc(entry.confidence)}">
         <span class="conf-label">confidence</span>
         <span class="conf-value">${esc((entry.confidence || "").toUpperCase())}</span>
+        <span class="conf-note muted">evidence-coverage label, not a probability</span>
       </div>
       <div class="featured-headline">${esc(entry.headline)}</div>
       <div class="featured-read">${esc(entry.current_read)}</div>
@@ -1855,16 +1882,32 @@ const GATE_CATEGORY = {
 // Real limitation text sourced from signal_engine.py's own docstrings/notes
 // (not newly-invented claims) -- surfaced next to the gate it documents.
 const GATE_LIMITATION_NOTES = {
-  historical_percentile: "This gate's percentile estimate is a SYNTHETIC static-bucket model, not the production trailing-window historical-percentile calculation -- it is not a claim about real historical rarity.",
-  persistence: "Persistence counts qualifying prints seen so far in this app's own short local history; with only a few sessions of data, \"persistence\" cannot yet mean the same thing it does in production's longer trailing window.",
-  dark_pool_anomaly: "When this gate's bootstrap flag is set, there isn't yet enough trailing history for a real baseline ratio/z-score -- the gate reports non-qualifying rather than asserting an anomaly.",
-  catalyst_identified: "Not auto-computed from any data feed -- this gate is only true when a catalyst has been explicitly, manually tagged. False means absent input, not evidence against a catalyst.",
-  data_quality: "Reflects API/bootstrap health for this scan, not a market observation about the ticker.",
+  historical_percentile: "Illustrative only: a fixed premium-size bucket shown in Demo Mode, not a historical percentile and with no trailing window. Disabled in Live Mode. Zero weight in every confidence and lifecycle decision.",
+  persistence: "Context only: how many distinct trading sessions in the current qualification episode had qualifying evidence. Not independent evidence and never counted toward confidence.",
+  dark_pool_anomaly: "Live: this session's dark-pool premium (verified collected from the open) vs the same time of day in at least 20 earlier fully collected sessions. Without that history the gate reports \"insufficient\", never a pass or fail.",
+  options_flow_anomaly: "Live: this session's UW flow-alert premium (verified collected from the open) vs the same time of day in at least 20 earlier fully collected sessions. Demo uses a labeled fixture threshold instead.",
+  price_confirmation: "Corroboration only: whether the price moved the same way as the lean inferred from call-vs-put buying. A matching move is coincident, not proof the inference was right.",
+  catalyst_identified: "Manual-only gate. Live Mode has no catalyst-verification workflow, so it never passes there; Demo uses a fixture flag.",
+  data_quality: "Whether every required data source was collected successfully this scan -- not a market observation.",
 };
+
+// Gate status vocabulary from the backend (signal_engine.evaluate_gates).
+const GATE_STATUS_LABELS = {
+  pass: "PASS", fail: "no", insufficient: "insufficient history", unavailable: "data unavailable",
+  unsupported: "not supported", synthetic: "illustrative", not_evaluated: "not evaluated", context: "context",
+};
+const NON_EVIDENCE_STATUSES = ["insufficient", "unavailable", "unsupported", "synthetic", "not_evaluated", "context"];
 
 function classifyGate(name, gate) {
   const passed = !!gate.passed;
   const m = gate.metrics || {};
+  // Signal-integrity remediation: anything that is not a real pass/fail
+  // observation (missing history, provider failure, unsupported in this
+  // mode, synthetic illustration, context) is a data limitation, never
+  // "unmet criteria" and never supporting evidence.
+  if (gate.status && NON_EVIDENCE_STATUSES.includes(gate.status) && !(gate.status === "context" && passed)) {
+    return GATE_CATEGORY.DATA_LIMITATION;
+  }
   switch (name) {
     case "price_confirmation":
       if (m.confirmed === true) return GATE_CATEGORY.SUPPORTING;
@@ -1922,41 +1965,48 @@ function gateWhyItMatters(name, gate) {
         : m.direction_heuristic === "bearish-lean" ? "bearish" : null;
       if (m.confirmed === true && leanWord && pct != null) {
         const moveWord = m.price_move_pct > 0 ? `rose ${pct}%` : `fell ${pct}%`;
-        return `Flow suggested a ${leanWord} lean, and the stock actually ${moveWord} -- price action moved WITH the flow lean.`;
+        return `The lean inferred from call-vs-put buying was ${leanWord}, and the stock ${moveWord} -- consistent with that inference (coincident, not proof).`;
       }
       if (m.confirmed === false && leanWord && pct != null) {
         const moveWord = m.price_move_pct > 0 ? `rose ${pct}%` : `fell ${pct}%`;
-        return `Options/dark-pool flow suggested a ${leanWord} lean, but the stock actually ${moveWord} -- these observations point in opposite directions.`;
+        return `The lean inferred from call-vs-put buying was ${leanWord}, but the stock ${moveWord} -- the price move and the inferred lean point in opposite directions.`;
       }
-      return "No price-confirmation check could be run this scan (missing a price move or a directional lean to compare it against).";
+      if (gate.status === "unavailable") return "Price data could not be collected this scan.";
+      if (m.direction_ambiguity) return `No price check: no directional lean could be inferred (${m.direction_ambiguity}).`;
+      return "No price check: it only applies to the lean of options flow that qualified this scan.";
     }
-    case "dark_pool_anomaly": {
-      if (gate.passed) {
-        const ratioTxt = typeof m.ratio === "number" ? `${m.ratio.toFixed(1)}x its baseline` : "well above its baseline";
-        const zTxt = typeof m.z_score === "number" ? ` (z=${m.z_score.toFixed(1)})` : "";
-        return `Dark-pool print volume measured ${ratioTxt}${zTxt} -- a statistical anomaly, not just a large raw number.`;
+    case "dark_pool_anomaly":
+    case "options_flow_anomaly": {
+      const b = m.baseline || {};
+      const what = name === "dark_pool_anomaly" ? "dark-pool premium" : "UW flow-alert premium";
+      if (gate.status === "unavailable") return `${what} could not be collected this scan -- unavailable, not a negative observation.`;
+      if (gate.status === "insufficient") return `Insufficient history: ${b.reason || m.reason || "no verified session baseline yet"}.`;
+      if (gate.source === "demo_fixture_snapshot_threshold") {
+        return gate.passed ? "Demo fixture heuristic: the fixture's alert batch met the snapshot threshold (not a baseline test)."
+          : "Demo fixture heuristic: the fixture's alert batch did not meet the snapshot threshold.";
       }
-      if (m.bootstrap) return "Not enough trailing history yet to compute a real baseline ratio/z-score for this gate.";
-      return "Dark-pool print volume stayed within its normal baseline range this scan.";
-    }
-    case "options_flow_anomaly":
+      if (gate.source === "demo_fixture_baseline") {
+        const r = typeof m.ratio === "number" ? `${m.ratio.toFixed(1)}x` : "n/a";
+        return gate.passed ? `Demo fixture: ${r} the fixture-authored baseline.` : `Demo fixture: ${r} the fixture-authored baseline (below threshold).`;
+      }
+      const ratio = typeof b.ratio === "number" ? `${b.ratio.toFixed(1)}x` : (typeof m.ratio === "number" ? `${m.ratio.toFixed(1)}x` : "n/a");
+      const pctl = typeof b.percentile === "number" ? `, at/above ${(b.percentile * 100).toFixed(0)}% of them` : "";
+      const n = b.eligible_sessions != null ? b.eligible_sessions : "?";
+      const mins = b.elapsed_minutes != null ? ` over the first ${b.elapsed_minutes} min of the session` : "";
       return gate.passed
-        ? "Options order flow showed a pattern flagged as unusual this scan (see raw metrics in the details below)."
-        : "No unusual options order-flow pattern was observed this scan.";
+        ? `Session ${what}${mins} was ${ratio} the same-time average of ${n} earlier fully collected sessions${pctl} -- above both the ratio and percentile thresholds.`
+        : `Session ${what}${mins} was ${ratio} the same-time average of ${n} earlier fully collected sessions${pctl} -- within the normal range.`;
+    }
     case "historical_percentile": {
-      const pctile = typeof m.percentile === "number" ? `${(m.percentile * 100).toFixed(0)}th percentile` : null;
-      if (gate.passed && pctile) return `Today's premium ranks in the ${pctile} of the trailing ${m.window_days || 30}-day window.`;
-      if (m.reason === "not evaluated (no today_premium supplied)") return "This gate was not evaluated -- no premium figure was supplied for this scan.";
-      return pctile ? `Today's premium ranked only in the ${pctile} of its trailing window -- not high enough to qualify.` : "Today's premium did not rank high enough in its trailing window to qualify.";
+      if (gate.status === "unsupported") return "Not computed in Live Mode (the estimator is synthetic).";
+      const pctile = typeof m.illustrative_percentile === "number" ? `~${(m.illustrative_percentile * 100).toFixed(0)}th-percentile bucket` : null;
+      if (gate.status === "synthetic" && pctile) return `Illustrative premium-size ${pctile} (a fixed bucket, not a historical percentile; no effect on any decision).`;
+      return "Not evaluated -- no premium figure was supplied for this scan.";
     }
     case "persistence": {
-      const n = m.tier2_qualifying_prints || 0;
-      const pct = typeof m.tier2_max_pct === "number" ? `${(m.tier2_max_pct * 100).toFixed(0)}%` : "n/a";
-      return gate.passed
-        ? `${n} qualifying print(s) seen so far, the largest at ${pct} of that day's volume.`
-        : "This build's repeated-large-print (persistence/tier2) detection was not ported from "
-          + "production, so this gate cannot pass here yet -- this is NOT a market observation that "
-          + "no persistence occurred, just an unimplemented input.";
+      const n = m.qualifying_sessions_in_episode;
+      if (typeof n === "number") return `${n} distinct trading session(s) with qualifying evidence in the current qualification episode (context only).`;
+      return "Not evaluated (no qualification episode context).";
     }
     case "multi_signal_confirmation": {
       const contrib = m.contributing_gates || [];
@@ -1965,13 +2015,17 @@ function gateWhyItMatters(name, gate) {
         : "Fewer than 2 independent gates fired together this scan.";
     }
     case "catalyst_identified":
+      if (gate.status === "unsupported") return "Not supported in Live Mode (no manual catalyst workflow in this build).";
       return gate.passed
-        ? "A real catalyst was explicitly tagged for this ticker."
-        : "No catalyst has been manually tagged for this ticker -- an absent input, not evidence against one existing.";
-    case "data_quality":
-      return (m.api_errors === 0 && !m.bootstrap)
-        ? "No API errors and no bootstrap flag this scan -- the data feeding the other gates is trustworthy."
-        : `A data-quality concern was flagged this scan (api_errors=${m.api_errors ?? "n/a"}, bootstrap=${m.bootstrap ? "yes" : "no"}) -- weigh the other gates' numbers with that in mind.`;
+        ? "Demo fixture flag: a catalyst is tagged for this scenario."
+        : "No catalyst is tagged -- an absent input, not evidence against one existing.";
+    case "data_quality": {
+      const failed = m.failed_sources || [];
+      const cs = m.collection_status || {};
+      return failed.length === 0
+        ? "Every required data source was collected successfully this scan (this says nothing about what the data shows)."
+        : `Collection failed for: ${failed.map((k) => `${k.replace(/_/g, " ")} (${cs[k] || "error"})`).join(", ")} -- those gates are "data unavailable", not negative evidence.`;
+    }
     default:
       return "";
   }
@@ -1987,7 +2041,7 @@ function renderGateItem(name, gate) {
     <div class="gate-item">
       <div class="gate-item-head">
         <span class="gname">${esc(name.replace(/_/g, " "))}</span>
-        <span class="gpass ${gate.passed ? "yes" : "no"}">${gate.passed ? "PASS" : "no"}</span>
+        <span class="gpass ${gate.passed ? "yes" : "no"} gstatus-${esc(gate.status || (gate.passed ? "pass" : "fail"))}">${esc(GATE_STATUS_LABELS[gate.status] || (gate.passed ? "PASS" : "no"))}</span>
       </div>
       ${whyHtml}
       ${note}
@@ -2056,10 +2110,11 @@ function renderGateGroupsSummary(gates) {
 const STATE_GLOSS = {
   NEW: "just started qualifying",
   BUILDING: "one qualifying signal so far, not yet confirmed",
-  CONFIRMED: "multiple signals, or repeated qualifying days",
-  STABLE: "confirmed and still qualifying after 3+ days",
-  FADING: "was qualifying; no gate passed this scan",
-  INVALIDATED: "price moved against the signal (terminal state)",
+  CONFIRMED: "two independent evidence categories on the latest scan",
+  STABLE: "two-category confirmation on 3+ distinct trading sessions",
+  FADING: "episode still open, but no independent category passed on the latest scan",
+  NONE: "no active qualification episode",
+  INVALIDATED: "the inferred flow lean was contradicted by a 3%+ adverse move; this episode is closed (a new one can open on a later session)",
 };
 
 const TRANSITION_RULE_GLOSS = {
@@ -2085,6 +2140,25 @@ const TRANSITION_RULE_GLOSS = {
   still_fading: "Still no gate passing since fading started.",
   terminal_state: "INVALIDATED is terminal; no further automatic transitions.",
   no_rule_matched_state_unchanged: "No transition rule matched; state left unchanged.",
+  // Signal-integrity remediation: episode-scoped, session-counted lifecycle.
+  held_incomplete_collection: "Data collection failed this scan; state held (a provider failure is not evidence).",
+  held_insufficient_evidence: "No independent evidence category could be evaluated (missing baseline history); state held.",
+  held_identical_evidence_from_an_earlier_session: "Same observations as an earlier session (stale re-read); state held.",
+  same_session_no_advance: "Repeated scan of the opening session; NEW only advances on a later trading session.",
+  qualifying_evidence_on_a_later_session: "Qualifying evidence on a later trading session than the one that opened the episode.",
+  opened_confirmed_two_independent_categories: "Episode opened with two independent evidence categories.",
+  multi_signal_confirmation_two_independent_categories: "Two independent evidence categories passed on this scan.",
+  demoted_lost_multi_signal_confirmation: "Only one independent category still passes; demoted to BUILDING.",
+  confirmed_on_3_distinct_sessions_and_price_corroborates: "Two-category confirmation on 3+ distinct trading sessions, price corroborating.",
+  new_episode_after_invalidation: "A new qualification episode opened after an earlier one was invalidated.",
+  new_episode_after_expiry: "A new qualification episode opened after the previous one expired.",
+  episode_expired_no_recent_evidence: "The previous episode expired: no qualifying evidence for more than 5 trading sessions.",
+  invalidated_this_session_no_reopen: "Invalidated earlier this session; a new episode can only open on a later session.",
+  no_qualifying_evidence: "No qualifying evidence this scan; no active qualification.",
+  "adverse_price_move_since_episode_open<= -3.0%": "Price moved 3%+ against the inferred lean since the episode opened; episode closed.",
+  "adverse_price_move_daily_change<= -3.0%": "Price moved 3%+ against the inferred lean today; episode closed.",
+  "adverse_price_move<= -3.0%": "Price moved 3%+ against the inferred flow lean (legacy rule).",
+  recorded_directly: "State recorded directly (seeding).",
 };
 
 // --- Candlestick chart + evidence markers (Priority 1/2) --------------------
@@ -2096,6 +2170,20 @@ const TRANSITION_RULE_GLOSS = {
 // app.static.js's data/ohlc/{t}.json load) -- this function renders
 // whatever it is given and never fetches anything itself, consistent
 // with the rest of this file's "no fetch() here" rule.
+
+// Signal-integrity remediation: where the chart's markers came from.
+function markerProvenanceText(ohlc) {
+  const ms = ohlc && ohlc.marker_sources;
+  if (!ms) return "";
+  const n = (s) => (s && (s.row_count != null ? s.row_count : "?"));
+  if (ms.origin === "catalog") {
+    return `Markers: all cataloged UW observations for this ticker (${n(ms.options_flow)} flow alerts, ${n(ms.darkpool)} dark-pool prints, across every scan/refresh so far).`;
+  }
+  const bad = ["options_flow", "darkpool"].filter((k) => ms[k] && ms[k].ok === false)
+    .map((k) => `${k === "options_flow" ? "flow alerts" : "dark-pool prints"}: ${ms[k].status}`);
+  return `Markers: observations returned by this chart refresh (${n(ms.options_flow)} flow alerts, ${n(ms.darkpool)} dark-pool prints).`
+    + (bad.length ? ` Collection failed for ${bad.join(", ")} -- missing markers there are unavailable data, not absent activity.` : "");
+}
 
 function dateOnly(ts) {
   return String(ts).slice(0, 10);
@@ -2514,7 +2602,8 @@ function wireEvidencePanel(allEvents, idPrefix = "") {
     const sortEl = document.getElementById(`${idPrefix}evSort`);
     let filtered = allEvents.filter((e) => {
       if (typeEl.value && e.kind !== typeEl.value) return false;
-      if (dateEl.value && dateOnly(e.time) !== dateEl.value) return false;
+      // ET session date, matching the "Evidence by day" table (was a UTC slice).
+      if (dateEl.value && toSessionDate(e.time) !== dateEl.value) return false;
       if (minValEl.value && (e.value == null || e.value < Number(minValEl.value))) return false;
       return true;
     });
@@ -2624,7 +2713,7 @@ function mountActivityTimeline(containerId, allEvents) {
   }
   const dates = distinctEventDates(allEvents);
   const coverageNote = dates.length === 1
-    ? `Today's activity only (${esc(dates[0])}) \u2014 UW's flow-alert/dark-pool endpoints return the most recent events, not a multi-day history; see the Evidence table above for the full underlying record.`
+    ? `Activity on a single session date (${esc(dates[0])}) \u2014 only what has been collected for this ticker so far; see the Evidence table above for the full underlying record.`
     : `Activity across ${dates.length} real distinct date(s) actually present in the fetched evidence.`;
 
   root.innerHTML = `<div id="${containerId}-chart" class="activity-timeline-chart"></div><div class="muted" style="margin-top:4px;font-size:11px">${coverageNote}</div>`;
@@ -3735,12 +3824,16 @@ function historyEntryGloss(e) {
   if (e && isZeroGateTransitionReason(e.transition_rule)) {
     return "no qualifying evidence yet";
   }
+  if (e && e.state === "NONE" && TRANSITION_RULE_GLOSS[e.transition_rule]) {
+    return TRANSITION_RULE_GLOSS[e.transition_rule];
+  }
   return STATE_GLOSS[e && e.state] || "";
 }
 
-function renderRawHistoryStep(e, i, entries) {
+function renderRawHistoryStep(e0, i, entries) {
+  const e = e0.state ? e0 : { ...e0, state: "NONE" };
   const gloss = historyEntryGloss(e);
-  const prev = i > 0 ? entries[i - 1].state : null;
+  const prev = i > 0 ? (entries[i - 1].state || "NONE") : null;
   const changed = prev && prev !== e.state;
   return `
     <div class="timeline-step">
@@ -3776,7 +3869,7 @@ function renderLifecycleTimeline(history, currentState) {
       </div>`;
   }
   if (entries.length === 1) {
-    const e = entries[0];
+    const e = entries[0].state ? entries[0] : { ...entries[0], state: "NONE" };
     const gloss = historyEntryGloss(e);
     return `
       <div class="card timeline-card">
@@ -3794,7 +3887,7 @@ function renderLifecycleTimeline(history, currentState) {
   return `
     <div class="card timeline-card">
       <div class="card-head"><strong>Signal Lifecycle</strong>
-        <span class="muted">(${segments.length} segment(s) from ${entries.length} recorded scans &mdash; current state: ${esc(currentState || "")})</span></div>
+        <span class="muted">(${segments.length} segment(s) from ${entries.length} recorded scans &mdash; current state: ${esc(currentState || "NONE")})</span></div>
       ${progressionHtml}
       <details class="how history-details">
         <summary>Full real scan-by-scan history (${entries.length} entries)</summary>
@@ -3954,6 +4047,7 @@ function renderTickerDetail(d) {
     ? `<div class="tags">
         <span class="tag freshness-${esc(d.eval_freshness)}">${esc(FRESHNESS_LABELS[d.eval_freshness] || d.eval_freshness)}</span>
         <span class="muted">${d.last_evaluated_at && typeof formatTimestampET === "function" ? `Last evaluated: ${esc(formatTimestampET(d.last_evaluated_at))}` : "Not yet evaluated"}</span>
+        <span class="muted">${typeof formatTimestampET === "function" ? `Last successful data collection: ${d.last_successful_collection_at ? esc(formatTimestampET(d.last_successful_collection_at)) : "none recorded"}` : ""}</span>
         <button id="tickerRefreshBtn" type="button" class="btn-refresh" title="Re-runs signal detection (the gates/state above) for this ticker only. Does NOT refresh the price chart -- use the chart panel's own Load Chart Data / range buttons for that.">Refresh this ticker (signal only)</button>
       </div>`
     : "";
@@ -3966,16 +4060,19 @@ function renderTickerDetail(d) {
       <div class="tags">
         <span class="tag">confidence: ${esc(d.confidence)}</span>
         <span class="tag">${esc(d.signal_type)}</span>
-        <span class="tag">qualifying days: ${d.qualifying_days_count}</span>
+        <span class="tag" title="Distinct NYSE trading sessions with qualifying evidence in the current qualification episode.">qualifying sessions (episode): ${d.qualifying_days_count}</span>
+        ${d.evidence_session ? `<span class="tag" title="The NYSE trading session the evaluated evidence belongs to.">evidence session: ${esc(d.evidence_session)}</span>` : ""}
       </div>
       <div class="read primary-headline" id="tickerPrimaryHeadline">${esc(primaryHeadline)}</div>
       <div class="read">${esc(primaryCurrentRead(d))}</div>
-      <div class="read">${esc(transitionLabel(d.previous_state, d.state))}</div>
+      <div class="read">${esc(!d.state && !isNotEvaluated(d)
+        ? `Evaluated: no active qualification (${TRANSITION_RULE_GLOSS[d.transition_rule] || "no qualifying evidence"})`
+        : transitionLabel(d.previous_state, d.state))}</div>
       <div class="read">Confidence reason: ${esc(d.confidence_reason)}</div>
     </div>
     <div class="card chart-card chart-card-prominent">
       <div class="card-head"><strong>Price Chart &mdash; ${esc(d.ticker)}</strong>
-        <span class="muted">evidence markers from the same flow_alerts/darkpool_trades the gates use</span></div>
+        <span class="muted">markers: UW observations in the chart's data (see note below) &mdash; not necessarily the exact snapshot the signal gates evaluated</span></div>
       <!-- Phase B (2026-10-14): timeframe row wired by app.live.js's
            initChartRangeRow() (production-inspired timeframeRow/
            wireTimeframeRow pattern) -- each click is a REAL re-fetch
@@ -3984,6 +4081,7 @@ function renderTickerDetail(d) {
       <div id="ohlcChartContainer" class="chart-container"><div class="empty">Loading chart...</div></div>
       <div id="chartVolumeLabel" class="muted" style="margin-top:4px;font-size:11px"></div>
       <div id="chartRangeNote" class="muted" style="margin-top:6px;font-size:11px"></div>
+      <div id="chartMarkerProvenance" class="muted" style="margin-top:2px;font-size:11px"></div>
       <!-- C1 activity timeline (2026-10-15): flow-alert (orange) vs
            dark-pool (blue) counts by time-of-day -- see mountActivityTimeline's
            module comment for why this is single-session, not multi-day. -->
@@ -4023,6 +4121,8 @@ function renderTickerDetail(d) {
 // JSON is kept, fully intact, just demoted into a clearly-labeled,
 // collapsed-by-default "Developer / Debug" disclosure at the very bottom.
 function _fa(a, key) { return Number(a[key] || 0); }
+// Display helper: a missing value is shown as unknown, never as $0.
+function _faOrNull(a, key) { return a[key] == null || a[key] === "" ? null : Number(a[key]); }
 
 // Bug fix (#36, 2026-10-15 round 2): real UW flow-alert rows carry a
 // `type` string field ("call"/"put"), NOT `is_call`/`is_put` booleans --
@@ -4086,8 +4186,12 @@ function renderRawDataSummary(d) {
   const ruleGloss = TRANSITION_RULE_GLOSS[d.transition_rule] || "internal rule identifier";
 
   const askShare = (of.askPrem + of.bidPrem) > 0 ? of.askPrem / (of.askPrem + of.bidPrem) : null;
+  const coll = d.collection || {};
+  const failedTxt = (k, label) => (coll[k] && coll[k].ok === false)
+    ? `${label} could not be collected this scan (${esc(coll[k].status)}) -- unavailable, not "no activity".`
+    : null;
   const optionsRows = of.count === 0
-    ? `<tr><td colspan="2" class="muted">No options flow alerts returned this scan.</td></tr>`
+    ? `<tr><td colspan="2" class="muted">${failedTxt("options_flow", "Options flow") || "No options flow alerts returned this scan."}</td></tr>`
     : `
       <tr><td>Call vs put alerts</td><td>${of.callCount} call (${fmtMoney(of.callPrem) ?? "$0"}) &middot; ${of.putCount} put (${fmtMoney(of.putPrem) ?? "$0"})</td></tr>
       <tr><td>Total options premium</td><td>${fmtMoney(of.totalPrem) ?? "$0"}</td></tr>
@@ -4095,20 +4199,26 @@ function renderRawDataSummary(d) {
       <tr><td>Repeated hits / unusual flow</td><td>${of.sweepCount} sweep-flagged, ${of.multilegCount} multileg-flagged (of ${of.count} alert${of.count === 1 ? "" : "s"})</td></tr>`;
 
   const dpRows = dp.count === 0
-    ? `<tr><td colspan="2" class="muted">No dark-pool trades returned this scan.</td></tr>`
+    ? `<tr><td colspan="2" class="muted">${failedTxt("darkpool", "Dark-pool data") || "No dark-pool trades returned this scan."}</td></tr>`
     : `
       <tr><td>Dark-pool trade count</td><td>${dp.count}</td></tr>
       <tr><td>Dark-pool shares</td><td>${dp.totalShares.toLocaleString()}</td></tr>
       <tr><td>Dark-pool value</td><td>${fmtMoney(dp.totalValue) ?? "$0"}</td></tr>`;
 
   const notableRows = [
-    ...of.notable.map((a) => `<tr><td>Option alert</td><td>${esc(_flowSide(a) || "n/a")}</td><td>${fmtMoney(_fa(a, "total_premium")) ?? "n/a"}</td><td>${esc(a.created_at || "n/a")}</td></tr>`),
-    ...dp.notable.map((t) => `<tr><td>Dark-pool print</td><td>n/a</td><td>${fmtMoney(_fa(t, "premium")) ?? "n/a"}</td><td>${esc(t.executed_at || "n/a")}</td></tr>`),
+    ...of.notable.map((a) => `<tr><td>Option alert</td><td>${esc(_flowSide(a) || "n/a")}</td><td>${fmtMoney(_faOrNull(a, "total_premium")) ?? "n/a"}</td><td>${esc(a.created_at || "n/a")}</td></tr>`),
+    ...dp.notable.map((t) => `<tr><td>Dark-pool print</td><td>n/a</td><td>${fmtMoney(_faOrNull(t, "premium")) ?? "n/a"}</td><td>${esc(t.executed_at || "n/a")}</td></tr>`),
   ].join("") || `<tr><td colspan="4" class="muted">No individual records this scan.</td></tr>`;
 
-  const coverageNote = `This reflects a single most-recent snapshot from each UW endpoint this scan `
-    + `(${of.count} flow alert${of.count === 1 ? "" : "s"}, ${dp.count} dark-pool trade${dp.count === 1 ? "" : "s"}) `
-    + `-- not a multi-day historical pull. See "Signal Lifecycle" above for what real history this ticker has.`;
+  const rc = d.raw_counts || null;
+  const capTxt = rc && (rc.flow_alerts > of.count || rc.darkpool_trades > dp.count)
+    ? ` Showing the newest ${of.count} of ${rc.flow_alerts} alerts and ${dp.count} of ${rc.darkpool_trades} prints (display cap ${rc.cap}).`
+    : "";
+  const coverageNote = (d.evidence_session
+    ? `Evidence for trading session ${esc(d.evidence_session)} as collected so far `
+    : `Evidence returned this scan `)
+    + `(${of.count} flow alert${of.count === 1 ? "" : "s"}, ${dp.count} dark-pool trade${dp.count === 1 ? "" : "s"}).${capTxt} `
+    + `Times are UTC as reported by UW. See "Signal Lifecycle" above for what real history this ticker has.`;
 
   return `
     <div class="card evidence-raw-summary-card">

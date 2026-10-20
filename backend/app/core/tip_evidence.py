@@ -71,7 +71,9 @@ HIGHEST_MAX = 5               # visual emphasis only; never a minimum
 INDEX_CONTEXT_TICKERS = ("SPY", "QQQ")  # eligible under the same rules; labelled, never forced
 FLOOR_TRADE_RULES = ("FloorTradeSmallCap", "FloorTradeMidCap", "FloorTradeLargeCap")  # frozen UW family
 STATE_RANK = {"CONFIRMED": 3, "STRENGTHENING": 3, "BUILDING": 2, "NEW": 1}
-ANOMALY_GATES = ("dark_pool_anomaly", "historical_percentile", "options_flow_anomaly")
+# historical_percentile removed (signal-integrity remediation): the synthetic
+# estimator can never make a ticker qualify for Market Radar.
+ANOMALY_GATES = ("dark_pool_anomaly", "options_flow_anomaly")
 FAMILY_LABELS = {"dark_pool": "Dark pool", "options": "Options", "alerts": "UW alerts", "floor": "FloorTrade",
                  "synthetic_baseline": "Synthetic baseline estimate"}
 
@@ -501,7 +503,10 @@ def headline(item):
     parts = [p for p in parts if p]
     if not parts:
         gp = item.get("gates_passed") or []
-        parts = ["TIP anomaly gate passed: " + ", ".join(g.replace("_", " ") for g in gp)] if gp else ["Unusual activity"]
+        # Signal-integrity remediation: with no evidence family at all, the
+        # old "Unusual activity" fallback asserted something nothing showed.
+        parts = (["TIP anomaly gate passed: " + ", ".join(g.replace("_", " ") for g in gp)] if gp
+                 else ["No qualifying evidence this scan"])
     return " \u00b7 ".join(parts)
 
 

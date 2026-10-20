@@ -15,6 +15,7 @@ from .base import UWDataAdapter
 
 class SyntheticDataAdapter(UWDataAdapter):
     mode = "demo"
+    collection_source = "synthetic_fixture"
 
     def __init__(self, fixtures_dir: str):
         self.fixtures_dir = Path(fixtures_dir)

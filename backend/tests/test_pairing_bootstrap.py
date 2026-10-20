@@ -12,6 +12,8 @@ security design this exercises.
 """
 from __future__ import annotations
 
+import os
+
 import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
@@ -134,6 +136,7 @@ def test_pairing_store_rotates_a_new_code_on_every_successful_pairing(app_main):
     assert code2 != code1
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX file modes are not enforced on NTFS")
 def test_pairing_store_file_is_0600(tmp_path):
     import stat
 

@@ -32,6 +32,41 @@ This is a clean-room extraction/port for the hackathon -- it does not import
 or depend on the production TIP app, has no Postgres/TimescaleDB/Databento
 dependency, and makes no calls to the production TIP service.
 
+## Signal integrity (read before interpreting any label)
+
+Confidence and lifecycle labels are rule-based evidence-coverage descriptions, **not probabilities and not predictions**. In Live Mode both real gates (dark pool, options flow) need at least 20 fully collected prior trading sessions before they can pass or fail; until then they honestly report "insufficient". A provider failure is reported as unavailable data, never as a quiet market. See [docs/SIGNAL_INTEGRITY_RULES.md](docs/SIGNAL_INTEGRITY_RULES.md), [docs/GATE_PROOF.md](docs/GATE_PROOF.md) and [docs/TRADING_VALIDITY.md](docs/TRADING_VALIDITY.md).
+
+### Building Live baselines
+
+A Live **Refresh** collects only the current evidence session. Prior sessions are collected by one of two
+paths; with neither, the gates stay "insufficient" indefinitely.
+
+1. **Explicit backfill (operator-run, no scheduler needed).** Run on the machine hosting TIP. Each call walks
+   back through prior sessions, newest first, using at most `max_pages` (capped at 200) UW requests through
+   the normal 2-concurrent-request gate. Repeat per ticker until the response shows
+   `eligible_sessions` ≥ 20 for both datasets, or a provider history cutoff:
+
+   ```bash
+   curl -X POST "http://127.0.0.1:8000/api/ticker/SPY/baseline/backfill?max_pages=200" -H "Origin: http://127.0.0.1:8000" -H "Sec-Fetch-Site: same-origin"
+   ```
+
+   (Local Mode accepts these headers only on a loopback-bound install; adjust the port to your `BIND_PORT`.)
+2. **Scheduler `enabled`.** Each evaluating cycle during market hours also backfills
+   `TIP_BASELINE_BACKFILL_PAGES` pages for `TIP_BASELINE_BACKFILL_TICKERS_PER_CYCLE` rotating watchlist
+   tickers. `disabled` and `dry_run` never backfill.
+
+Measured cost for one SPY-scale ticker (about 50,000 dark-pool prints and 15,000 flow alerts per session):
+- about 2,800–4,200 UW pages for 20 sessions, about 4,200–6,300 for the full 30-session lookback;
+- a busy ticker prints roughly 3–5 dark-pool pages per 15 minutes, so the default 4-page budget per
+  Refresh (`TIP_SCAN_COVERAGE_PAGES`) cannot walk the current session back to the open on its own; raise
+  it (e.g. 25) or rely on backfill, otherwise the evidence session stays "not verified from the open";
+- about 1.6 GB of SQLite storage at 30 sessions;
+- about 12 s (mid-session) to 22 s (after the close) of baseline computation per refresh, with ~0.5 GB peak
+  memory.
+
+Observations are not pruned automatically yet; monitor the size of the data volume. Thinner tickers cost a
+small fraction of this.
+
 ## Why this exists / what's ported vs. rebuilt
 
 | Component | Source | What changed |
@@ -683,6 +718,21 @@ one-bad-call/connection-failure/timeout/unparseable-output/missing-venv all
 degrading or raising the documented way, all via `monkeypatch` on
 `subprocess.run`, no network or real `mcp` SDK/venv required for the suite
 to pass.
+
+### Signal-integrity, replay and network safety
+
+- The pytest suite refuses any non-loopback network connection (`backend/tests/conftest.py`);
+  set `TIP_ALLOW_LIVE_NETWORK_TESTS=1` only for a deliberate, bounded live check.
+- End-to-end Live-mode tests replay data over a real local socket with
+  `tools/uw_replay_server.py`, which implements the live-verified UW pagination
+  semantics (`docs/UW_PAGINATION_VERIFICATION.md`):
+  - **public:** `fixtures/synthetic_uw/` (fully synthetic) --
+    `backend/tests/test_e2e_live_replay_synthetic.py`, `frontend/test_e2e_live_replay_cdp.py`;
+  - **private, optional:** a locally built real capture in `fixtures/recorded_uw/`
+    (git-ignored, never distributed). Tests that need it skip when it is absent.
+- Browser end-to-end: start `tools/uw_replay_server.py --as-of 2026-10-16T15:02:30Z`, a
+  backend with `UW_BASE_URL=http://127.0.0.1:<replay port>`, `TIP_REPLAY_CLOCK=2026-10-16T15:02:30Z`
+  and matching `BIND_PORT`, then run `frontend/test_e2e_live_replay_cdp.py`.
 
 ## Fixtures
 

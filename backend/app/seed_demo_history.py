@@ -55,22 +55,32 @@ def _seed_one(store, adapter, ticker: str) -> Optional[str]:
     if stock_state and not stock_state.get("unavailable"):
         price_move_pct = stock_state.get("change_percent")
 
-    from .core import scan_service
-    today = date.today()
-    backdated_days = [today - timedelta(days=2), today - timedelta(days=1)]
+    from datetime import datetime, timezone
+
+    from .core import lifecycle, scan_service
+    from .core import trading_calendar as tc
+    # The two NYSE trading sessions before the current evidence session
+    # (never weekend/holiday calendar dates).
+    current_session = tc.evidence_session_date(datetime.now(timezone.utc))
+    prior = tc.previous_trading_day(current_session)
+    backdated_sessions = [tc.previous_trading_day(prior), prior]
     current_state = None
-    for d in backdated_days:
-        qualifying_days = store.qualifying_days_count(ticker)
+    for d in backdated_sessions:
+        ctx = store.context(ticker, d.isoformat())
         scan = scan_service.evaluate_ticker_scan(
             ticker=ticker,
             flow_alerts=flow_alerts,
             darkpool_trades=darkpool_trades,
-            current_state=current_state,
-            qualifying_days_count=qualifying_days,
+            current_state=ctx.state,
+            qualifying_days_count=len(ctx.qualifying_sessions),
             price_move_pct=price_move_pct,
+            mode="demo",
+            lifecycle_context=ctx,
+            session_date=d,
+            price_last=(stock_state or {}).get("last_price"),
         )
-        any_gate_passed = len(scan["gates_passed"]) > 0
-        store.record_scan(ticker, any_gate_passed, scan["state"], scan_date=d.isoformat())
+        store.apply(ticker, lifecycle.LifecycleDecision(**scan["lifecycle"]),
+                    scanned_at=datetime.combine(d, datetime.min.time(), tzinfo=timezone.utc).isoformat())
         current_state = scan["state"]
     return current_state
 

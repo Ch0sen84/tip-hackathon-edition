@@ -67,7 +67,9 @@ def test_immediate_refresh_and_subsequent_cached_get_agree_on_transition_rule_fo
         "the IMMEDIATE refresh response's newest history entry is missing transition_rule -- "
         "exactly the round 13 item 2 regression (history-enrichment gated on served_from_cache)"
     )
-    assert newest_from_refresh["transition_rule"] == "no_qualifying_evidence_yet", (
+    # Live Mode with no session baselines yet: nothing independent could be
+    # evaluated, so the scan is held (signal-integrity remediation).
+    assert newest_from_refresh["transition_rule"] == "held_insufficient_evidence", (
         f"expected the first zero-gate evaluation's real reason string, got "
         f"{newest_from_refresh['transition_rule']!r}"
     )
@@ -79,13 +81,15 @@ def test_immediate_refresh_and_subsequent_cached_get_agree_on_transition_rule_fo
     assert get_body["served_from_cache"] is True
     get_history = get_body["history"]
     newest_from_get = get_history[-1]
-    assert newest_from_get["transition_rule"] == "no_qualifying_evidence_yet"
+    assert newest_from_get["transition_rule"] == "held_insufficient_evidence"
 
     # The actual regression this test exists to catch: both paths must
     # produce the IDENTICAL shape for the newest entry, not merely the
     # same final value by coincidence.
     assert newest_from_refresh["transition_rule"] == newest_from_get["transition_rule"]
-    assert newest_from_refresh["state"] == newest_from_get["state"] == "NEW"
+    # No qualifying evidence => no qualification episode opens (state None),
+    # never a "NEW" label (signal-integrity remediation).
+    assert newest_from_refresh["state"] is None and newest_from_get["state"] is None
 
     assert mock_session.get.call_count > 0  # the one real fetch this test deliberately triggers
 
@@ -106,15 +110,17 @@ def test_second_zero_gate_evaluation_also_gets_enriched_on_the_immediate_refresh
     client = TestClient(app_main.app)
 
     first = client.post(f"/api/ticker/{ticker}/refresh").json()
-    assert first["transition_rule"] == "no_qualifying_evidence_yet"
-    assert first["state"] == "NEW"
+    assert first["transition_rule"] == "held_insufficient_evidence"
+    assert first["state"] is None
 
+    # A second scan without baselines still opens nothing.
     second = client.post(f"/api/ticker/{ticker}/refresh").json()
-    assert second["transition_rule"] == "no_gate_passed_remains_new", (
-        f"expected the L1 guard's second zero-gate reason, got {second['transition_rule']!r}"
+    assert second["transition_rule"] == "held_insufficient_evidence", (
+        f"expected the insufficient-evidence reason, got {second['transition_rule']!r}"
     )
+    assert second["state"] is None
     newest = second["history"][-1]
-    assert newest["transition_rule"] == "no_gate_passed_remains_new", (
+    assert newest["transition_rule"] == "held_insufficient_evidence", (
         "the SECOND zero-gate reason's immediate-refresh history entry must also carry "
         "its real transition_rule, not just the first evaluation's"
     )

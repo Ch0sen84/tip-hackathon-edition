@@ -100,10 +100,77 @@ def app_main(tmp_path, monkeypatch):
     # state (and in-flight counters) can never leak into the next test.
     _main._catalog = None
     _main._store = None
+    _main._demo_store = None
+    # the reusable Live HTTP client (and its base URL / circuit-breaker
+    # state) must not leak from one test into the next
+    _main._last_live_client = None
+    _main._last_live_client_key_sig = None
     _main._reset_scheduler_runner()
     from app.core import uw_concurrency as _uw_concurrency
     _uw_concurrency.reset_shared_gate_for_tests()
     monkeypatch.setattr(_main.settings, "public_demo", False)
     monkeypatch.setattr(_main.settings, "uw_api_key", "")
+    # Never the public UW host: any route that makes a real UW request
+    # (e.g. POST /api/settings/uw-key/test) hits a dead loopback port.
+    monkeypatch.setattr(_main.settings, "uw_base_url", "http://127.0.0.1:9")
     _main.auth_token = _main._auth_store.get_or_create()
     yield _main
+
+
+# --- Network guard (signal-integrity remediation) -----------------------
+#
+# The suite must never reach Unusual Whales, an LLM provider, or any other
+# external host by accident (the 05c47ca audit found a test path that could
+# send a real request to api.unusualwhales.com). Every socket connect / DNS
+# lookup to a non-loopback destination raises instead. In-process
+# TestClient traffic never opens a socket, and loopback servers (e.g. the
+# recorded-data replay server used by the Live-mode end-to-end tests) stay
+# allowed. Set TIP_ALLOW_LIVE_NETWORK_TESTS=1 to opt in deliberately.
+import socket as _socket
+
+_LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost", "0.0.0.0", "testserver", "testclient"}
+
+
+class ExternalNetworkBlocked(RuntimeError):
+    pass
+
+
+def _host_of(address):
+    if isinstance(address, (tuple, list)) and address:
+        return str(address[0])
+    return str(address)
+
+
+def _is_loopback_host(host: str) -> bool:
+    host = (host or "").strip("[]").lower()
+    return host in _LOOPBACK_HOSTS or host.startswith("127.")
+
+
+@pytest.fixture(autouse=True)
+def _block_external_network(monkeypatch):
+    if os.environ.get("TIP_ALLOW_LIVE_NETWORK_TESTS") == "1":
+        yield
+        return
+    real_connect = _socket.socket.connect
+    real_connect_ex = _socket.socket.connect_ex
+    real_getaddrinfo = _socket.getaddrinfo
+
+    def guarded_connect(self, address):
+        if self.family != getattr(_socket, "AF_UNIX", object()) and not _is_loopback_host(_host_of(address)):
+            raise ExternalNetworkBlocked(f"test attempted an external connection to {address!r}")
+        return real_connect(self, address)
+
+    def guarded_connect_ex(self, address):
+        if self.family != getattr(_socket, "AF_UNIX", object()) and not _is_loopback_host(_host_of(address)):
+            raise ExternalNetworkBlocked(f"test attempted an external connection to {address!r}")
+        return real_connect_ex(self, address)
+
+    def guarded_getaddrinfo(host, *args, **kwargs):
+        if host is not None and not _is_loopback_host(str(host)):
+            raise ExternalNetworkBlocked(f"test attempted an external DNS lookup for {host!r}")
+        return real_getaddrinfo(host, *args, **kwargs)
+
+    monkeypatch.setattr(_socket.socket, "connect", guarded_connect)
+    monkeypatch.setattr(_socket.socket, "connect_ex", guarded_connect_ex)
+    monkeypatch.setattr(_socket, "getaddrinfo", guarded_getaddrinfo)
+    yield

@@ -23,6 +23,12 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "backend"))
 
 os.environ["TIP_MODE"] = "demo"
+# In-process TestClient host (the Phase A Host hardening otherwise rejects
+# "testserver", which silently broke these capture tools).
+os.environ.setdefault("ALLOWED_HOST", "testserver")
+# Never write a capture-run auth token into the repository.
+import tempfile  # noqa: E402
+os.environ.setdefault("TIP_AUTH_TOKEN_PATH", os.path.join(tempfile.mkdtemp(prefix="tip_capture_"), ".auth_token"))
 os.environ["TIP_DB_PATH"] = ":memory:"
 os.environ["TIP_SETTINGS_PATH"] = str(REPO_ROOT / ".capture_settings_tmp2.json")
 os.environ["TIP_FIXTURES_DIR"] = str(REPO_ROOT / "fixtures")
@@ -40,6 +46,10 @@ def _write(path: Path, payload) -> None:
 
 def main():
     client = TestClient(app)
+    # Mutating demo routes (POST /api/investigate) require the local auth
+    # token since Phase A; use this process's own token store.
+    from app import main as _main
+    client.headers["X-TIP-Auth"] = _main._auth_store.get_or_create()
     adapter = SyntheticDataAdapter(str(REPO_ROOT / "fixtures"))
     data_dir = REPO_ROOT / "static-demo" / "data"
 

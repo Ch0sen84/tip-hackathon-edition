@@ -226,6 +226,36 @@ PercentileGateFn = Callable[[str, float], dict]
 
 # --- Gate evaluation --------------------------------------------------------
 
+# Gate status vocabulary (signal-integrity remediation). `passed` stays a
+# bool for backward compatibility; `status` says what the gate actually
+# observed so a missing input is never read as a genuine negative:
+#   pass / fail      -- evaluated on real (or, in Demo, fixture) inputs
+#   insufficient     -- inputs collected, but the method lacks the history /
+#                       coverage it needs to decide (e.g. no baseline yet)
+#   unavailable      -- the provider could not be reached for this input
+#   unsupported      -- not available in this mode/build (e.g. no manual
+#                       catalyst workflow in Live; synthetic estimator in Live)
+#   synthetic        -- Demo-only illustrative value, zero decision weight
+#   not_evaluated    -- preconditions absent (e.g. no qualifying flow to confirm)
+#   context          -- descriptive bookkeeping, zero decision weight
+EVALUABLE_STATUSES = ("pass", "fail")
+DECISION_WEIGHT = {
+    "dark_pool_anomaly": "independent",
+    "options_flow_anomaly": "independent",
+    "catalyst_identified": "independent",
+    "price_confirmation": "corroborating",
+    "historical_percentile": "none",
+    "persistence": "none",
+    "multi_signal_confirmation": "derived",
+    "data_quality": "none",
+}
+
+
+def _gate(passed, status, source, metrics, name):
+    return {"passed": bool(passed), "status": status, "source": source,
+            "decision_weight": DECISION_WEIGHT[name], "metrics": metrics}
+
+
 def evaluate_gates(ticker: str, *, tier1_hit: bool = False, tier1_bootstrap: bool = False,
                     tier1_ratio: Optional[float] = None, tier1_z: Optional[float] = None,
                     tier2_hit: bool = False, tier2_qualifying_prints: int = 0,
@@ -237,125 +267,197 @@ def evaluate_gates(ticker: str, *, tier1_hit: bool = False, tier1_bootstrap: boo
                     direction_heuristic: Optional[str] = None,
                     catalyst_identified: bool = False,
                     api_errors: int = 0,
-                    percentile_gate_fn: Optional[PercentileGateFn] = None) -> dict:
-    """Evaluates every named gate for one ticker/scan. Returns
-    {gate_name: {"passed": bool, "metrics": {...}}}. Pure function -- does
-    not touch the DB or network. `percentile_gate_fn` defaults to the
-    synthetic estimator above; inject a real one (e.g. a LiveUWAdapter-backed
-    historical calculation) to change only that one gate's data source."""
-    percentile_gate_fn = percentile_gate_fn or synthetic_percentile_gate
+                    percentile_gate_fn: Optional[PercentileGateFn] = None,
+                    options_flow_available: bool = True,
+                    darkpool_available: bool = True,
+                    collection_status: Optional[dict] = None,
+                    direction_detail: Optional[dict] = None,
+                    mode: str = "demo",
+                    dark_pool_source: Optional[str] = None,
+                    dark_pool_metrics: Optional[dict] = None,
+                    options_flow_status: Optional[str] = None,
+                    options_flow_source: Optional[str] = None,
+                    persistence_sessions: Optional[int] = None) -> dict:
+    """Evaluates every named gate for one ticker/scan. Pure function -- no
+    DB or network. `mode` ("live" | "demo") selects which inputs are
+    legitimate: in Live, the synthetic percentile estimator and the
+    (fixture-only) catalyst flag are reported as `unsupported` and can never
+    pass; in Demo they are labeled synthetic/fixture-sourced. See the
+    status vocabulary above; only INDEPENDENT_SIGNAL_GATES ever count toward
+    confidence or lifecycle decisions."""
+    live = mode == "live"
+    collection_status = dict(collection_status or {})
     gates = {}
 
-    gates["dark_pool_anomaly"] = {
-        "passed": bool(tier1_hit and not tier1_bootstrap),
-        "metrics": {"ratio": tier1_ratio, "z_score": tier1_z, "bootstrap": tier1_bootstrap},
-    }
+    # dark_pool_anomaly ------------------------------------------------------
+    dp_metrics = {"ratio": tier1_ratio, "z_score": tier1_z, "bootstrap": tier1_bootstrap}
+    dp_metrics.update(dark_pool_metrics or {})
+    if not darkpool_available:
+        gates["dark_pool_anomaly"] = _gate(False, "unavailable", dark_pool_source or "uw_darkpool", {
+            "unavailable": True, "reason": "dark-pool data could not be collected this scan",
+            "collection_status": collection_status.get("darkpool")}, "dark_pool_anomaly")
+    elif tier1_bootstrap:
+        gates["dark_pool_anomaly"] = _gate(False, "insufficient", dark_pool_source or "uw_darkpool",
+                                           dp_metrics, "dark_pool_anomaly")
+    else:
+        hit = bool(tier1_hit)
+        gates["dark_pool_anomaly"] = _gate(hit, "pass" if hit else "fail", dark_pool_source or "uw_darkpool",
+                                           dp_metrics, "dark_pool_anomaly")
 
-    gates["options_flow_anomaly"] = {
-        "passed": bool(options_flow_hit),
-        "metrics": options_flow_metrics or {},
-    }
+    # options_flow_anomaly ---------------------------------------------------
+    of_metrics = dict(options_flow_metrics or {})
+    if not options_flow_available:
+        gates["options_flow_anomaly"] = _gate(False, "unavailable", options_flow_source or "uw_flow_alerts", {
+            "unavailable": True, "reason": "options flow could not be collected this scan",
+            "collection_status": collection_status.get("options_flow")}, "options_flow_anomaly")
+    else:
+        status = options_flow_status or ("pass" if options_flow_hit else "fail")
+        gates["options_flow_anomaly"] = _gate(status == "pass", status, options_flow_source or "uw_flow_alerts",
+                                              of_metrics, "options_flow_anomaly")
+    of_qualified = gates["options_flow_anomaly"]["passed"]
 
-    pct_gate = None
-    if today_premium is not None:
-        pct_gate = percentile_gate_fn(ticker, today_premium)
-    gates["historical_percentile"] = {
-        "passed": bool(pct_gate and pct_gate.get("passed")),
-        "metrics": pct_gate or {"reason": "not evaluated (no today_premium supplied)"},
-    }
+    # historical_percentile (synthetic) ---------------------------------------
+    if live:
+        gates["historical_percentile"] = _gate(False, "unsupported", "none", {
+            "reason": "the static premium-bucket estimator is synthetic and disabled in Live Mode; "
+                      "no real trailing-percentile history exists in this build"}, "historical_percentile")
+    elif today_premium is None:
+        gates["historical_percentile"] = _gate(False, "not_evaluated", "synthetic_estimator",
+                                               {"reason": "no premium supplied"}, "historical_percentile")
+    else:
+        pct = (percentile_gate_fn or synthetic_percentile_gate)(ticker, today_premium)
+        metrics = dict(pct)
+        metrics["illustrative_percentile"] = metrics.pop("percentile", None)
+        metrics["bucket_passed"] = bool(metrics.pop("passed", False))
+        if metrics.get("synthetic"):
+            metrics.pop("window_days", None)  # the static buckets have no trailing window
+        metrics["note"] = ("illustrative only: a fixed premium-size bucket, not a historical percentile; "
+                           "zero weight in every decision")
+        gates["historical_percentile"] = _gate(False, "synthetic", "synthetic_estimator", metrics,
+                                               "historical_percentile")
 
-    gates["persistence"] = {
-        "passed": bool(tier2_hit or is_new_qualifying_day),
-        "metrics": {"tier2_qualifying_prints": tier2_qualifying_prints,
-                    "tier2_max_pct": tier2_max_pct, "is_new_qualifying_day": is_new_qualifying_day},
-    }
+    # persistence (context only) ----------------------------------------------
+    if persistence_sessions is not None:
+        gates["persistence"] = _gate(persistence_sessions >= 2, "context", "lifecycle_episode", {
+            "qualifying_sessions_in_episode": persistence_sessions,
+            "note": "distinct trading sessions with qualifying evidence in the current episode; "
+                    "not independent evidence"}, "persistence")
+    else:
+        gates["persistence"] = _gate(bool(tier2_hit or is_new_qualifying_day), "context", "none", {
+            "tier2_qualifying_prints": tier2_qualifying_prints, "tier2_max_pct": tier2_max_pct,
+            "is_new_qualifying_day": is_new_qualifying_day}, "persistence")
 
-    price_confirmed = None
-    if price_move_pct is not None and direction_heuristic in ("bullish-lean", "bearish-lean"):
+    # price_confirmation (corroborating) --------------------------------------
+    pc_metrics = {"price_move_pct": price_move_pct, "direction_heuristic": direction_heuristic,
+                  "confirmed": None,
+                  "direction_basis": (direction_detail or {}).get("basis"),
+                  "direction_ambiguity": (direction_detail or {}).get("ambiguity"),
+                  "call_buy_share": (direction_detail or {}).get("call_buy_share"),
+                  "note": "a same-direction price move is coincident, not proof the lean was right"}
+    if collection_status.get("stock_state", "ok") != "ok":
+        pc_status, pc_passed = "unavailable", False
+    elif not (of_qualified and options_flow_available):
+        pc_status, pc_passed = "not_evaluated", False
+    elif direction_heuristic not in ("bullish-lean", "bearish-lean"):
+        pc_status, pc_passed = "not_evaluated", False
+    elif price_move_pct is None:
+        pc_status, pc_passed = "unavailable", False
+    else:
         expected_up = direction_heuristic == "bullish-lean"
-        actual_up = price_move_pct > 0
-        price_confirmed = (expected_up == actual_up)
-    gates["price_confirmation"] = {
-        "passed": bool(price_confirmed),
-        "metrics": {"price_move_pct": price_move_pct, "direction_heuristic": direction_heuristic,
-                    "confirmed": price_confirmed},
-    }
+        confirmed = (expected_up == (price_move_pct > 0))
+        pc_metrics["confirmed"] = confirmed
+        pc_status, pc_passed = ("pass" if confirmed else "fail"), confirmed
+    gates["price_confirmation"] = _gate(pc_passed, pc_status, "uw_stock_state", pc_metrics, "price_confirmation")
 
-    gates["catalyst_identified"] = {
-        "passed": bool(catalyst_identified),
-        "metrics": {"note": "not auto-computed -- set explicitly when a real catalyst is found"},
-    }
+    # catalyst_identified ------------------------------------------------------
+    if live:
+        gates["catalyst_identified"] = _gate(False, "unsupported", "none", {
+            "note": "manual-only gate: this build has no catalyst-verification workflow, so it can "
+                    "never pass in Live Mode"}, "catalyst_identified")
+    else:
+        gates["catalyst_identified"] = _gate(bool(catalyst_identified), "pass" if catalyst_identified else "fail",
+                                             "fixture_flag", {"note": "Demo fixture flag, not auto-detected"},
+                                             "catalyst_identified")
 
-    # NOTE: tallies only INDEPENDENT_SIGNAL_GATES -- historical_percentile
-    # (synthetic) and persistence (calendar-date-only) never count toward
-    # this, even though both gates are still computed/displayed above. See
-    # this module's docstring, "SIGNAL-INTEGRITY RULE CHANGE" rule 2.
+    # multi_signal_confirmation -----------------------------------------------
     contributing = [g for g in INDEPENDENT_SIGNAL_GATES if gates[g]["passed"]]
+    evaluable = [g for g in INDEPENDENT_SIGNAL_GATES if gates[g]["status"] in EVALUABLE_STATUSES]
     multi = len(contributing) >= 2
-    gates["multi_signal_confirmation"] = {
-        "passed": multi,
-        "metrics": {
-            "contributing_gates": contributing,
-            "excluded_from_tally": ["historical_percentile", "persistence", "price_confirmation"],
-        },
-    }
+    gates["multi_signal_confirmation"] = _gate(multi, "pass" if multi else "fail", "derived", {
+        "contributing_gates": contributing,
+        "evaluable_independent_gates": evaluable,
+        "excluded_from_tally": ["historical_percentile", "persistence", "price_confirmation"],
+    }, "multi_signal_confirmation")
 
-    gates["data_quality"] = {
-        "passed": api_errors == 0 and not tier1_bootstrap,
-        "metrics": {"api_errors": api_errors, "bootstrap": tier1_bootstrap},
-    }
+    # data_quality: did every required collection succeed? -------------------
+    failed = sorted(k for k, v in collection_status.items() if v != "ok")
+    dq_ok = api_errors == 0 and not failed
+    gates["data_quality"] = _gate(dq_ok, "pass" if dq_ok else "fail", "collection", {
+        "api_errors": max(api_errors, len(failed)), "failed_sources": failed,
+        "collection_status": collection_status}, "data_quality")
 
     return gates
 
 
+def persistence_context_gate(qualifying_sessions: int) -> dict:
+    return _gate(qualifying_sessions >= 2, "context", "lifecycle_episode", {
+        "qualifying_sessions_in_episode": qualifying_sessions,
+        "note": "distinct trading sessions with qualifying evidence in the current episode; "
+                "not independent evidence"}, "persistence")
+
+
+def independent_gates_passed(gates: dict) -> list:
+    return [g for g in INDEPENDENT_SIGNAL_GATES if gates.get(g, {}).get("passed")]
+
+
+def independent_gates_evaluable(gates: dict) -> list:
+    out = []
+    for g in INDEPENDENT_SIGNAL_GATES:
+        gate = gates.get(g, {})
+        status = gate.get("status", "pass" if gate.get("passed") else "fail")
+        if status in EVALUABLE_STATUSES:
+            out.append(g)
+    return out
+
+
 # --- Confidence --------------------------------------------------------------
 
-def classify_confidence(gates: dict, is_watchlist: bool = False) -> tuple:
+def classify_confidence(gates: dict, is_watchlist: bool = False, collection_complete: bool = True) -> tuple:
     """Returns (confidence, signal_type, reason, qualifies).
 
-    SIGNAL-INTEGRITY RULE CHANGE (see this module's docstring): "high"
-    confidence now requires `multi_signal_confirmation` -- i.e. >= 2 of
-    `INDEPENDENT_SIGNAL_GATES` genuinely passing on this scan. A SINGLE
-    real gate (dark_pool_anomaly, options_flow_anomaly, price_confirmation,
-    or catalyst_identified) passing alone caps at "medium" -- even a strong
-    dark-pool ratio/z-score no longer reaches "high" by itself. The
-    SYNTHETIC `historical_percentile` gate and the calendar-date-only
-    `persistence` gate no longer have a confidence branch at all: neither
-    can produce "high" OR "medium" on its own anymore, by design (rule 1 of
-    the docstring note above) -- a ticker whose only passing gate is either
-    of those stays "low"/non-qualifying here, exactly like a ticker with no
-    passing gates at all.
+    Confidence is an ordinal EVIDENCE-COVERAGE label, not a probability and
+    not a forecast:
+      high          -- >= 2 INDEPENDENT_SIGNAL_GATES passed on this scan
+      medium        -- exactly one independent gate passed
+      low           -- independent gates were evaluated and none passed
+      insufficient  -- required data could not be collected, or no
+                       independent gate could be evaluated (missing history /
+                       unsupported) -- no confidence is assigned
+    Synthetic, context and corroborating gates (historical_percentile,
+    persistence, price_confirmation) never raise confidence.
     """
     if is_watchlist:
         return ("manual", "watchlist-manual",
                 "Manually marked for tracking (named watchlist ticker)", True)
 
+    if not collection_complete:
+        return ("insufficient", "collection_incomplete",
+                "Required market data could not be collected this scan -- no confidence is assigned "
+                "(a provider failure is not evidence either way)", False)
+
     multi = gates["multi_signal_confirmation"]
     dp = gates["dark_pool_anomaly"]
     of = gates["options_flow_anomaly"]
-    pc = gates["price_confirmation"]
     ci = gates["catalyst_identified"]
 
     if multi["passed"]:
         contributing = multi["metrics"]["contributing_gates"]
-        reason = f"Multi-signal confirmation (>=2 independent categories): {', '.join(contributing)}"
+        reason = f"Two independent evidence categories passed on this scan: {', '.join(contributing)}"
         return ("high", "multi-signal", reason, True)
 
     if dp["passed"]:
         ratio = dp["metrics"].get("ratio")
         z = dp["metrics"].get("z_score")
-        # BUG FIX (pre-Phase-D, Chad-approved narrow fix): this used to do
-        # f"...z={z:.1f}" unconditionally whenever `ratio` was truthy, which
-        # raises TypeError when tier1_z is None (e.g. a zero-variance
-        # historical baseline -- see dark_pool_baseline.compute_baseline,
-        # `stdev` can legitimately be 0.0 with < 2 historical sessions,
-        # which makes `z` None by that module's own `if stdev > 0` guard).
-        # Fix: the z-score clause is now itself conditional on z being
-        # present, independent of whether ratio is present -- when z is
-        # None, fall back to reporting the ratio alone instead of crashing.
-        # The ratio-and-z-both-present case below produces the EXACT SAME
-        # string as before this fix (see
-        # test_signal_engine.py::TestClassifyConfidenceGoldenValueUnchanged).
         if ratio:
             z_clause = f", z={z:.1f}" if z is not None else ""
             reason = (f"Single-category dark-pool anomaly only ({ratio:.1f}x avg{z_clause}) -- "
@@ -369,26 +471,33 @@ def classify_confidence(gates: dict, is_watchlist: bool = False) -> tuple:
                 "Single-category options-flow anomaly only -- not independently corroborated "
                 "by a 2nd category", True)
 
-    if pc["passed"]:
-        return ("medium", "single-signal-price-confirmation",
-                "Price action confirmed the expected direction, but with no other independent "
-                "category also passing", True)
-
     if ci["passed"]:
         return ("medium", "single-signal-catalyst",
                 "A catalyst was identified, but with no other independent category also passing", True)
 
-    if gates["dark_pool_anomaly"]["metrics"].get("bootstrap"):
-        return ("low", "t1-bootstrap", "Bootstrap-only, insufficient history -- not auto-qualified", False)
+    if not independent_gates_evaluable(gates):
+        return ("insufficient", "insufficient_evidence",
+                "No independent evidence category could be evaluated on this scan (missing baseline "
+                "history, unsupported, or unavailable) -- no confidence is assigned", False)
 
-    return ("low", "none", "No qualifying gate passed", False)
+    if dp.get("status") == "insufficient" or dp["metrics"].get("bootstrap"):
+        return ("low", "t1-bootstrap",
+                "Dark-pool baseline has insufficient history; the independent categories that could be "
+                "evaluated did not pass -- not qualified", False)
+
+    return ("low", "none", "Independent evidence categories were evaluated; none passed", False)
 
 
 # --- State machine ------------------------------------------------------------
 
+# NOTE (signal-integrity remediation): the running app's lifecycle decisions
+# are made by core/lifecycle.py (episode-scoped, NYSE-session-counted,
+# duplicate-evidence aware). determine_transition below is the single-scan
+# rule table kept for callers that evaluate one scan without episode
+# context (unit tests, pure-function callers).
 def determine_transition(current_state: Optional[str], gates: dict,
                           qualifying_days_count: int, price_move_pct: Optional[float],
-                          direction_heuristic: Optional[str]) -> tuple:
+                          direction_heuristic: Optional[str], collection_complete: bool = True) -> tuple:
     """Pure, deterministic. Returns (new_state, rule_id). current_state is
     None for a brand-new ticker (no open qualification record yet).
 
@@ -408,6 +517,11 @@ def determine_transition(current_state: Optional[str], gates: dict,
     see docstring rule 5 for the one residual limitation this does NOT
     close (repeated identical real evidence across qualifying days).
     """
+    # Incomplete collection (a provider 429/5xx/timeout/malformed body)
+    # is not evidence: never promote, demote or invalidate on it.
+    if not collection_complete:
+        return (current_state, "held_incomplete_collection")
+
     # Invalidation check first -- overrides everything else.
     if price_move_pct is not None and direction_heuristic in ("bullish-lean", "bearish-lean"):
         expected_up = direction_heuristic == "bullish-lean"
@@ -415,8 +529,10 @@ def determine_transition(current_state: Optional[str], gates: dict,
         if actual_pct <= INVALIDATION_ADVERSE_PCT:
             return ("INVALIDATED", f"adverse_price_move<= {INVALIDATION_ADVERSE_PCT}%")
 
-    any_gate_passed = any(g["passed"] for name, g in gates.items()
-                           if name not in ("multi_signal_confirmation", "catalyst_identified", "data_quality"))
+    # Only INDEPENDENT evidence keeps or advances a qualification: the
+    # synthetic percentile, the calendar-only persistence gate and the
+    # corroborating price_confirmation never do (audit B2/E6).
+    any_gate_passed = bool(independent_gates_passed(gates))
     confirmed = gates["multi_signal_confirmation"]["passed"]
 
     if current_state is None:
