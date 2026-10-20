@@ -104,6 +104,13 @@ services:
       # DEFAULT_MAX_CONCURRENT_REQUESTS docstring) -- kept here only so
       # it is genuinely configurable, never to suggest raising it.
       TIP_UW_MAX_CONCURRENT_REQUESTS: ${TIP_UW_MAX_CONCURRENT_REQUESTS:-2}
+      # Signal-integrity remediation: session-baseline collection budgets
+      # (see docs/UW_PAGINATION_VERIFICATION.md). Forwarded explicitly so .env
+      # values actually reach the container (same lesson as QA D9).
+      TIP_SCAN_COVERAGE_PAGES: ${TIP_SCAN_COVERAGE_PAGES:-4}
+      TIP_BASELINE_BACKFILL_PAGES: ${TIP_BASELINE_BACKFILL_PAGES:-60}
+      TIP_BASELINE_BACKFILL_TICKERS_PER_CYCLE: ${TIP_BASELINE_BACKFILL_TICKERS_PER_CYCLE:-2}
+      TIP_BASELINE_LOOKBACK_SESSIONS: ${TIP_BASELINE_LOOKBACK_SESSIONS:-30}
     volumes:
       - tip-data:/srv/data
 
