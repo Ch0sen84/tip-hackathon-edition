@@ -30,6 +30,10 @@ a pass and never a fail.
 """
 from __future__ import annotations
 
+import array
+import bisect
+import logging
+import os
 import statistics
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
@@ -60,6 +64,124 @@ def _f(v) -> float:
         return float(v or 0)
     except (TypeError, ValueError):
         return 0.0
+
+
+# --- Completed-session value curves (Phase 4 performance) ---------------------
+# A completed prior session is immutable once its coverage is complete, but the
+# comparison needs its value over the SAME elapsed slice as the evidence
+# session, which changes on every refresh -- so a full-session total cannot be
+# cached. Instead the cache holds the session's ordered (event time, value)
+# sequence: exactly the deduplicated, non-canceled observations the raw path
+# reads, in the same order. The slice value is then `sum()` over the same
+# elements in the same order as the raw path -- bit-identical by construction.
+# The cache is validated against the raw rows' signature on every use and
+# rebuilt on any change (late, corrected or canceled prints); raw rows remain
+# the source of truth. TIP_SESSION_CURVE_CACHE=0 disables it.
+CURVE_VERSION = 1
+CURVE_STATS = {"hits": 0, "misses": 0, "uncacheable": 0, "write_errors": 0, "sealed_hits": 0, "sealed_changed": 0}
+# Returned for a session whose raw rows were archived and pruned (tools/retention.py)
+# but which has since received new raw rows: neither the sealed aggregate nor the
+# remaining raw rows are complete, so the session is left out of the baseline until
+# it is restored from its archive.
+SEALED_CHANGED = object()
+_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
+_log = logging.getLogger(__name__)
+
+
+def _curve_cache_enabled() -> bool:
+    return os.environ.get("TIP_SESSION_CURVE_CACHE", "1") != "0"
+
+
+def _us(dt: datetime) -> int:
+    return (dt - _EPOCH) // timedelta(microseconds=1)
+
+
+class _Curve:
+    __slots__ = ("ts", "vals", "monotonic")
+
+    def __init__(self, ts, vals, monotonic):
+        self.ts, self.vals, self.monotonic = ts, vals, monotonic
+
+    @property
+    def n(self) -> int:
+        return len(self.ts)
+
+    def upto(self, cutoff: datetime) -> tuple:
+        """(sum of values, count) for observations with event time <= cutoff,
+        summed in catalog order -- the raw path's `sum()` over the same items."""
+        c = _us(cutoff)
+        if self.monotonic:
+            k = bisect.bisect_right(self.ts, c)
+            return sum(self.vals[:k]), k
+        picked = [v for t, v in zip(self.ts, self.vals) if t <= c]
+        return sum(picked), len(picked)
+
+
+def _build_curve(catalog, dataset: str, ticker: str, value_key: str, h_open: datetime, h_close: datetime):
+    """None when the session is not exactly cacheable: a duplicate key seen at
+    two different event times would make prefix-window deduplication differ
+    from full-window deduplication, so such sessions always use raw rows."""
+    first_ts: dict = {}
+    conflict = []
+
+    def on_dup(ts, key, _data):
+        if first_ts.get(key) != ts:
+            conflict.append(key)
+
+    ts_list, vals = array.array("q"), array.array("d")
+    for ts, key, data in catalog._iter_window(dataset, ticker, h_open, h_close, on_duplicate=on_dup):
+        first_ts[key] = ts
+        ts_list.append(_us(ts))
+        vals.append(_f(data.get(value_key)))
+    if conflict:
+        return None
+    monotonic = all(ts_list[i] <= ts_list[i + 1] for i in range(len(ts_list) - 1))
+    return _Curve(ts_list, vals, monotonic)
+
+
+def _session_curve(catalog, dataset: str, ticker: str, value_key: str, session_date: str,
+                   h_open: datetime, h_close: datetime, force: bool = False):
+    """`force` (tools/retention.py only) builds/validates the curve even when the
+    runtime cache switch is off."""
+    if not hasattr(catalog, "get_session_curve"):
+        return None
+    if not force and not _curve_cache_enabled():
+        row = catalog.get_session_curve(dataset, ticker, session_date, value_key)
+        if not (row and row.get("sealed")):
+            return None          # cache off: raw path, except retained (sealed) sessions which have no raw rows
+    w0, w1 = h_open.isoformat(), h_close.isoformat()
+    sig = catalog.observation_window_signature(dataset, ticker, h_open, h_close)   # BEFORE any build
+    row = catalog.get_session_curve(dataset, ticker, session_date, value_key)
+    if row and row.get("sealed"):
+        if (row["src_count"], row["src_max_id"]) != sig:
+            CURVE_STATS["sealed_changed"] += 1
+            return SEALED_CHANGED
+        ts, vals = array.array("q"), array.array("d")
+        ts.frombytes(row["ts_us"])
+        vals.frombytes(row["vals"])
+        CURVE_STATS["sealed_hits"] += 1
+        return _Curve(ts, vals, row["monotonic"])
+    if (row and row["curve_version"] == CURVE_VERSION and row["window_start_utc"] == w0
+            and row["window_end_utc"] == w1 and (row["src_count"], row["src_max_id"]) == sig):
+        ts, vals = array.array("q"), array.array("d")
+        ts.frombytes(row["ts_us"])
+        vals.frombytes(row["vals"])
+        CURVE_STATS["hits"] += 1
+        return _Curve(ts, vals, row["monotonic"])
+    curve = _build_curve(catalog, dataset, ticker, value_key, h_open, h_close)
+    if curve is None:
+        CURVE_STATS["uncacheable"] += 1
+        return None
+    CURVE_STATS["misses"] += 1
+    try:
+        catalog.put_session_curve(dataset, ticker, session_date, value_key, {
+            "curve_version": CURVE_VERSION, "window_start_utc": w0, "window_end_utc": w1,
+            "src_count": sig[0], "src_max_id": sig[1], "n": curve.n, "monotonic": curve.monotonic,
+            "ts_us": curve.ts.tobytes(), "vals": curve.vals.tobytes()})
+    except Exception as exc:  # noqa: BLE001 -- derived cache only; the raw-derived curve is still correct
+        CURVE_STATS["write_errors"] += 1
+        _log.warning("session curve cache write failed for %s %s %s: %s", dataset, ticker, session_date, exc)
+    return curve
 
 
 @dataclass
@@ -160,11 +282,21 @@ def compute(catalog, dataset: str, ticker: str, evidence_session: date,
         h_open = hinfo.session_open_et.astimezone(timezone.utc)
         h_close = hinfo.session_close_et.astimezone(timezone.utc)
         cutoff = min(h_open + elapsed, h_close)
-        h_obs = catalog.observations_between(dataset, ticker, h_open, cutoff)
-        v = sum(_f(o.get(value_key)) for o in h_obs)
-        full_day = catalog.observations_between(dataset, ticker, h_open, h_close) if not h_obs else h_obs
-        hist_rows.append({"session_date": c["session_date"], "value": v, "observations": len(h_obs),
-                          "active": bool(full_day)})
+        curve = _session_curve(catalog, dataset, ticker, value_key, c["session_date"], h_open, h_close)
+        if curve is SEALED_CHANGED:
+            base.coverage_summary["unknown:sealed_session_changed"] = (
+                base.coverage_summary.get("unknown:sealed_session_changed", 0) + 1)
+            continue
+        if curve is not None:
+            v, n_obs = curve.upto(cutoff)
+            active = curve.n > 0
+        else:
+            h_obs = catalog.observations_between(dataset, ticker, h_open, cutoff)
+            v, n_obs = sum(_f(o.get(value_key)) for o in h_obs), len(h_obs)
+            full_day = catalog.observations_between(dataset, ticker, h_open, h_close) if not h_obs else h_obs
+            active = bool(full_day)
+        hist_rows.append({"session_date": c["session_date"], "value": v, "observations": n_obs,
+                          "active": active})
     # A verified-empty session BEFORE the ticker's first observed activity
     # (e.g. pre-listing) is not a genuine "zero activity" baseline day.
     first_active = next((i for i, r in enumerate(hist_rows) if r["active"]), len(hist_rows))

@@ -1014,6 +1014,7 @@ async function loadSettings() {
       if (testMcpBtn) testMcpBtn.addEventListener("click", testMcpConnection);
     }
     wireUpdatesSection(d);
+    if (!publicDemo) loadBaselinePanel();
     // Watchlist editor now lives on Market Radar's "My Watchlist" panel,
     // not Settings (2026-10-15 move) -- re-rendered from this same
     // /api/settings payload every time loadSettings() runs (including
@@ -1036,6 +1037,61 @@ async function loadSettings() {
   } catch (err) {
     document.getElementById("modePill").textContent = "mode: unknown";
   }
+}
+
+
+// Historical baselines (Settings). The overview/status GETs read the local
+// catalog only; the only provider-touching actions are the explicit POSTs.
+// Status is polled ONLY while a job is active and Settings is the visible
+// view, and polling stops by itself as soon as either is no longer true.
+let _baselinePollTimer = null;
+
+async function loadBaselinePanel() {
+  const card = document.getElementById("baselineCard");
+  if (!card) return null;
+  let ov;
+  try {
+    ov = await apiGetAuthed("/api/baseline/overview");
+  } catch (err) {
+    card.innerHTML = `<h3>Historical baselines (Live)</h3><p class="muted">Could not load coverage: ${esc(err.message)}</p>`;
+    return null;
+  }
+  card.innerHTML = renderBaselinePanel(ov);
+  wireBaselinePanel(ov);
+  scheduleBaselinePoll(ov);
+  return ov;
+}
+
+function scheduleBaselinePoll(ov) {
+  if (_baselinePollTimer) { clearTimeout(_baselinePollTimer); _baselinePollTimer = null; }
+  const settingsVisible = () => {
+    const v = document.getElementById("view-settings");
+    return !!v && v.classList.contains("active");
+  };
+  const polling = ov && ov.job && ["running", "pause_requested", "cancel_requested"].includes(ov.job.status);
+  if (polling && settingsVisible()) {
+    _baselinePollTimer = setTimeout(() => { if (settingsVisible()) loadBaselinePanel(); }, 3000);
+  }
+}
+
+function wireBaselinePanel(ov) {
+  const status = document.getElementById("baselineStatus");
+  const act = async (fn) => {
+    try { await fn(); } catch (err) { if (status) status.textContent = err.message; }
+    await loadBaselinePanel();
+  };
+  document.querySelectorAll("[data-baseline-start]").forEach((btn) => {
+    btn.addEventListener("click", () => act(() => apiPost("/api/baseline/jobs", { tickers: [btn.dataset.baselineStart] })));
+  });
+  const all = document.getElementById("baselineStartWatchlistBtn");
+  if (all) all.addEventListener("click", () => act(() => apiPost("/api/baseline/jobs", { scope: "watchlist" })));
+  const job = ov && ov.job;
+  const pause = document.getElementById("baselinePauseBtn");
+  if (pause && job) pause.addEventListener("click", () => act(() => apiPost(`/api/baseline/jobs/${job.id}/pause`)));
+  const resume = document.getElementById("baselineResumeBtn");
+  if (resume && job) resume.addEventListener("click", () => act(() => apiPost(`/api/baseline/jobs/${job.id}/resume`)));
+  const cancel = document.getElementById("baselineCancelBtn");
+  if (cancel && job) cancel.addEventListener("click", () => act(() => apiPost(`/api/baseline/jobs/${job.id}/cancel`)));
 }
 
 // Application Updates (Settings): "Check for Updates" makes ONE explicit,

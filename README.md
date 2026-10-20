@@ -38,8 +38,24 @@ Confidence and lifecycle labels are rule-based evidence-coverage descriptions, *
 
 ### Building Live baselines
 
-A Live **Refresh** collects only the current evidence session. Prior sessions are collected by one of two
-paths; with neither, the gates stay "insufficient" indefinitely.
+A Live **Refresh** collects only the current evidence session. Prior sessions are collected by one of the
+paths below; with none of them, the gates stay "insufficient" indefinitely.
+
+0. **Settings → Historical baselines (Live)** (recommended). Shows each watchlist ticker's collected dark-pool
+   and options-flow sessions against the 20-session requirement, and why it is still insufficient (including a
+   provider history cutoff). **Build baseline** (one ticker) or **Build baselines for the whole watchlist** starts
+   a bounded job:
+   - 10 UW pages per step, at most 400 per ticker per build (click **Build** again to continue a busy
+     ticker), stopping at 20 complete sessions;
+   - **Pause** and **Cancel** are cooperative: they take effect when the step in progress finishes, not
+     instantly. A step is limited to 10 logical pages, but HTTP retries add attempts, and provider timeouts or a
+     provider `Retry-After` can delay the stop. The panel shows "requested" until the job has actually stopped;
+   - progress and **Resume**;
+   - a provider error pauses the job and shows the error;
+   - an application restart leaves the job paused; it never auto-resumes;
+   - already-verified sessions are never fetched again.
+
+   Opening the page makes no UW requests; only the button does.
 
 1. **Explicit backfill (operator-run, no scheduler needed).** Run on the machine hosting TIP. Each call walks
    back through prior sessions, newest first, using at most `max_pages` (capped at 200) UW requests through
@@ -64,8 +80,13 @@ Measured cost for one SPY-scale ticker (about 50,000 dark-pool prints and 15,000
 - about 12 s (mid-session) to 22 s (after the close) of baseline computation per refresh, with ~0.5 GB peak
   memory.
 
-Observations are not pruned automatically yet; monitor the size of the data volume. Thinner tickers cost a
-small fraction of this.
+Observations are not pruned automatically; monitor the size of the data volume. Thinner tickers cost a small
+fraction of this.
+
+With the completed-session curve cache (migration 9), the per-refresh baseline computation drops to about 0.2–0.8 s
+once each completed session has been read once. See [docs/PERFORMANCE_AND_RETENTION.md](docs/PERFORMANCE_AND_RETENTION.md)
+for measurements, the recommended retention policy, and the operator-run, off-by-default `tools/retention.py`
+(archive before delete, restore).
 
 ## Why this exists / what's ported vs. rebuilt
 

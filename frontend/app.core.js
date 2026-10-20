@@ -4571,7 +4571,9 @@ function renderSettingsView(d) {
         <div id="mcpTestStatus" class="muted" style="margin-top:6px"></div>
       </div>`;
 
-  root.innerHTML = `${banner}${modeSection}${uwSection}${aiSection}${renderUpdatesSection(d)}`;
+  const baselineSlot = publicDemo ? "" : `<div class="settings-card" id="baselineCard"><h3>Historical baselines (Live)</h3>
+    <p class="muted">Loading collected coverage...</p></div>`;
+  root.innerHTML = `${banner}${modeSection}${uwSection}${aiSection}${baselineSlot}${renderUpdatesSection(d)}`;
   return { publicDemo };
 }
 
@@ -4665,6 +4667,106 @@ function renderWatchlistEditor(d, opts = {}) {
         <div id="watchlistStatus" class="muted" style="margin-top:6px"></div>
       </div>
     </details>`;
+}
+
+
+// --- Historical baselines (Settings, Live only; Phase 4) ---------------------
+//
+// Pure render of GET /api/baseline/overview (local catalog only -- that read
+// never contacts the provider). Building a baseline is ALWAYS an explicit
+// click (POST /api/baseline/jobs); opening this page starts nothing.
+const BASELINE_JOB_LABELS = {
+  running: "Running", pause_requested: "Pause requested -- not yet paused", paused: "Paused",
+  cancel_requested: "Cancel requested -- not yet cancelled", cancelled: "Cancelled", completed: "Finished",
+  // A *_requested state means the request was recorded; the job stops only when the
+  // step in progress finishes (cooperative, between steps -- see the note below).
+};
+const BASELINE_TICKER_STATES = {
+  pending: "waiting", running: "in progress", complete: "target reached",
+  history_cutoff: "provider history ends -- cannot reach target", budget_exhausted: "page budget used up",
+  no_more_work: "nothing more to collect in the lookback window",
+};
+const BASELINE_ACTIVE = ["running", "pause_requested", "paused", "cancel_requested"];
+
+function baselineJobIsActive(job) {
+  return !!job && BASELINE_ACTIVE.includes(job.status);
+}
+
+function renderBaselineDatasetCell(ds) {
+  if (!ds) return `<td>n/a</td>`;
+  const n = ds.complete_prior_sessions || 0;
+  const need = ds.required_sessions || 20;
+  const ok = n >= need;
+  return `<td><span class="tag ${ok ? "state-STABLE" : "state-FADING"}" data-baseline-count>${n} / ${need}</span></td>`;
+}
+
+function renderBaselineJob(job, threadAlive) {
+  if (!job) return `<p class="muted" id="baselineJobNone">No baseline build has been started.</p>`;
+  const label = BASELINE_JOB_LABELS[job.status] || job.status;
+  const rows = (job.tickers || []).map((t) => {
+    const p = (job.progress || {})[t] || {};
+    const ds = p.datasets || {};
+    const dp = ds.darkpool ? ds.darkpool.complete_prior_sessions : "--";
+    const fl = ds.options_flow ? ds.options_flow.complete_prior_sessions : "--";
+    return `<tr><td>${esc(t)}</td><td>${esc(BASELINE_TICKER_STATES[p.state] || p.state || "")}</td>
+      <td>${esc(p.pages_used || 0)} / ${esc(job.max_pages_per_ticker)}</td><td>${esc(dp)}</td><td>${esc(fl)}</td></tr>`;
+  }).join("");
+  const stale = job.status === "running" && threadAlive === false;
+  const buttons = [];
+  if (job.status === "running") buttons.push(`<button class="btn" id="baselinePauseBtn">Pause</button>`);
+  if (job.status === "paused") buttons.push(`<button class="btn" id="baselineResumeBtn">Resume</button>`);
+  if (["running", "paused", "pause_requested"].includes(job.status)) {
+    buttons.push(`<button class="btn" id="baselineCancelBtn">Cancel</button>`);
+  }
+  return `
+    <div id="baselineJob" data-job-status="${esc(job.status)}">
+      <div><strong>Build #${esc(job.id)}:</strong> <span class="tag">${esc(label)}</span>${["pause_requested", "cancel_requested"].includes(job.status)
+        ? `<span class="muted" id="baselineStepNote"> -- the step in progress finishes first (up to ${esc(job.step_pages)} pages;
+            retries, timeouts or a provider Retry-After wait can add HTTP attempts and time)</span>` : ""}
+        <span class="muted"> -- ${esc(job.pages_used)} UW pages used, up to ${esc(job.step_pages)} per step, target ${esc(job.target_sessions)} sessions</span></div>
+      ${job.last_error ? `<div class="muted" id="baselineJobError" style="margin-top:4px">Stopped: ${esc(job.last_error)}</div>` : ""}
+      ${stale ? `<div class="muted" style="margin-top:4px">The worker is not running (e.g. after a restart). Pause, then Resume to continue.</div>` : ""}
+      <table class="baseline-table" style="margin-top:6px"><thead><tr><th>Ticker</th><th>State</th><th>Pages</th>
+        <th>Dark pool sessions</th><th>Flow sessions</th></tr></thead><tbody>${rows}</tbody></table>
+      <div class="settings-row" style="margin-top:6px">${buttons.join(" ")}</div>
+    </div>`;
+}
+
+function renderBaselinePanel(ov) {
+  if (!ov || ov.mode !== "live") {
+    return `<h3>Historical baselines (Live)</h3>
+      <p class="muted" id="baselineDemoNote">Historical baselines are built only in Live Mode. Demo Mode uses
+        fixture-authored inputs and never collects history.</p>`;
+  }
+  const active = baselineJobIsActive(ov.job);
+  const rows = (ov.tickers || []).map((t) => {
+    const dp = t.datasets.darkpool, fl = t.datasets.options_flow;
+    const why = [dp, fl].map((d, i) => d && d.insufficient_reason ? `${i ? "Flow" : "Dark pool"}: ${d.insufficient_reason}` : "")
+      .filter(Boolean).join(" · ");
+    return `<tr data-baseline-ticker="${esc(t.ticker)}"><td>${esc(t.ticker)}</td>${renderBaselineDatasetCell(dp)}${renderBaselineDatasetCell(fl)}
+      <td class="muted">${esc(why)}</td>
+      <td><button class="btn" data-baseline-start="${esc(t.ticker)}" ${active ? "disabled" : ""}>Build baseline</button></td></tr>`;
+  }).join("");
+  return `
+    <h3>Historical baselines (Live)</h3>
+    <p class="muted">Both Live gates need at least ${esc(ov.required_sessions)} fully collected prior trading sessions
+      before they can pass or fail; until then they honestly read "insufficient". Building a baseline makes
+      <strong>real, bounded UW requests</strong> (a busy ticker needs roughly 2,800–4,200 pages) and only ever starts
+      when you click. Each build spends at most 400 UW pages per ticker; click Build again to continue a ticker
+      that used its budget. Pause and Cancel are cooperative: they take effect when the step in progress finishes,
+      not instantly. A step covers at most 10 pages by default, but each page can be retried, can wait for a provider
+      timeout, or can wait as long as the provider's Retry-After asks, so a step can make more HTTP attempts than pages
+      and has no fixed time limit. The status shows "requested" until the job has actually stopped. Progress already
+      collected is kept and is not fetched again on Resume. Counts below come from this app's own records --
+      viewing them makes no UW requests.</p>
+    <table class="baseline-table"><thead><tr><th>Ticker</th><th>Dark pool</th><th>Options flow</th><th>Why</th><th></th></tr></thead>
+      <tbody>${rows || `<tr><td colspan="5" class="muted">Your Live watchlist is empty.</td></tr>`}</tbody></table>
+    <div class="settings-row" style="margin-top:8px">
+      <button class="btn" id="baselineStartWatchlistBtn" ${active || !(ov.tickers || []).length ? "disabled" : ""}>Build baselines for the whole watchlist</button>
+    </div>
+    <div id="baselineStatus" class="muted" style="margin-top:4px"></div>
+    <hr class="settings-divider" />
+    ${renderBaselineJob(ov.job, ov.job_thread_alive)}`;
 }
 
 // --- Application Updates (Settings) -----------------------------------------

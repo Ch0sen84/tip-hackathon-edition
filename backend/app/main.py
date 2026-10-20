@@ -63,6 +63,7 @@ from .auth import (
 from .config import settings
 from .core import dark_pool_baseline, discovery, lifecycle, scan_service, session_baseline, tip_evidence, trading_calendar
 from . import session_collection
+from . import baseline_jobs
 from .core import local_mode as local_mode_module
 from .core import scheduler_freshness, single_process_guard, uw_concurrency
 from .core.scheduler_store import InvalidModeError, MODES as SCHEDULER_MODES, SchedulerStore, new_worker_id
@@ -522,6 +523,11 @@ def _on_startup() -> None:
     )
     single_process_guard.assert_single_process()
     get_scheduler_runner().start()
+    # A baseline job interrupted by a restart comes back PAUSED, never running.
+    try:
+        get_baseline_job_store().recover_after_restart()
+    except Exception:  # noqa: BLE001 -- never block startup on this
+        logging.getLogger(__name__).exception("baseline job recovery failed")
     # QA remediation D1: loudly surface the pairing code on every real
     # startup (force_new=True -- never reuse a code a previous process
     # lifetime may have already shown/used). This is the ONLY place this
@@ -661,10 +667,11 @@ def _run_baseline_backfill(adapter, ticker: str, max_pages: int, kind: str) -> d
     now = _utcnow()
     session_date = trading_calendar.evidence_session_date(now)
     per_dataset = max(1, max_pages // len(BASELINE_DATASETS))
-    return {dataset: session_collection.backfill_baseline(
-                adapter.client, get_catalog(), dataset, ticker, session_date, max_pages=per_dataset,
-                kind=kind, now_utc=now)
-            for dataset in BASELINE_DATASETS}
+    with _collection_lock(ticker):
+        return {dataset: session_collection.backfill_baseline(
+                    adapter.client, get_catalog(), dataset, ticker, session_date, max_pages=per_dataset,
+                    kind=kind, now_utc=now)
+                for dataset in BASELINE_DATASETS}
 
 
 def _scheduler_baseline_backfill(adapter) -> Optional[dict]:
@@ -683,6 +690,18 @@ def _scheduler_baseline_backfill(adapter) -> Optional[dict]:
             for t in picked}
 
 
+_collection_locks: dict = {}
+_collection_locks_guard = threading.Lock()
+
+
+def _collection_lock(ticker: str) -> threading.RLock:
+    """Per-ticker lock around every session-coverage writer (interactive scans,
+    the explicit backfill route, the scheduler and baseline jobs), so two
+    collectors never extend the same ticker's coverage at once."""
+    with _collection_locks_guard:
+        return _collection_locks.setdefault(str(ticker).upper(), threading.RLock())
+
+
 def _collect_session_dataset(adapter: LiveUWAdapter, dataset: str, ticker: str, session_date, now_utc,
                              kind: str) -> dict:
     """Live collection of one dataset for the evidence session through the
@@ -693,8 +712,9 @@ def _collect_session_dataset(adapter: LiveUWAdapter, dataset: str, ticker: str, 
     If the catalog itself is unusable, falls back to a single direct page
     (coverage then stays unverified, so the baseline gate is insufficient)."""
     try:
-        update = session_collection.update_session_coverage(
-            adapter.client, get_catalog(), dataset, ticker, session_date, now_utc=now_utc, kind=kind)
+        with _collection_lock(ticker):
+            update = session_collection.update_session_coverage(
+                adapter.client, get_catalog(), dataset, ticker, session_date, now_utc=now_utc, kind=kind)
         cov = update.coverage or {}
         # Every cataloged observation dated on the session's NY calendar day
         # (pre-market .. after-hours), up to now.
@@ -2255,6 +2275,175 @@ def ticker_baseline_backfill(ticker: str, max_pages: int = 60):
                 "datasets": _baseline_report(ticker, trading_calendar.evidence_session_date(now), now)}
     finally:
         _baseline_backfill_lock.release()
+
+
+# --- User-initiated baseline building (Phase 4; app/baseline_jobs.py) ---------
+_baseline_job_store: Optional[baseline_jobs.BaselineJobStore] = None
+_baseline_job_runner: Optional[baseline_jobs.BaselineJobRunner] = None
+
+
+def get_baseline_job_store() -> baseline_jobs.BaselineJobStore:
+    global _baseline_job_store
+    catalog = get_catalog()                             # schema (migration 9) exists before first use
+    if _baseline_job_store is None or _baseline_job_store.owner is not catalog:
+        _baseline_job_store = baseline_jobs.BaselineJobStore(settings.db_path, catalog._conn, owner=catalog)
+    return _baseline_job_store
+
+
+def _baseline_job_step(ticker: str, pages: int) -> dict:
+    """One bounded step: shares the explicit-backfill lock (waits for a running
+    route call instead of overlapping it) and the per-ticker collection lock."""
+    adapter = get_adapter()
+    if not isinstance(adapter, LiveUWAdapter):
+        raise baseline_jobs.JobBlocked("paused: the app is no longer in Live Mode -- switch back to Live and resume")
+    with _baseline_backfill_lock:
+        result = _run_baseline_backfill(adapter, ticker, pages, "on_demand")
+    # A provider history cutoff found by an EARLIER step or job is already recorded
+    # in coverage; report it so the job labels the ticker honestly.
+    catalog = get_catalog()
+    for dataset, r in result.items():
+        r["history_cutoff"] = any(c["status"] == "unavailable" for c in catalog.list_session_coverage(dataset, ticker))
+    return result
+
+
+def get_baseline_job_runner() -> baseline_jobs.BaselineJobRunner:
+    global _baseline_job_runner
+    store = get_baseline_job_store()
+    if _baseline_job_runner is None or _baseline_job_runner.store is not store:
+        _baseline_job_runner = baseline_jobs.BaselineJobRunner(store, _baseline_job_step)
+    return _baseline_job_runner
+
+
+class BaselineJobBody(BaseModel):
+    tickers: Optional[list] = None
+    scope: Optional[str] = None                         # "watchlist"
+    max_pages_per_ticker: int = baseline_jobs.DEFAULT_MAX_PAGES_PER_TICKER
+    step_pages: int = baseline_jobs.DEFAULT_STEP_PAGES
+    target_sessions: int = dark_pool_baseline.BASELINE_READY_MIN
+
+
+def _require_live_adapter() -> LiveUWAdapter:
+    adapter = get_adapter()
+    if not isinstance(adapter, LiveUWAdapter):
+        raise HTTPException(status_code=400, detail="Historical baselines are built only in Live Mode.")
+    return adapter
+
+
+def _coverage_overview(ticker: str, session_date) -> dict:
+    catalog = get_catalog()
+    out = {}
+    for dataset in BASELINE_DATASETS:
+        cov = catalog.list_session_coverage(dataset, ticker)
+        prior = [c for c in cov if c["session_date"] < session_date.isoformat()]
+        counts: dict = {}
+        for c in prior:
+            k = c["status"] + (f":{c['last_error']}" if c.get("last_error") else "")
+            counts[k] = counts.get(k, 0) + 1
+        complete = sum(1 for c in prior if c["status"] == "complete")
+        cutoff = next((c["session_date"] for c in sorted(prior, key=lambda c: c["session_date"], reverse=True)
+                       if c["status"] == "unavailable"), None)
+        ev = next((c for c in cov if c["session_date"] == session_date.isoformat()), None)
+        need = dark_pool_baseline.BASELINE_READY_MIN
+        if complete < need:
+            why = (f"{complete} of {need} complete prior sessions collected"
+                   + (f"; provider history ends before {cutoff}" if cutoff else "")
+                   + ("" if cutoff else " -- build the baseline to collect more"))
+        elif not ev or ev["status"] not in ("complete", "partial"):
+            why = "history is sufficient; the current session has not been collected from the open yet (refresh)"
+        else:
+            why = "history is sufficient"
+        out[dataset] = {"complete_prior_sessions": complete, "required_sessions": need,
+                        "coverage_counts": counts, "history_cutoff_before": cutoff,
+                        "evidence_session_coverage": (ev or {}).get("status"), "insufficient_reason": why}
+    return out
+
+
+@app.get("/api/baseline/overview", dependencies=[Depends(require_auth)])
+def baseline_overview():
+    """Per watchlist ticker: collected coverage vs the 20-session requirement.
+    Reads the local catalog only -- never a provider request."""
+    adapter = get_adapter()
+    if not isinstance(adapter, LiveUWAdapter):
+        return {"mode": "demo", "tickers": [], "note": "Historical baselines exist only in Live Mode."}
+    session_date = trading_calendar.evidence_session_date(_utcnow())
+    tickers = [str(t).upper() for t in (adapter.get_universe() or [])]
+    job = get_baseline_job_store().latest()
+    return {"mode": "live", "evidence_session": session_date.isoformat(),
+            "required_sessions": dark_pool_baseline.BASELINE_READY_MIN,
+            "tickers": [{"ticker": t, "datasets": _coverage_overview(t, session_date)} for t in tickers],
+            "job": job, "job_thread_alive": get_baseline_job_runner().is_running()}
+
+
+@app.get("/api/baseline/jobs/current", dependencies=[Depends(require_auth)])
+def baseline_job_current():
+    """Latest job and its progress. Never a provider request."""
+    return {"job": get_baseline_job_store().latest(), "job_thread_alive": get_baseline_job_runner().is_running()}
+
+
+@app.post("/api/baseline/jobs", dependencies=[Depends(require_auth)])
+def baseline_job_create(body: BaselineJobBody):
+    """Explicit, user-initiated, bounded historical baseline build."""
+    adapter = _require_live_adapter()
+    if body.scope == "watchlist":
+        raw = adapter.get_universe() or []
+    elif body.tickers:
+        raw = body.tickers
+    else:
+        raise HTTPException(status_code=400, detail="Give tickers or scope='watchlist'.")
+    tickers = []
+    for t in raw:
+        v = _validate_ticker_for_analysis(adapter, str(t))
+        if v not in tickers:
+            tickers.append(v)
+    if not tickers or len(tickers) > 20:
+        raise HTTPException(status_code=400, detail="Between 1 and 20 tickers.")
+    lo, hi = baseline_jobs.STEP_PAGES_RANGE
+    lookback = session_collection.BACKFILL_LOOKBACK_SESSIONS
+    try:
+        job = get_baseline_job_store().create(
+            tickers,
+            max(1, min(int(body.max_pages_per_ticker), baseline_jobs.MAX_PAGES_PER_TICKER_CAP)),
+            max(lo, min(int(body.step_pages), hi)), requested_by="user",
+            target_sessions=max(dark_pool_baseline.BASELINE_READY_MIN, min(int(body.target_sessions), lookback)))
+    except baseline_jobs.JobConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    get_baseline_job_runner().start(job["id"])
+    return {"job": job}
+
+
+def _baseline_job_transition(job_id: int, allowed: tuple, to: str, start: bool = False) -> dict:
+    store = get_baseline_job_store()
+    if store.get(job_id) is None:
+        raise HTTPException(status_code=404, detail="No such baseline job.")
+    if start:
+        _require_live_adapter()
+    job = store.transition(job_id, allowed, to)
+    if job is None:
+        raise HTTPException(status_code=409, detail=f"Job is not in a state that allows this ({store.get(job_id)['status']}).")
+    if start and not get_baseline_job_runner().start(job_id):
+        raise HTTPException(status_code=409, detail="A baseline job thread is still finishing; try again shortly.")
+    return {"job": store.get(job_id)}
+
+
+@app.post("/api/baseline/jobs/{job_id}/pause", dependencies=[Depends(require_auth)])
+def baseline_job_pause(job_id: int):
+    return _baseline_job_transition(job_id, ("running",), "pause_requested")
+
+
+@app.post("/api/baseline/jobs/{job_id}/resume", dependencies=[Depends(require_auth)])
+def baseline_job_resume(job_id: int):
+    return _baseline_job_transition(job_id, ("paused",), "running", start=True)
+
+
+@app.post("/api/baseline/jobs/{job_id}/cancel", dependencies=[Depends(require_auth)])
+def baseline_job_cancel(job_id: int):
+    store = get_baseline_job_store()
+    job = store.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="No such baseline job.")
+    if job["status"] == "paused":                      # no thread running: cancel immediately
+        return _baseline_job_transition(job_id, ("paused",), "cancelled")
+    return _baseline_job_transition(job_id, ("running", "pause_requested"), "cancel_requested")
 
 
 @app.get("/api/ticker/{ticker}")
