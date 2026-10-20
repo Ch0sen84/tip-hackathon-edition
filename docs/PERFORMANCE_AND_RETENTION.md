@@ -94,6 +94,22 @@ dominated again by composite-key hashing. Possible next step: reuse the stored `
 key for rows written since the identity fix) and hash only legacy rows. Deferred, because it touches deduplication
 semantics.
 
+## 2b. Baseline builds: how Pause and Cancel work
+
+- **Cooperative.** Pause and Cancel are recorded at once (`pause_requested` / `cancel_requested`, shown as
+  "requested") but take effect only when the step in progress finishes. The job then becomes `paused` /
+  `cancelled`.
+- **Step size.** A step is limited to 10 **logical pages** by default (5 per dataset).
+- **No wall-clock or attempt bound.**
+  - Each page can use up to 3 HTTP attempts (the adapter's bounded retries).
+  - Each attempt can wait for the request timeout (20 s by default).
+  - A provider `Retry-After` is honoured as given, without a cap.
+  - So a step, and therefore a stop, has no fixed duration. In the synthetic rehearsal it took ≤ 6 more requests,
+    but that is not a guarantee.
+- **Why not per request.** Cancelling inside a collection window could leave a session's coverage mislabelled, so
+  cancellation happens only between steps. Coverage is checkpointed per window, so stopping and resuming loses no
+  verified work.
+
 ## 3. Retention policy (recommended; prototype implemented, OFF by default)
 
 **Data classes and how long to keep them:**

@@ -130,6 +130,39 @@ def test_legacy_evaluations_without_evidence_session_still_protect_their_days(db
     assert {target.isoformat(), days[4].isoformat()} <= protected
 
 
+def test_legacy_v1_evaluation_without_any_evidence_linkage_protects_retrieval_day_and_previous_session(
+        db, tmp_path, monkeypatch):
+    """Reviewer-requested regression: a real-shaped pre-v2 evaluation that records NO evidence
+    session and has NO signal_evaluation_evidence rows must still keep its raw data unprunable."""
+    days = sessions_before(EVIDENCE, 24)
+    monday = next(d for d in days[:-KEEP] if d.weekday() == 0 and days.index(d) > 0)
+    friday = days[days.index(monday) - 1]
+    assert friday.weekday() == 4                                   # previous session crosses the weekend
+    legacy_scan = {"ticker": T, "state": "BUILDING", "previous_state": "NEW", "confidence": "medium",
+                   "gates": {"dark_pool_anomaly": {"passed": True, "metrics": {}}}, "raw": {}}
+    assert "evidence_session" not in legacy_scan
+    conn = sqlite3.connect(db)
+    conn.execute("INSERT INTO signal_evaluations (source_id, ticker, event_time, retrieved_at, state, confidence, "
+                 "engine_rule_version, raw_json) VALUES ('legacy-v1', ?, ?, ?, 'BUILDING', 'medium', 'v1', ?)",
+                 (T, f"{monday.isoformat()}T12:00:00Z", f"{monday.isoformat()}T12:00:00Z", json.dumps(legacy_scan)))
+    conn.commit()
+    assert conn.execute("SELECT COUNT(*) FROM signal_evaluation_evidence").fetchone()[0] == 0
+    plan = {(s["dataset"], s["session_date"]): s["protected_by_evaluations"] for s in retention.cmd_plan(db, KEEP)["sessions"]}
+    for d in (monday, friday):
+        assert plan[("darkpool", d.isoformat())] and plan[("options_flow", d.isoformat())]
+    rows_before = {d: len(retention._day_rows(conn, "darkpool", T, d.isoformat())) for d in (monday, friday)}
+    arch = tmp_path / "arch"
+    retention.cmd_archive(db, KEEP, arch)
+    monkeypatch.setenv("TIP_RETENTION_ENABLED", "1")
+    out = retention.cmd_prune(db, KEEP, arch, confirmed=True)
+    skipped = {(s["dataset"], s["session_date"]) for s in out["skipped"] if s["why"] == "evidence session of a recorded evaluation"}
+    for d in (monday, friday):
+        assert {("darkpool", d.isoformat()), ("options_flow", d.isoformat())} <= skipped
+        assert len(retention._day_rows(conn, "darkpool", T, d.isoformat())) == rows_before[d] > 0
+    pruned = {(p["dataset"], p["session_date"]) for p in out["pruned_sessions"]}
+    assert pruned and not any(d in (monday.isoformat(), friday.isoformat()) for _, d in pruned)   # targeted, not blanket
+
+
 def test_late_row_in_a_pruned_session_is_excluded_never_miscounted_and_restore_recovers(db, tmp_path, monkeypatch):
     before = baselines(db, monkeypatch, "0")
     arch = tmp_path / "arch"

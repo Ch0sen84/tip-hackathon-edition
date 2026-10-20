@@ -47,8 +47,10 @@ paths below; with none of them, the gates stay "insufficient" indefinitely.
    a bounded job:
    - 10 UW pages per step, at most 400 per ticker per build (click **Build** again to continue a busy
      ticker), stopping at 20 complete sessions;
-   - progress, **Pause**, **Resume** and **Cancel** take effect between steps, so at most 10 more UW requests
-     follow a click;
+   - **Pause** and **Cancel** are cooperative: they take effect when the step in progress finishes, not
+     instantly. A step is limited to 10 logical pages, but HTTP retries add attempts, and provider timeouts or a
+     provider `Retry-After` can delay the stop. The panel shows "requested" until the job has actually stopped;
+   - progress and **Resume**;
    - a provider error pauses the job and shows the error;
    - an application restart leaves the job paused; it never auto-resumes;
    - already-verified sessions are never fetched again.

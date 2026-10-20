@@ -15,7 +15,9 @@ Safety properties (each covered by tests/test_baseline_jobs.py):
   collector itself; the job row records per-ticker progress after every step,
   so a crash loses at most the step in flight, and resuming never re-fetches
   windows already verified complete.
-- Pause / cancel take effect between steps (a step is bounded, so promptly).
+- Pause / cancel are cooperative: honoured between steps. A step is bounded in logical
+  pages, not in time or HTTP attempts (retries, timeouts and Retry-After waits apply
+  inside the collector).
 - A provider failure pauses the job with the error recorded (no blind retry
   loop); a provider history cutoff marks that ticker finished.
 - Status reads (GET) never touch the provider.
@@ -33,8 +35,9 @@ _log = logging.getLogger(__name__)
 ACTIVE = ("running", "pause_requested", "paused", "cancel_requested")
 DEFAULT_MAX_PAGES_PER_TICKER = 400
 # Pause/Cancel are honoured between steps, so the step size bounds how many more
-# provider requests can follow a click. 10 pages (5 per dataset) keeps that to a
-# few seconds; coverage is checkpointed per window, so small steps re-fetch nothing.
+# LOGICAL pages can follow a click (10 = 5 per dataset). It does not bound HTTP
+# attempts or time: each page may be retried, and timeouts / Retry-After waits apply.
+# Coverage is checkpointed per window, so small steps re-fetch nothing.
 DEFAULT_STEP_PAGES = 10
 MAX_PAGES_PER_TICKER_CAP = 2000
 STEP_PAGES_RANGE = (10, 200)

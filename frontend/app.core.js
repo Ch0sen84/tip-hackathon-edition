@@ -4676,9 +4676,10 @@ function renderWatchlistEditor(d, opts = {}) {
 // never contacts the provider). Building a baseline is ALWAYS an explicit
 // click (POST /api/baseline/jobs); opening this page starts nothing.
 const BASELINE_JOB_LABELS = {
-  running: "Running", pause_requested: "Pausing after the current step", paused: "Paused",
-  cancel_requested: "Cancelling after the current step", cancelled: "Cancelled", completed: "Finished",
-  // (each step makes at most job.step_pages UW requests -- shown next to the label)
+  running: "Running", pause_requested: "Pause requested -- not yet paused", paused: "Paused",
+  cancel_requested: "Cancel requested -- not yet cancelled", cancelled: "Cancelled", completed: "Finished",
+  // A *_requested state means the request was recorded; the job stops only when the
+  // step in progress finishes (cooperative, between steps -- see the note below).
 };
 const BASELINE_TICKER_STATES = {
   pending: "waiting", running: "in progress", complete: "target reached",
@@ -4720,7 +4721,8 @@ function renderBaselineJob(job, threadAlive) {
   return `
     <div id="baselineJob" data-job-status="${esc(job.status)}">
       <div><strong>Build #${esc(job.id)}:</strong> <span class="tag">${esc(label)}</span>${["pause_requested", "cancel_requested"].includes(job.status)
-        ? `<span class="muted" id="baselineStepNote"> (at most ${esc(job.step_pages)} more UW requests)</span>` : ""}
+        ? `<span class="muted" id="baselineStepNote"> -- the step in progress finishes first (up to ${esc(job.step_pages)} pages;
+            retries, timeouts or a provider Retry-After wait can add HTTP attempts and time)</span>` : ""}
         <span class="muted"> -- ${esc(job.pages_used)} UW pages used, up to ${esc(job.step_pages)} per step, target ${esc(job.target_sessions)} sessions</span></div>
       ${job.last_error ? `<div class="muted" id="baselineJobError" style="margin-top:4px">Stopped: ${esc(job.last_error)}</div>` : ""}
       ${stale ? `<div class="muted" style="margin-top:4px">The worker is not running (e.g. after a restart). Pause, then Resume to continue.</div>` : ""}
@@ -4751,9 +4753,12 @@ function renderBaselinePanel(ov) {
       before they can pass or fail; until then they honestly read "insufficient". Building a baseline makes
       <strong>real, bounded UW requests</strong> (a busy ticker needs roughly 2,800–4,200 pages) and only ever starts
       when you click. Each build spends at most 400 UW pages per ticker; click Build again to continue a ticker
-      that used its budget. Pause and Cancel take effect after the current step -- at most 10 more UW requests,
-      usually a few seconds; progress already collected is kept and is not fetched again on Resume. Counts below come
-      from this app's own records -- viewing them makes no UW requests.</p>
+      that used its budget. Pause and Cancel are cooperative: they take effect when the step in progress finishes,
+      not instantly. A step covers at most 10 pages by default, but each page can be retried, can wait for a provider
+      timeout, or can wait as long as the provider's Retry-After asks, so a step can make more HTTP attempts than pages
+      and has no fixed time limit. The status shows "requested" until the job has actually stopped. Progress already
+      collected is kept and is not fetched again on Resume. Counts below come from this app's own records --
+      viewing them makes no UW requests.</p>
     <table class="baseline-table"><thead><tr><th>Ticker</th><th>Dark pool</th><th>Options flow</th><th>Why</th><th></th></tr></thead>
       <tbody>${rows || `<tr><td colspan="5" class="muted">Your Live watchlist is empty.</td></tr>`}</tbody></table>
     <div class="settings-row" style="margin-top:8px">

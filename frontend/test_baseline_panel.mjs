@@ -110,17 +110,26 @@ check("finished and cancelled jobs are not active and offer no controls", () => 
   assert.equal(lib.baselineJobIsActive(job("paused")), true);
 });
 
-check("panel states the request bound after Pause/Cancel and the per-build budget", () => {
+check("panel explains cooperative Pause/Cancel without promising a time or request bound", () => {
   const h = lib.renderBaselinePanel(overview());
-  assert.match(h, /at most 10 more UW requests/);
+  assert.match(h, /cooperative/);
+  assert.match(h, /at most 10 pages by default/);
+  assert.match(h, /Retry-After/);
+  assert.match(h, /no fixed time limit/);
+  assert.doesNotMatch(h, /few seconds|at most 10 more UW requests/);
   assert.match(h, /at most 400 UW pages per ticker; click Build again/);
 });
 
-check("a pausing or cancelling job shows how many more requests can still happen", () => {
-  for (const s of ["pause_requested", "cancel_requested"]) {
+check("a requested pause/cancel is shown as requested, distinct from completed", () => {
+  for (const [s, done] of [["pause_requested", "Paused"], ["cancel_requested", "Cancelled"]]) {
     const h = lib.renderBaselineJob(job(s, { step_pages: 10 }), true);
-    assert.match(h, /at most 10 more UW requests/);
+    assert.match(h, /requested -- not yet/);
+    assert.match(h, /step in progress finishes first \(up to 10 pages/);
+    assert.match(h, /Retry-After/);
+    assert.doesNotMatch(h, new RegExp(`>${done}<`));
   }
+  assert.match(lib.renderBaselineJob(job("paused"), false), />Paused</);
+  assert.match(lib.renderBaselineJob(job("cancelled"), false), />Cancelled</);
   assert.doesNotMatch(lib.renderBaselineJob(job("running"), true), /baselineStepNote/);
 });
 
