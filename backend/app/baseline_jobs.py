@@ -20,6 +20,13 @@ Safety properties (each covered by tests/test_baseline_jobs.py):
   inside the collector).
 - A provider failure pauses the job with the error recorded (no blind retry
   loop); a provider history cutoff marks that ticker finished.
+- Per-dataset target (Phase 9): once a dataset has `target_sessions` complete
+  prior sessions (or hit a history cutoff), later steps skip it and spend the
+  step on the datasets still short of the target. This changes only which
+  pages this job requests -- never which sessions count, the lookback, the
+  20-session requirement or any signal rule. Current-session evidence is
+  collected by scans/refreshes, not by jobs, so skipping a dataset here never
+  stops an explicitly requested evaluation from collecting fresh evidence.
 - Status reads (GET) never touch the provider.
 """
 from __future__ import annotations
@@ -168,6 +175,19 @@ class BaselineJobRunner:
             t.join(timeout)
 
     @staticmethod
+    def _dataset_met(d: dict, target: int) -> bool:
+        return bool(d.get("history_cutoff")) or (d.get("complete_prior_sessions") or 0) >= target
+
+    @classmethod
+    def _datasets_needed(cls, entry: dict, target: int) -> Optional[list]:
+        """None before the first step (every dataset runs); afterwards the
+        datasets still below the target."""
+        ds = entry.get("datasets") or {}
+        if not ds:
+            return None
+        return [name for name, d in ds.items() if not cls._dataset_met(d, target)]
+
+    @staticmethod
     def _ticker_done(entry: dict, target: int) -> Optional[str]:
         ds = entry.get("datasets") or {}
         if ds and all((d.get("complete_prior_sessions") or 0) >= target for d in ds.values()):
@@ -215,8 +235,18 @@ class BaselineJobRunner:
             entry["state"] = "running"
             self.store.update(job_id, progress=progress)     # visible as "in progress" during the step
             pages = min(job["step_pages"], remaining)
-            result = self.run_step(ticker, pages)
-            used, failed, ds_state = 0, None, {}
+            needed = self._datasets_needed(entry, job["target_sessions"])
+            if needed == []:                         # every dataset already met (defensive: done is set below)
+                entry["state"] = self._ticker_done(entry, job["target_sessions"]) or "complete"
+                self.store.update(job_id, progress=progress)
+                continue
+            if needed is None or len(needed) == len(entry["datasets"]):
+                result = self.run_step(ticker, pages)
+            else:
+                result = self.run_step(ticker, pages, datasets=needed)
+            used, failed = 0, None
+            ds_state = {name: {**d, "last_pages_used": 0, "target_met": True}
+                        for name, d in (entry.get("datasets") or {}).items() if name not in result}
             for ds, r in result.items():
                 touched = r.get("sessions_touched") or []
                 used += int(r.get("pages_used") or 0)
@@ -228,7 +258,12 @@ class BaselineJobRunner:
                 prev = (entry["datasets"].get(ds) or {})
                 ds_state[ds] = {"complete_prior_sessions": r.get("complete_prior_sessions"),
                                 "history_cutoff": bool(cutoff or prev.get("history_cutoff")),
-                                "last_pages_used": r.get("pages_used")}
+                                "last_pages_used": r.get("pages_used"),
+                                "bounds_retries": (prev.get("bounds_retries") or 0)
+                                + sum(t.get("bounds_retries") or 0 for t in touched),
+                                "bounds_recovered": (prev.get("bounds_recovered") or 0)
+                                + sum(t.get("bounds_recovered") or 0 for t in touched)}
+                ds_state[ds]["target_met"] = self._dataset_met(ds_state[ds], job["target_sessions"])
             entry["datasets"] = ds_state
             entry["pages_used"] += used
             entry["steps"] += 1

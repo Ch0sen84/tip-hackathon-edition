@@ -60,6 +60,20 @@ No confidence value is calibrated or predictive (see [TRADING_VALIDITY.md](TRADI
     - `unknown`: `bounds_not_honored`, `wrong_session_date`, `cursor_stuck`, `catalog_write_failed`
     - `unavailable`: `provider_history_cutoff`, `not_entitled`
   - A transient provider failure leaves coverage unchanged.
+  - **Out-of-window pages.** A page with any row outside the requested bounds or session date is rejected
+    whole and never stored.
+    - The same window is re-requested at most `TIP_BOUNDS_RETRIES_PER_WINDOW` times (default 1, max 3,
+      0 = off). Each retry counts against the page budget.
+    - Only a page that passes every check advances the cursor. If every retry is rejected, the session stays
+      `unknown`.
+    - Each rejection is recorded as a sanitized diagnostic: request bounds, observed min/max timestamps,
+      violation counts, at most 5 offending timestamps, and a classification *hypothesis*. It never
+      includes prices, sizes, ids, raw pages or credentials. Read it with
+      `GET /api/diagnostics/collection-bounds` (local, zero UW calls). Nothing reads diagnostics to decide
+      coverage, eligibility or signals.
+  - **Baseline jobs** stop requesting a dataset once it has the job's target of complete prior sessions,
+    and spend later steps on the other dataset. Eligibility, the 30-session lookback and the 20-session
+    requirement are unchanged. Current-session evidence is still collected by every Live refresh.
   - Sessions before a ticker's first observed activity (pre-listing) are excluded from the baseline.
 - **No look-ahead.** Only sessions strictly before the evidence session are eligible.
 - **Data hygiene.** Dark-pool prints are identified by `(tracking_id, executed_at, price, size, volume)`.

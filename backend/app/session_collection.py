@@ -47,10 +47,25 @@ Status vocabulary (session_coverage.status) with reason codes (last_error):
                provider_history_cutoff | not_entitled
 Transient provider failures (429/5xx/timeout/malformed) leave stored coverage
 untouched and are reported as a failed COLLECTION, never as coverage.
+
+Out-of-window pages (Phase 9 reliability)
+  A page with a row outside the requested bounds (or, for dark pool, off the
+  requested NY date) is rejected WHOLE and never stored. A sanitized
+  diagnostic (request bounds, observed min/max timestamps, a few offending
+  timestamps -- no prices, sizes, ids or credentials) is recorded in
+  collection_diagnostics. The SAME window is then re-requested at most
+  BOUNDS_RETRIES_PER_WINDOW times (each retry is a logical page against the
+  same page budget). Only a response that passes every check is stored and
+  advances the cursor, so a recovered walk proves coverage exactly as a clean
+  one does; if every retry is also rejected the session stays UNKNOWN
+  (bounds_not_honored / wrong_session_date), as before.
 """
 from __future__ import annotations
 
+import logging
 import os
+import time
+import uuid
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from typing import Optional
@@ -64,6 +79,13 @@ REPORTING_LAG = timedelta(seconds=60)  # newest minute of an open session may st
 DEFAULT_SCAN_PAGES = int(os.environ.get("TIP_SCAN_COVERAGE_PAGES", "4"))
 DEFAULT_BACKFILL_PAGES = int(os.environ.get("TIP_BASELINE_BACKFILL_PAGES", "60"))
 BACKFILL_LOOKBACK_SESSIONS = int(os.environ.get("TIP_BASELINE_LOOKBACK_SESSIONS", "30"))
+# Re-requests of ONE rejected (out-of-window) page before the session is left
+# unknown. 0 restores the pre-Phase-9 behaviour; capped at 3.
+BOUNDS_RETRIES_PER_WINDOW = max(0, min(3, int(os.environ.get("TIP_BOUNDS_RETRIES_PER_WINDOW", "1"))))
+BOUNDS_RETRY_DELAY_S = max(0.0, min(30.0, float(os.environ.get("TIP_BOUNDS_RETRY_DELAY_S", "1.0"))))
+DIAGNOSTIC_SAMPLE_ROWS = 5
+_sleep = time.sleep          # patched by tests
+_log = logging.getLogger(__name__)
 
 
 def _parse(ts) -> Optional[datetime]:
@@ -91,6 +113,16 @@ class DatasetSpec:
     date_scoped: bool
     upper_inclusive: bool          # older_than inclusive? (verified per endpoint)
     cursor_step: timedelta         # how far ABOVE the page's oldest row the next cursor sits
+
+    def request_params(self, ticker: str, session_date: date, lo: datetime, hi: datetime) -> dict:
+        """The exact query this collector sends (never includes credentials)."""
+        if self.name == "darkpool":
+            return {"date": session_date.isoformat(), "limit": self.page_limit,
+                    "newer_than": _iso(lo), "older_than": _iso(hi)}
+        return {"ticker_symbol": ticker, "limit": self.page_limit, "newer_than": _iso(lo), "older_than": _iso(hi)}
+
+    def endpoint(self, ticker: str) -> str:
+        return f"/api/darkpool/{ticker}" if self.name == "darkpool" else "/api/option-trades/flow-alerts"
 
     def fetch(self, client, ticker: str, session_date: date, lo: datetime, hi: datetime) -> dict:
         if self.name == "darkpool":
@@ -133,6 +165,8 @@ class CoverageUpdate:
     rows_fetched: int = 0
     detail: Optional[str] = None
     retrieved_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    bounds_retries: int = 0            # re-requests of rejected out-of-window pages (Phase 9)
+    bounds_recovered: int = 0          # of those, windows that then passed every check
 
     @property
     def ok(self) -> bool:
@@ -141,14 +175,107 @@ class CoverageUpdate:
     def summary(self) -> dict:
         return {"status": self.collection_status, "ok": self.ok, "retrieved_at": self.retrieved_at,
                 "pages": self.pages, "rows_fetched": self.rows_fetched, "detail": self.detail,
-                "coverage": self.coverage, "source": "unusual_whales"}
+                "coverage": self.coverage, "source": "unusual_whales",
+                "bounds_retries": self.bounds_retries, "bounds_recovered": self.bounds_recovered}
 
 
-def _fetch_window(spec, client, catalog, ticker, session_date, lo, hi, budget, kind) -> dict:
+def _classify_violation(v: dict, samples: list, prev_newest: Optional[datetime],
+                        page_max: Optional[datetime]) -> tuple:
+    """Best-effort label for a rejected page, from the sanitized facts only.
+    Returns (classification, flags). A label is a HYPOTHESIS for a human to
+    check against the recorded facts, never an automatic conclusion."""
+    flags = []
+    if v["out_of_order"]:
+        flags.append("rows_not_newest_first")
+    if any(x["fractional_seconds"] for x in samples):
+        flags.append("fractional_second_timestamps")
+    offs = [abs(x["delta_s"]) for x in samples if x["kind"] in ("above_upper", "below_lower")]
+    if offs and all(o >= 3540 and (o % 3600 <= 60 or o % 3600 >= 3540) for o in offs):
+        flags.append("whole_hour_offsets")
+    if v["wrong_date"] and not (v["above_upper"] or v["at_upper"] or v["below_lower"]):
+        return "date_filter_mismatch", flags
+    if v["at_upper"] and not v["above_upper"] and not v["below_lower"]:
+        if any(x["fractional_seconds"] for x in samples if x["kind"] == "at_upper"):
+            return "timestamp_precision", flags
+        return "cursor_boundary_inclusive", flags          # exclusive older_than treated as inclusive
+    if "whole_hour_offsets" in flags:
+        return "timezone_offset_suspected", flags
+    if v["above_upper"] and not v["below_lower"]:
+        if offs and max(offs) < 1.0:
+            return "timestamp_precision", flags
+        if prev_newest is not None and page_max is not None and page_max >= prev_newest:
+            return "upper_bound_ignored", flags            # reaches back above rows this walk already stored
+        return "upper_bound_violated", flags
+    if v["below_lower"] and not (v["above_upper"] or v["at_upper"]):
+        return "lower_bound_ignored", flags
+    return "mixed_bounds_violation", flags
+
+
+def _inspect_page(spec, data: list, ticker: str, session_date: date, lo: datetime, cursor: datetime) -> dict:
+    """Validates a WHOLE page without storing anything: the accepted rows and
+    times, or the rejection reason plus sanitized facts about the page."""
+    rows, times, all_times, samples = [], [], [], []
+    v = {"below_lower": 0, "at_upper": 0, "above_upper": 0, "wrong_date": 0, "unparseable": 0,
+         "other_ticker": 0, "out_of_order": 0}
+    reason, prev_ts = None, None
+    for idx, raw in enumerate(data):
+        if not isinstance(raw, dict):
+            continue
+        own = raw.get("ticker") or raw.get("ticker_symbol")
+        if own and str(own).upper() != ticker.upper():
+            v["other_ticker"] += 1
+            continue
+        raw_ts = raw.get(spec.time_field)
+        ts = _parse(raw_ts)
+        if ts is None:
+            v["unparseable"] += 1
+            continue
+        all_times.append(ts)
+        if prev_ts is not None and ts > prev_ts:
+            v["out_of_order"] += 1
+        prev_ts = ts
+        bad = None
+        if ts < lo:
+            bad = "below_lower"
+        elif not spec.in_bounds(ts, lo, cursor):
+            bad = "at_upper" if ts == cursor else "above_upper"
+        if bad:
+            reason = reason or "bounds_not_honored"
+        elif spec.date_scoped and ts.astimezone(tc.NY_TZ).date() != session_date:
+            bad = "wrong_date"
+            reason = reason or "wrong_session_date"
+        if bad:
+            v[bad] += 1
+            if len(samples) < DIAGNOSTIC_SAMPLE_ROWS:
+                bound = lo if bad == "below_lower" else cursor
+                samples.append({"index": idx, "raw": str(raw_ts)[:40], "utc": _iso(ts),
+                                "ny_date": ts.astimezone(tc.NY_TZ).date().isoformat(), "kind": bad,
+                                "delta_s": round((ts - bound).total_seconds(), 6),
+                                "fractional_seconds": "." in str(raw_ts)})
+            continue
+        rows.append(spec.normalize(raw))
+        times.append(ts)
+    return {"rows": rows, "times": times, "all_times": all_times, "reason": reason, "violations": v,
+            "samples": samples}
+
+
+def _fetch_window(spec, client, catalog, ticker, session_date, lo, hi, budget, kind,
+                  on_diagnostic=None, retries: Optional[int] = None) -> dict:
     """Pages newest-first inside [lo, hi]. Returns
        {"outcome": "exhausted" | "budget" | "unverifiable" | "failed" | "cutoff",
-        "oldest": earliest row time seen, "pages", "rows", "reason", "status"}."""
+        "oldest": earliest row time seen, "pages", "rows", "reason", "status",
+        "bounds_retries", "bounds_recovered"}.
+    A rejected page is never stored; the same window is re-requested at most
+    `retries` times (BOUNDS_RETRIES_PER_WINDOW), each against `budget`."""
     cursor, pages, n_rows, oldest, prev_oldest = hi, 0, 0, None, None
+    retries_left = BOUNDS_RETRIES_PER_WINDOW if retries is None else max(0, retries)
+    retried = recovered = 0
+    attempt, window_page, newest_seen = 0, 0, None
+
+    def done(outcome, reason, status=COLLECTION_OK):
+        return {"outcome": outcome, "reason": reason, "pages": pages, "rows": n_rows, "oldest": oldest,
+                "status": status, "bounds_retries": retried, "bounds_recovered": recovered}
+
     while pages < budget:
         body = spec.fetch(client, ticker, session_date, lo, cursor)
         pages += 1
@@ -157,59 +284,94 @@ def _fetch_window(spec, client, catalog, ticker, session_date, lo, hi, budget, k
             status, detail, code = failure
             detail_l = (detail or "").lower()
             if status == "unavailable_on_tier" and "historic" in detail_l:
-                return {"outcome": "cutoff", "reason": "provider_history_cutoff", "pages": pages, "rows": n_rows,
-                        "oldest": oldest, "status": COLLECTION_OK}
+                return done("cutoff", "provider_history_cutoff")
             if status in ("unavailable_on_tier", "unauthorized"):
-                return {"outcome": "cutoff", "reason": "not_entitled", "pages": pages, "rows": n_rows,
-                        "oldest": oldest, "status": status}
-            return {"outcome": "failed", "reason": detail, "pages": pages, "rows": n_rows, "oldest": oldest,
-                    "status": status}
+                return done("cutoff", "not_entitled", status)
+            return done("failed", detail, status)
         data = body.get("data")
         if not isinstance(data, list):
-            return {"outcome": "failed", "reason": "data is not a list", "pages": pages, "rows": n_rows,
-                    "oldest": oldest, "status": "malformed"}
-        rows, times = [], []
-        for raw in data:
-            if not isinstance(raw, dict):
-                continue
-            own = raw.get("ticker") or raw.get("ticker_symbol")
-            if own and str(own).upper() != ticker.upper():
-                continue
-            ts = _parse(raw.get(spec.time_field))
-            if ts is None:
-                continue
-            if not spec.in_bounds(ts, lo, cursor):
-                return {"outcome": "unverifiable", "reason": "bounds_not_honored", "pages": pages,
-                        "rows": n_rows, "oldest": oldest, "status": COLLECTION_OK}
-            if spec.date_scoped and ts.astimezone(tc.NY_TZ).date() != session_date:
-                return {"outcome": "unverifiable", "reason": "wrong_session_date", "pages": pages,
-                        "rows": n_rows, "oldest": oldest, "status": COLLECTION_OK}
-            rows.append(spec.normalize(raw))
-            times.append(ts)
+            return done("failed", "data is not a list", "malformed")
+        page = _inspect_page(spec, data, ticker, session_date, lo, cursor)
+        if page["reason"]:
+            will_retry = retries_left > 0 and pages < budget
+            if on_diagnostic is not None:
+                at = page["all_times"]
+                diag = {
+                    "dataset": spec.name, "ticker": ticker, "session_date": session_date.isoformat(),
+                    "reason": page["reason"], "endpoint": spec.endpoint(ticker),
+                    "request": spec.request_params(ticker, session_date, lo, cursor),
+                    "expected": {"lower": _iso(lo), "lower_inclusive": True, "upper": _iso(cursor),
+                                 "upper_inclusive": spec.upper_inclusive, "window_upper": _iso(hi),
+                                 "session_date_ny": session_date.isoformat() if spec.date_scoped else None},
+                    "page_in_window": window_page + 1, "attempt": attempt + 1, "response_rows": len(data),
+                    "page_limit": spec.page_limit, "provider_status": "http_200",
+                    "observed": {"min": _iso(min(at)) if at else None, "max": _iso(max(at)) if at else None,
+                                 "parsed_rows": len(at)},
+                    "previous_page": {"oldest": _iso(prev_oldest) if prev_oldest else None,
+                                      "newest_seen": _iso(newest_seen) if newest_seen else None},
+                    "violations": page["violations"], "samples": page["samples"],
+                    "action": "retry_same_window" if will_retry else "session_left_unknown",
+                    "retries_left_after": retries_left - 1 if will_retry else retries_left,
+                }
+                diag["classification"], diag["flags"] = _classify_violation(
+                    page["violations"], page["samples"], newest_seen, max(at) if at else None)
+                on_diagnostic(diag)
+            if will_retry:
+                retries_left -= 1
+                retried += 1
+                attempt += 1
+                if BOUNDS_RETRY_DELAY_S:
+                    _sleep(BOUNDS_RETRY_DELAY_S)
+                continue                     # same lo/cursor; nothing from the rejected page was stored
+            return done("unverifiable", page["reason"])
+        if attempt:
+            recovered += 1
+        attempt = 0
+        window_page += 1
+        rows, times = page["rows"], page["times"]
         if rows:
             try:
                 spec.catalog(catalog, ticker, rows, kind)
             except Exception:  # noqa: BLE001 -- storage guard / write failure: cannot prove coverage
-                return {"outcome": "unverifiable", "reason": "catalog_write_failed", "pages": pages,
-                        "rows": n_rows, "oldest": oldest, "status": COLLECTION_OK}
+                return done("unverifiable", "catalog_write_failed")
             n_rows += len(rows)
             page_oldest = min(times)
             oldest = page_oldest if oldest is None else min(oldest, page_oldest)
+            newest_seen = max(times) if newest_seen is None else max(newest_seen, max(times))
         if len(data) < spec.page_limit:
             # verified: a short (or empty) page exhausts the bounded window
-            return {"outcome": "exhausted", "reason": None, "pages": pages, "rows": n_rows, "oldest": oldest,
-                    "status": COLLECTION_OK}
+            return done("exhausted", None)
         page_oldest = min(times) if times else None
         if page_oldest is None or (prev_oldest is not None and page_oldest >= prev_oldest):
-            return {"outcome": "unverifiable", "reason": "cursor_stuck", "pages": pages, "rows": n_rows,
-                    "oldest": oldest, "status": COLLECTION_OK}
+            return done("unverifiable", "cursor_stuck")
         prev_oldest = page_oldest
         cursor = page_oldest + spec.cursor_step
         if cursor >= hi and pages > 1:  # cannot make progress inside this window
-            return {"outcome": "unverifiable", "reason": "cursor_stuck", "pages": pages, "rows": n_rows,
-                    "oldest": oldest, "status": COLLECTION_OK}
-    return {"outcome": "budget", "reason": "page_budget_exhausted", "pages": pages, "rows": n_rows,
-            "oldest": oldest, "status": COLLECTION_OK}
+            return done("unverifiable", "cursor_stuck")
+    return done("budget", "page_budget_exhausted")
+
+
+def _diagnostic_sink(catalog, kind: str):
+    """Per collection walk: logs one sanitized line per rejected page and
+    persists the diagnostic (best effort -- never changes the outcome)."""
+    walk_id = uuid.uuid4().hex[:12]
+
+    def sink(diag: dict) -> None:
+        diag = {**diag, "walk_id": walk_id, "collection_kind": kind}
+        _log.warning("collector rejected an out-of-window page: %s %s %s reason=%s class=%s page=%s attempt=%s "
+                     "action=%s observed=%s..%s requested=[%s, %s%s", diag["dataset"], diag["ticker"],
+                     diag["session_date"], diag["reason"], diag["classification"], diag["page_in_window"],
+                     diag["attempt"], diag["action"], diag["observed"]["min"], diag["observed"]["max"],
+                     diag["expected"]["lower"], diag["expected"]["upper"],
+                     "]" if diag["expected"]["upper_inclusive"] else ")")
+        record = getattr(catalog, "record_collection_diagnostic", None)
+        if record is None:
+            return
+        try:
+            record(diag, kind=kind)
+        except Exception:  # noqa: BLE001 -- diagnostics must never change a collection outcome
+            _log.info("collection diagnostic not persisted", exc_info=True)
+    return sink
 
 
 def update_session_coverage(client, catalog, dataset: str, ticker: str, session_date: date,
@@ -241,6 +403,16 @@ def update_session_coverage(client, catalog, dataset: str, ticker: str, session_
     budget, pages, rows = max_pages, 0, 0
     reason = None
     status = COLLECTION_OK
+    sink = _diagnostic_sink(catalog, kind)
+    retry_stats = {"bounds_retries": 0, "bounds_recovered": 0}
+
+    def counted(w):
+        retry_stats["bounds_retries"] += w.get("bounds_retries", 0)
+        retry_stats["bounds_recovered"] += w.get("bounds_recovered", 0)
+        return w
+
+    def result(*a, **k):
+        return CoverageUpdate(*a, **k, **retry_stats)
 
     def store(cov_status, frm, thr, why):
         catalog.upsert_session_coverage(dataset, ticker, sd, cov_status, frm.isoformat() if frm else None,
@@ -249,19 +421,19 @@ def update_session_coverage(client, catalog, dataset: str, ticker: str, session_
     # 1) newest gap: (c_through, end], or the whole [open, end] if nothing usable yet
     top_lo = c_through if c_through is not None else open_utc
     if c_through is None or c_through < end:
-        w = _fetch_window(spec, client, catalog, ticker, session_date, top_lo, end, budget, kind)
+        w = counted(_fetch_window(spec, client, catalog, ticker, session_date, top_lo, end, budget, kind, sink))
         pages += w["pages"]; rows += w["rows"]; budget -= w["pages"]
         if w["outcome"] == "failed":
-            return CoverageUpdate(dataset, ticker, sd, w["status"], cov or None, pages=pages, rows_fetched=rows,
-                                  detail=w["reason"])
+            return result(dataset, ticker, sd, w["status"], cov or None, pages=pages, rows_fetched=rows,
+                          detail=w["reason"])
         if w["outcome"] == "cutoff":
             store("unavailable", None, None, w["reason"])
-            return CoverageUpdate(dataset, ticker, sd, w["status"], catalog.get_session_coverage(dataset, ticker, sd),
-                                  pages=pages, rows_fetched=rows, detail=w["reason"])
+            return result(dataset, ticker, sd, w["status"], catalog.get_session_coverage(dataset, ticker, sd),
+                          pages=pages, rows_fetched=rows, detail=w["reason"])
         if w["outcome"] == "unverifiable":
             store("unknown", None, None, w["reason"])
-            return CoverageUpdate(dataset, ticker, sd, COLLECTION_OK, catalog.get_session_coverage(dataset, ticker, sd),
-                                  pages=pages, rows_fetched=rows, detail=w["reason"])
+            return result(dataset, ticker, sd, COLLECTION_OK, catalog.get_session_coverage(dataset, ticker, sd),
+                          pages=pages, rows_fetched=rows, detail=w["reason"])
         if w["outcome"] == "exhausted":
             if c_through is None:
                 c_from, c_through = open_utc, end
@@ -276,7 +448,7 @@ def update_session_coverage(client, catalog, dataset: str, ticker: str, session_
 
     # 2) backward gap: [open, c_from)
     if c_from is not None and c_from > open_utc and budget > 0:
-        w = _fetch_window(spec, client, catalog, ticker, session_date, open_utc, c_from, budget, kind)
+        w = counted(_fetch_window(spec, client, catalog, ticker, session_date, open_utc, c_from, budget, kind, sink))
         pages += w["pages"]; rows += w["rows"]
         if w["outcome"] == "exhausted":
             c_from = open_utc
@@ -288,12 +460,12 @@ def update_session_coverage(client, catalog, dataset: str, ticker: str, session_
             status, reason = w["status"], w["reason"]   # keep what was proven so far
         elif w["outcome"] == "unverifiable":
             store("unknown", None, None, w["reason"])
-            return CoverageUpdate(dataset, ticker, sd, COLLECTION_OK, catalog.get_session_coverage(dataset, ticker, sd),
-                                  pages=pages, rows_fetched=rows, detail=w["reason"])
+            return result(dataset, ticker, sd, COLLECTION_OK, catalog.get_session_coverage(dataset, ticker, sd),
+                          pages=pages, rows_fetched=rows, detail=w["reason"])
         else:  # cutoff
             store("unavailable", None, None, w["reason"])
-            return CoverageUpdate(dataset, ticker, sd, w["status"], catalog.get_session_coverage(dataset, ticker, sd),
-                                  pages=pages, rows_fetched=rows, detail=w["reason"])
+            return result(dataset, ticker, sd, w["status"], catalog.get_session_coverage(dataset, ticker, sd),
+                          pages=pages, rows_fetched=rows, detail=w["reason"])
     elif c_from is not None and c_from > open_utc:
         reason = reason or "page_budget_exhausted"
 
@@ -304,7 +476,7 @@ def update_session_coverage(client, catalog, dataset: str, ticker: str, session_
         why = reason or ("session_in_progress" if c_through is not None and c_through < close_utc
                          else "page_budget_exhausted")
     store(cov_status, c_from, c_through, why)
-    return CoverageUpdate(dataset, ticker, sd, status, catalog.get_session_coverage(dataset, ticker, sd),
+    return result(dataset, ticker, sd, status, catalog.get_session_coverage(dataset, ticker, sd),
                           pages=pages, rows_fetched=rows, detail=why)
 
 
@@ -325,7 +497,8 @@ def backfill_baseline(client, catalog, dataset: str, ticker: str, evidence_sessi
         budget -= max(u.pages, 0)
         cov = u.coverage or {}
         results.append({"session_date": d.isoformat(), "status": u.collection_status,
-                        "coverage": cov.get("status"), "reason": cov.get("last_error"), "pages": u.pages})
+                        "coverage": cov.get("status"), "reason": cov.get("last_error"), "pages": u.pages,
+                        "bounds_retries": u.bounds_retries, "bounds_recovered": u.bounds_recovered})
         return u, cov
 
     if tc.is_trading_day(evidence_session):

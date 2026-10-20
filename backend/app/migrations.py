@@ -613,6 +613,35 @@ CREATE TABLE IF NOT EXISTS baseline_jobs (
 """,
 ))
 
+MIGRATIONS.append(Migration(
+    version=10,
+    name="collection_diagnostics",
+    sql="""
+-- Collector reliability (Phase 9): one row per page the session collector
+-- REJECTED (a row outside the requested bounds or session date). Sanitized
+-- facts only: request bounds, observed min/max timestamps, counts per
+-- violation kind and at most a few offending TIMESTAMPS -- never prices,
+-- sizes, ids, raw pages or credentials. Diagnostic only: nothing reads it to
+-- decide coverage, eligibility or signals. Additive (older releases ignore it).
+CREATE TABLE IF NOT EXISTS collection_diagnostics (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL,
+    dataset TEXT NOT NULL,
+    ticker TEXT NOT NULL,
+    session_date TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    classification TEXT,
+    action TEXT,
+    walk_id TEXT,
+    page_in_window INTEGER,
+    attempt INTEGER,
+    detail_json TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_collection_diagnostics_session
+    ON collection_diagnostics(dataset, ticker, session_date);
+""",
+))
+
 # Migrations at or above this version take a fresh pre-migration backup of an
 # existing, non-empty database file before they are applied (in addition to
 # the one-time first-run backup), so upgrading a real Live install is always

@@ -1052,6 +1052,40 @@ class IngestionCatalog:
                  pages_walked, rows_seen, last_error, utcnow_iso()))
             conn.commit()
 
+    # --- collector diagnostics (migration 10; Phase 9) -------------------------
+    DIAGNOSTICS_MAX_ROWS = 5000
+
+    def record_collection_diagnostic(self, diag: dict, kind: str = ON_DEMAND) -> bool:
+        """Stores one sanitized rejected-page diagnostic (session_collection
+        builds it: bounds, timestamps and counts only). Bounded: once the table
+        holds DIAGNOSTICS_MAX_ROWS rows, further diagnostics are only logged.
+        Returns whether the row was stored."""
+        self._check_guard(kind)
+        with self._conn() as conn:
+            if conn.execute("SELECT COUNT(*) FROM collection_diagnostics").fetchone()[0] >= self.DIAGNOSTICS_MAX_ROWS:
+                return False
+            conn.execute(
+                "INSERT INTO collection_diagnostics (created_at, dataset, ticker, session_date, reason, classification, "
+                "action, walk_id, page_in_window, attempt, detail_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (utcnow_iso(), diag["dataset"], diag["ticker"], diag["session_date"], diag["reason"],
+                 diag.get("classification"), diag.get("action"), diag.get("walk_id"), diag.get("page_in_window"),
+                 diag.get("attempt"), json.dumps(diag, sort_keys=True, default=str)))
+            conn.commit()
+        return True
+
+    def list_collection_diagnostics(self, dataset: Optional[str] = None, ticker: Optional[str] = None,
+                                    session_date: Optional[str] = None, limit: int = 200) -> list:
+        clauses, args = [], []
+        for col, val in (("dataset", dataset), ("ticker", ticker), ("session_date", session_date)):
+            if val:
+                clauses.append(f"{col} = ?")
+                args.append(val)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        with self._conn() as conn:
+            rows = conn.execute(f"SELECT id, created_at, detail_json FROM collection_diagnostics {where} "
+                                "ORDER BY id DESC LIMIT ?", (*args, max(1, min(int(limit), 1000)))).fetchall()
+        return [{"id": r[0], "created_at": r[1], **json.loads(r[2])} for r in rows]
+
     def list_session_coverage(self, dataset: str, ticker: str) -> list:
         with self._conn() as conn:
             rows = conn.execute(

@@ -663,15 +663,20 @@ def _baseline_report(ticker: str, session_date, as_of_utc) -> dict:
     return out
 
 
-def _run_baseline_backfill(adapter, ticker: str, max_pages: int, kind: str) -> dict:
+def _run_baseline_backfill(adapter, ticker: str, max_pages: int, kind: str, datasets=None) -> dict:
+    """`datasets` (default: all of BASELINE_DATASETS) limits the step to the
+    datasets that still need history; the page budget is split evenly among
+    them. Which sessions count toward a baseline is decided elsewhere
+    (core/session_baseline.py) and is not affected by this choice."""
     now = _utcnow()
     session_date = trading_calendar.evidence_session_date(now)
-    per_dataset = max(1, max_pages // len(BASELINE_DATASETS))
+    chosen = tuple(d for d in BASELINE_DATASETS if datasets is None or d in datasets) or BASELINE_DATASETS
+    per_dataset = max(1, max_pages // len(chosen))
     with _collection_lock(ticker):
         return {dataset: session_collection.backfill_baseline(
                     adapter.client, get_catalog(), dataset, ticker, session_date, max_pages=per_dataset,
                     kind=kind, now_utc=now)
-                for dataset in BASELINE_DATASETS}
+                for dataset in chosen}
 
 
 def _scheduler_baseline_backfill(adapter) -> Optional[dict]:
@@ -1299,6 +1304,21 @@ def test_mcp():
         raise HTTPException(status_code=400, detail="No UW API key is configured yet. Save and test one first.")
     result = ai_mcp_tool_client.test_mcp_connection(uw_key)
     return {**result, "proves_ai_synthesis_works": False}
+
+
+@app.get("/api/diagnostics/collection-bounds", dependencies=[Depends(require_auth)])
+def collection_bounds_diagnostics(ticker: Optional[str] = None, dataset: Optional[str] = None,
+                                  session_date: Optional[str] = None, limit: int = 100):
+    """READ-ONLY (Phase 9): the sanitized diagnostics the session collector
+    recorded for pages it rejected as outside the requested window -- request
+    bounds, observed timestamps, violation counts and a classification
+    hypothesis. Local catalog only; never a provider request."""
+    if dataset and dataset not in BASELINE_DATASETS:
+        raise HTTPException(status_code=400, detail="dataset must be darkpool or options_flow")
+    rows = get_catalog().list_collection_diagnostics(dataset=dataset, ticker=ticker.upper() if ticker else None,
+                                                     session_date=session_date, limit=limit)
+    return {"diagnostics": rows, "count": len(rows),
+            "retries_per_window": session_collection.BOUNDS_RETRIES_PER_WINDOW}
 
 
 @app.get("/api/diagnostics/uw-requests", dependencies=[Depends(require_auth)])
@@ -2290,14 +2310,15 @@ def get_baseline_job_store() -> baseline_jobs.BaselineJobStore:
     return _baseline_job_store
 
 
-def _baseline_job_step(ticker: str, pages: int) -> dict:
+def _baseline_job_step(ticker: str, pages: int, datasets=None) -> dict:
     """One bounded step: shares the explicit-backfill lock (waits for a running
-    route call instead of overlapping it) and the per-ticker collection lock."""
+    route call instead of overlapping it) and the per-ticker collection lock.
+    `datasets`: only those still below the job's target (None = all)."""
     adapter = get_adapter()
     if not isinstance(adapter, LiveUWAdapter):
         raise baseline_jobs.JobBlocked("paused: the app is no longer in Live Mode -- switch back to Live and resume")
     with _baseline_backfill_lock:
-        result = _run_baseline_backfill(adapter, ticker, pages, "on_demand")
+        result = _run_baseline_backfill(adapter, ticker, pages, "on_demand", datasets=datasets)
     # A provider history cutoff found by an EARLIER step or job is already recorded
     # in coverage; report it so the job labels the ticker honestly.
     catalog = get_catalog()
