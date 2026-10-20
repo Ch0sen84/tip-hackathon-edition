@@ -410,7 +410,7 @@ def _diagnostic_sink(catalog, kind: str):
 
     def sink(diag: dict) -> None:
         diag = {**diag, "walk_id": walk_id, "collection_kind": kind}
-        _log.warning("collector rejected an out-of-window page: %s %s %s reason=%s class=%s page=%s attempt=%s "
+        _log.warning("collector rejected a page: %s %s %s reason=%s class=%s page=%s attempt=%s "
                      "action=%s observed=%s..%s requested=[%s, %s%s", diag["dataset"], diag["ticker"],
                      diag["session_date"], diag["reason"], diag["classification"], diag["page_in_window"],
                      diag["attempt"], diag["action"], diag["observed"]["min"], diag["observed"]["max"],
