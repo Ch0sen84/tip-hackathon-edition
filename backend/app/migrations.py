@@ -530,6 +530,36 @@ CREATE INDEX IF NOT EXISTS idx_lifecycle_scans_ticker ON lifecycle_scans(ticker,
     ),
 ]
 
+MIGRATIONS.append(Migration(
+    version=8,
+    name="session_coverage",
+    sql="""
+-- Signal-integrity remediation (audit B1/B8): which part of an NYSE trading
+-- session this app has VERIFIABLY collected, per dataset ('darkpool' |
+-- 'options_flow'). [covered_from_utc, covered_through_utc] is one
+-- contiguous interval that backward pagination walked without a gap.
+-- status: 'complete' (regular session open..close covered), 'partial'
+-- (contiguous interval that does not yet span the session), 'unknown'
+-- (coverage could not be established: empty first page, pagination
+-- parameter not honored, non-advancing cursor, provider error).
+CREATE TABLE IF NOT EXISTS session_coverage (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    dataset TEXT NOT NULL,
+    ticker TEXT NOT NULL,
+    session_date TEXT NOT NULL,
+    status TEXT NOT NULL,
+    covered_from_utc TEXT,
+    covered_through_utc TEXT,
+    pages_walked INTEGER NOT NULL DEFAULT 0,
+    rows_seen INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT,
+    retrieved_at TEXT NOT NULL,
+    UNIQUE(dataset, ticker, session_date)
+);
+CREATE INDEX IF NOT EXISTS idx_session_coverage_lookup ON session_coverage(dataset, ticker, session_date DESC);
+""",
+))
+
 # Migrations at or above this version take a fresh pre-migration backup of an
 # existing, non-empty database file before they are applied (in addition to
 # the one-time first-run backup), so upgrading a real Live install is always

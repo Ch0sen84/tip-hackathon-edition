@@ -51,6 +51,7 @@ def collection_summary(result: dict) -> dict:
         "http_status": result.get("http_status"),
         "source": result.get("source"),
         "dropped_rows": result.get("dropped_rows", 0),
+        **({"coverage": result["coverage"], "pages": result.get("pages")} if "coverage" in result else {}),
     }
 
 

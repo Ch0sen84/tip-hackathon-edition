@@ -41,7 +41,7 @@ import hashlib
 import json
 import sqlite3
 from contextlib import contextmanager
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterable, Optional
 
@@ -249,6 +249,13 @@ def _prune_superseded_price_bar_revisions(
         conn.executemany("DELETE FROM price_bars WHERE id = ?", [(i,) for i in stale_ids])
 
 
+def _num(v):
+    try:
+        return round(float(v), 6)
+    except (TypeError, ValueError):
+        return v
+
+
 def fingerprint(*parts: object) -> str:
     """Deterministic dedup key for an upstream record that carries no
     genuine unique id of its own. Order-sensitive and type-stable (every
@@ -372,8 +379,15 @@ class IngestionCatalog:
         inserted = 0
         with self._conn() as conn:
             for trade in darkpool_trades or []:
+                # UW's own tracking_id is the print's identity (audit: the
+                # value fingerprint below collapsed distinct same-value prints
+                # and double-stored the same print when its numeric fields
+                # arrived formatted differently -- 243 duplicates in the
+                # captured pre-05c47ca DB).
+                tracking_id = trade.get("tracking_id")
                 source_id = (
-                    trade.get("id") or trade.get("trade_id")
+                    (f"uwdp:{tracking_id}" if tracking_id is not None else None)
+                    or trade.get("id") or trade.get("trade_id")
                     or fingerprint(
                         ticker, trade.get("executed_at"), trade.get("price"),
                         trade.get("size"), trade.get("premium"),
@@ -991,6 +1005,87 @@ class IngestionCatalog:
                 "transition_rule": raw.get("transition_rule"),
             })
         return result
+
+    # --- session coverage (signal-integrity remediation) -------------------
+
+    def get_session_coverage(self, dataset: str, ticker: str, session_date: str) -> Optional[dict]:
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT status, covered_from_utc, covered_through_utc, pages_walked, rows_seen, last_error, "
+                "retrieved_at FROM session_coverage WHERE dataset = ? AND ticker = ? AND session_date = ?",
+                (dataset, ticker, session_date)).fetchone()
+        if not row:
+            return None
+        return {"dataset": dataset, "ticker": ticker, "session_date": session_date, "status": row[0],
+                "covered_from_utc": row[1], "covered_through_utc": row[2], "pages_walked": row[3],
+                "rows_seen": row[4], "last_error": row[5], "retrieved_at": row[6]}
+
+    def upsert_session_coverage(self, dataset: str, ticker: str, session_date: str, status: str,
+                                covered_from_utc: Optional[str], covered_through_utc: Optional[str],
+                                pages_walked: int, rows_seen: int, last_error: Optional[str] = None,
+                                kind: str = ON_DEMAND) -> None:
+        if status not in ("complete", "partial", "unknown"):
+            raise ValueError(f"invalid session coverage status: {status!r}")
+        self._check_guard(kind)
+        with self._conn() as conn:
+            conn.execute(
+                "INSERT INTO session_coverage (dataset, ticker, session_date, status, covered_from_utc, "
+                "covered_through_utc, pages_walked, rows_seen, last_error, retrieved_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(dataset, ticker, session_date) DO UPDATE SET status=excluded.status, "
+                "covered_from_utc=excluded.covered_from_utc, covered_through_utc=excluded.covered_through_utc, "
+                "pages_walked=session_coverage.pages_walked + excluded.pages_walked, "
+                "rows_seen=excluded.rows_seen, last_error=excluded.last_error, retrieved_at=excluded.retrieved_at",
+                (dataset, ticker, session_date, status, covered_from_utc, covered_through_utc,
+                 pages_walked, rows_seen, last_error, utcnow_iso()))
+            conn.commit()
+
+    def list_session_coverage(self, dataset: str, ticker: str) -> list:
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT session_date, status, covered_from_utc, covered_through_utc, pages_walked, rows_seen, "
+                "last_error, retrieved_at FROM session_coverage WHERE dataset = ? AND ticker = ? "
+                "ORDER BY session_date", (dataset, ticker)).fetchall()
+        return [{"dataset": dataset, "ticker": ticker, "session_date": r[0], "status": r[1],
+                 "covered_from_utc": r[2], "covered_through_utc": r[3], "pages_walked": r[4],
+                 "rows_seen": r[5], "last_error": r[6], "retrieved_at": r[7]} for r in rows]
+
+    def observations_between(self, dataset: str, ticker: str, start_utc: datetime, end_utc: datetime) -> list:
+        """Deduplicated observation dicts for `ticker` with start <= event_time
+        <= end. Dark-pool rows are deduplicated by UW tracking_id (covering
+        legacy rows stored under a value fingerprint) and CANCELED prints are
+        excluded -- a canceled print is not market activity."""
+        table = {"darkpool": "darkpool_observations", "options_flow": "options_flow_observations"}[dataset]
+        lo = (start_utc - timedelta(days=1)).date().isoformat()
+        hi = (end_utc + timedelta(days=1)).date().isoformat()
+        with self._conn() as conn:
+            rows = conn.execute(
+                f"SELECT event_time, raw_json FROM {table} WHERE ticker = ? AND event_time >= ? AND event_time < ? "
+                f"ORDER BY event_time", (ticker, lo, hi)).fetchall()
+        out, seen = [], set()
+        for event_time, raw_json in rows:
+            ts = _parse_iso_dt(str(event_time).replace("Z", "+00:00"))
+            if ts is None or ts < start_utc or ts > end_utc:
+                continue
+            try:
+                data = json.loads(raw_json) if raw_json else {}
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if dataset == "darkpool":
+                if data.get("canceled") in (True, "true", "True", 1):
+                    continue
+                key = ("t", data.get("tracking_id")) if data.get("tracking_id") is not None else (
+                    "f", data.get("executed_at"), _num(data.get("price")), _num(data.get("size")),
+                    _num(data.get("premium")))
+            else:
+                key = ("i", data.get("id")) if data.get("id") is not None else (
+                    "f", data.get("created_at"), _num(data.get("total_premium")), data.get("type"))
+            if key in seen:
+                continue
+            seen.add(key)
+            data["_event_time_utc"] = ts.isoformat()
+            out.append(data)
+        return out
 
     def get_last_successful_collection_at(self, ticker: str) -> Optional[str]:
         """collected_at of the newest evaluation whose data collection was

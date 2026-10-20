@@ -274,9 +274,25 @@ def _strip_collection_timestamps(body):
     """Collection retrieved_at / last_successful_collection_at are genuine
     per-call wall-clock timestamps (same exclusion class as
     last_evaluated_at / last_scan_at): drop them before comparing two
-    separate live calls for equality."""
+    separate live calls for equality.
+
+    Signal-integrity remediation: the catalog is now ALSO the evidence
+    source for the session-baseline dark-pool gate, so the original
+    invariant ("a catalog failure never changes the response at all") is
+    replaced by: a catalog failure never errors, never produces a passing
+    baseline gate (the gate STATUS must match -- insufficient on a fresh
+    catalog either way), and changes nothing outside the dark-pool
+    coverage/baseline detail, which is stripped here after asserting it."""
     def scrub(entry):
         if isinstance(entry, dict):
+            dp = (entry.get("gates") or {}).get("dark_pool_anomaly")
+            if isinstance(dp, dict):
+                assert dp["passed"] is False and dp["status"] == "insufficient", dp
+                dp["metrics"] = "<baseline detail>"
+            dpc = (entry.get("collection") or {}).get("darkpool")
+            if isinstance(dpc, dict):
+                for k in ("coverage", "detail", "pages", "source", "http_status", "row_count"):
+                    dpc.pop(k, None)
             entry.pop("last_successful_collection_at", None)
             for h in entry.get("history") or []:
                 if isinstance(h, dict):

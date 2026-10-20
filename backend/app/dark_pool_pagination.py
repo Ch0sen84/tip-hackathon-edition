@@ -1,4 +1,11 @@
-"""Phase B: bounded, resumable backward pagination over
+"""SUPERSEDED (signal-integrity remediation): the running app collects
+session coverage through app/session_collection.py into the generic
+`session_coverage` table, which is what the baseline gates read. This module
+and the `darkpool_coverage_status` table it writes are kept only for their
+existing tests/history; nothing in the app calls paginate_ticker_day (it
+never had a caller in 05c47ca either -- audit B1).
+
+Phase B: bounded, resumable backward pagination over
 /api/darkpool/{ticker} using the `older_than`/`newer_than` params
 live_uw_adapter.UWRestClient.darkpool_ticker already exposes (just not
 looped until now).

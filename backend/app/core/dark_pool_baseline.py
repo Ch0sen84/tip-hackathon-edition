@@ -293,6 +293,8 @@ def compute_baseline(
 
 # --- IO-aware convenience wrapper (reads the catalog, no network calls) ----
 
+# SUPERSEDED at runtime by core/session_baseline.compute (verified coverage,
+# no look-ahead, NYSE-session windows). Kept for its existing tests only.
 def compute_baseline_for_ticker(catalog, ticker: str, as_of_utc: Optional[datetime] = None,
                                  value_key: str = "premium") -> BaselineResult:
     """Thin wrapper: reads already-cataloged `darkpool_coverage_status` /

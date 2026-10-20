@@ -485,10 +485,16 @@ class UWRestClient:
 
     def flow_alerts(self, ticker: Optional[str] = None, limit: int = 100,
                      min_premium: Optional[int] = None, is_call: Optional[bool] = None,
-                     is_put: Optional[bool] = None, is_sweep: Optional[bool] = None) -> dict:
+                     is_put: Optional[bool] = None, is_sweep: Optional[bool] = None,
+                     older_than: Optional[str] = None, newer_than: Optional[str] = None) -> dict:
+        # older_than/newer_than: UW's documented time cursors for this
+        # endpoint. NOT live-verified in this repository (no live calls were
+        # made while adding them) -- app/session_collection.py checks every
+        # page and marks coverage "unknown" if the cursor is not honored.
         return self.get("/api/option-trades/flow-alerts", {
             "ticker_symbol": ticker, "limit": limit, "min_premium": min_premium,
             "is_call": is_call, "is_put": is_put, "is_sweep": is_sweep,
+            "older_than": older_than, "newer_than": newer_than,
         })
 
     def net_prem_ticks(self, ticker: str, limit: int = 500) -> dict:
