@@ -256,6 +256,14 @@ def _num(v):
         return v
 
 
+def darkpool_print_key(ticker: str, trade: dict) -> str:
+    """Verified-unique, re-fetch-stable identity of one UW dark-pool print."""
+    return "dp:" + fingerprint(
+        str(ticker).upper(), trade.get("tracking_id"), trade.get("executed_at"),
+        _num(trade.get("price")), _num(trade.get("size")), _num(trade.get("volume")),
+    )
+
+
 def fingerprint(*parts: object) -> str:
     """Deterministic dedup key for an upstream record that carries no
     genuine unique id of its own. Order-sensitive and type-stable (every
@@ -379,20 +387,15 @@ class IngestionCatalog:
         inserted = 0
         with self._conn() as conn:
             for trade in darkpool_trades or []:
-                # UW's own tracking_id is the print's identity (audit: the
-                # value fingerprint below collapsed distinct same-value prints
-                # and double-stored the same print when its numeric fields
-                # arrived formatted differently -- 243 duplicates in the
-                # captured pre-05c47ca DB).
-                tracking_id = trade.get("tracking_id")
-                source_id = (
-                    (f"uwdp:{tracking_id}" if tracking_id is not None else None)
-                    or trade.get("id") or trade.get("trade_id")
-                    or fingerprint(
-                        ticker, trade.get("executed_at"), trade.get("price"),
-                        trade.get("size"), trade.get("premium"),
-                    )
-                )
+                # Print identity (VERIFIED against live UW + the captured DB):
+                # UW `tracking_id` is NOT unique -- distinct prints share it
+                # (500-row live page: 432 distinct tracking_ids). The tuple
+                # (tracking_id, executed_at, price, size, volume) is unique on
+                # every page and stable across re-fetches; `volume` (day
+                # volume at the print) is what separates same-second,
+                # same-size prints that 05c47ca's value fingerprint collapsed
+                # (437 real prints lost in the captured DB).
+                source_id = trade.get("id") or trade.get("trade_id") or darkpool_print_key(ticker, trade)
                 event_time = trade.get("executed_at") or retrieved_at
                 cur = conn.execute(
                     "INSERT OR IGNORE INTO darkpool_observations "
@@ -1024,7 +1027,7 @@ class IngestionCatalog:
                                 covered_from_utc: Optional[str], covered_through_utc: Optional[str],
                                 pages_walked: int, rows_seen: int, last_error: Optional[str] = None,
                                 kind: str = ON_DEMAND) -> None:
-        if status not in ("complete", "partial", "unknown"):
+        if status not in ("complete", "partial", "unknown", "unavailable"):
             raise ValueError(f"invalid session coverage status: {status!r}")
         self._check_guard(kind)
         with self._conn() as conn:
@@ -1052,9 +1055,10 @@ class IngestionCatalog:
 
     def observations_between(self, dataset: str, ticker: str, start_utc: datetime, end_utc: datetime) -> list:
         """Deduplicated observation dicts for `ticker` with start <= event_time
-        <= end. Dark-pool rows are deduplicated by UW tracking_id (covering
-        legacy rows stored under a value fingerprint) and CANCELED prints are
-        excluded -- a canceled print is not market activity."""
+        <= end. Dark-pool rows are deduplicated by the verified print key
+        (darkpool_print_key -- also covers legacy rows stored under older
+        source_id schemes) and CANCELED prints are excluded -- a canceled
+        print is not market activity."""
         table = {"darkpool": "darkpool_observations", "options_flow": "options_flow_observations"}[dataset]
         lo = (start_utc - timedelta(days=1)).date().isoformat()
         hi = (end_utc + timedelta(days=1)).date().isoformat()
@@ -1074,9 +1078,7 @@ class IngestionCatalog:
             if dataset == "darkpool":
                 if data.get("canceled") in (True, "true", "True", 1):
                     continue
-                key = ("t", data.get("tracking_id")) if data.get("tracking_id") is not None else (
-                    "f", data.get("executed_at"), _num(data.get("price")), _num(data.get("size")),
-                    _num(data.get("premium")))
+                key = darkpool_print_key(ticker, data)
             else:
                 key = ("i", data.get("id")) if data.get("id") is not None else (
                     "f", data.get("created_at"), _num(data.get("total_premium")), data.get("type"))
