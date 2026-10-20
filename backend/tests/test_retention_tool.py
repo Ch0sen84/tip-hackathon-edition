@@ -98,6 +98,22 @@ def test_sessions_cited_by_a_recorded_evaluation_are_never_pruned(db, tmp_path, 
     assert conn.execute("SELECT COUNT(*) FROM darkpool_observations WHERE id = ?", (obs_id,)).fetchone()[0] == 1
 
 
+def test_evidence_sessions_of_recorded_evaluations_are_never_pruned(db, tmp_path, monkeypatch):
+    old = sessions_before(EVIDENCE, 24)[2].isoformat()
+    conn = sqlite3.connect(db)
+    conn.execute("INSERT INTO signal_evaluations (source_id, ticker, event_time, retrieved_at, state, confidence, "
+                 "engine_rule_version, raw_json) VALUES ('e2', ?, 'x', 'x', 'NO_STATE', 'insufficient', "
+                 "'v2-signal-integrity', ?)", (T, json.dumps({"evidence_session": old})))
+    conn.commit()
+    assert any(s["session_date"] == old and s["protected_by_evaluations"] for s in retention.cmd_plan(db, KEEP)["sessions"])
+    arch = tmp_path / "arch"
+    retention.cmd_archive(db, KEEP, arch)
+    monkeypatch.setenv("TIP_RETENTION_ENABLED", "1")
+    out = retention.cmd_prune(db, KEEP, arch, confirmed=True)
+    assert sum(1 for s in out["skipped"] if s["session_date"] == old
+               and s["why"] == "evidence session of a recorded evaluation") == 2      # both datasets
+
+
 def test_late_row_in_a_pruned_session_is_excluded_never_miscounted_and_restore_recovers(db, tmp_path, monkeypatch):
     before = baselines(db, monkeypatch, "0")
     arch = tmp_path / "arch"

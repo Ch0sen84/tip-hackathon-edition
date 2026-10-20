@@ -200,6 +200,7 @@ class BaselineJobRunner:
                 self.store.update(job_id, progress=progress)
                 continue
             entry["state"] = "running"
+            self.store.update(job_id, progress=progress)     # visible as "in progress" during the step
             pages = min(job["step_pages"], remaining)
             result = self.run_step(ticker, pages)
             used, failed, ds_state = 0, None, {}

@@ -99,6 +99,15 @@ port or a local replay:
   byte-identical to the original.
 - **Re-upgrade after a restore:** succeeds.
 
+## Optimization branch (perf/baseline-cache-and-backfill-ux, not part of the review PR)
+- **Migration 9** (additive): `session_value_curves` (derived cache) and `baseline_jobs`. The automatic
+  `.bak` is taken as for 7–8. Upgrading a copy of the deployed volume 6 → 9 in Docker changed only
+  `schema_version`.
+- **Rollback to the reviewed release** on a schema-9 volume: starts and changes no table (verified in
+  Docker).
+- **Retention is off by default.** If raw rows were ever pruned with `tools/retention.py`, run
+  `retention restore` before running any older code.
+
 ## Rollback
 - **Code.** Redeploy the 05c47ca image. The extra tables are ignored by the old code, and the migrations
   never modify legacy tables. Rows the new version wrote while running (new evaluations, observations) stay,

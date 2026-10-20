@@ -7,8 +7,9 @@ Never run by the app. Nothing is deleted unless ALL of these hold:
   * the session's coverage is complete and older than --keep-sessions complete sessions;
   * an exact value curve (session_value_curves) exists for it and is valid against its raw rows,
     so the baseline keeps bit-identical results from the curve ("sealed" after pruning);
-  * no row of that session is cited by any evaluation (signal_evaluation_evidence), so every
-    recorded signal decision stays reproducible from the database alone;
+  * the session was not the evidence session of any recorded evaluation, and no row of it is
+    cited by one (signal_evaluation_evidence), so every recorded decision stays reproducible from
+    the database alone (baseline-history values come from the sealed exact curves);
   * every already-sealed curve of that ticker/dataset still matches its signature (no late rows).
 
 Subcommands (stop the app first for archive/prune/restore; plan is read-only):
@@ -84,13 +85,26 @@ def _cited_ids(conn, table):
         return set()
 
 
+def _evidence_sessions(conn, ticker) -> set:
+    """Sessions that were the EVIDENCE session of any recorded evaluation of this
+    ticker. Their raw rows are what that decision read directly, so they are never
+    pruned (the engine does not record per-observation citations; see
+    signal_evaluation_evidence, which stays empty in practice)."""
+    try:
+        return {r[0] for r in conn.execute(
+            "SELECT DISTINCT json_extract(raw_json, '$.evidence_session') FROM signal_evaluations "
+            "WHERE ticker = ? AND json_valid(raw_json)", (ticker,)) if r[0]}
+    except sqlite3.OperationalError:
+        return set()
+
+
 def cmd_plan(db, keep):
     conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
     cited = {ds: _cited_ids(conn, t) for ds, t in TABLES.items()}
     report = {"keep_sessions": keep, "sessions": [], "rows": 0, "raw_bytes": 0, "protected_sessions": 0}
     for dataset, ticker, sd in _candidates(conn, keep):
         rows = _day_rows(conn, dataset, ticker, sd, cols="id, length(raw_json), 0, event_time")
-        protected = any(r[0] in cited[dataset] for r in rows)
+        protected = any(r[0] in cited[dataset] for r in rows) or sd in _evidence_sessions(conn, ticker)
         report["sessions"].append({"dataset": dataset, "ticker": ticker, "session_date": sd, "rows": len(rows),
                                    "raw_bytes": sum(r[1] or 0 for r in rows), "protected_by_evaluations": protected})
         if protected:
@@ -208,6 +222,8 @@ def cmd_prune(db, keep, archive_dir: Path, confirmed: bool):
                 why = "archive does not match current rows (re-archive first)"
             elif any(i in cited[dataset] for i in ids):
                 why = "cited by a recorded evaluation"
+            elif sd in _evidence_sessions(conn, ticker):
+                why = "evidence session of a recorded evaluation"
             else:
                 o, c = _regular_window(sd)
                 curve = session_baseline._session_curve(cat, dataset, ticker, session_baseline.VALUE_KEYS[dataset], sd, o, c,
