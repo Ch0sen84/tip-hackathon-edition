@@ -180,6 +180,7 @@ _adapter_sig: Optional[tuple] = None
 _last_live_client = None
 _last_live_client_key_sig: Optional[tuple] = None
 _store: Optional[QualifyingDaysStore] = None
+_demo_store: Optional[QualifyingDaysStore] = None  # Demo-only lifecycle DB (settings.demo_db_path)
 _catalog: Optional[IngestionCatalog] = None
 _settings_store = SettingsStore(os.environ.get("TIP_SETTINGS_PATH", "./data/settings.json"))
 _last_uw_test_result: Optional[str] = None  # in-memory only, informational; never persisted
@@ -406,22 +407,50 @@ def get_adapter() -> UWDataAdapter:
     return _adapter
 
 
-def get_store() -> QualifyingDaysStore:
-    global _store
-    if _store is None:
-        _store = QualifyingDaysStore(settings.db_path)
-        # Backfill the one demo scenario (PRSX) that needs genuinely
-        # distinct historical scan_date rows to show a real multi-day
-        # BUILDING -> CONFIRMED trajectory -- see seed_demo_history.py's
-        # module docstring. Idempotent, non-fatal (demo-only convenience;
-        # never block app startup on it), and runs on real fixture data
-        # through the real scan_service, not a hardcoded state.
+def _mode_of(adapter: UWDataAdapter) -> str:
+    """The data domain an adapter belongs to. Only a real LiveUWAdapter is
+    "live"; everything else (SyntheticDataAdapter) is "demo"."""
+    return "live" if isinstance(adapter, LiveUWAdapter) else "demo"
+
+
+class StorageIsolationError(RuntimeError):
+    pass
+
+
+def get_store(mode: Optional[str] = None) -> QualifyingDaysStore:
+    """Lifecycle store for one data domain. Demo/Live isolation is
+    storage-level: Live uses settings.db_path, Demo uses
+    settings.demo_db_path (a separate SQLite file), so no Demo scan, seed
+    or page view can ever read or write Live qualification state/history
+    and vice versa. `mode` defaults to the currently selected app mode;
+    callers that already hold an adapter pass `_mode_of(adapter)` so the
+    store always matches the data source actually being scanned."""
+    global _store, _demo_store
+    if mode is None:
+        mode = "live" if _settings_store.get_mode() == "live" else "demo"
+    if mode not in ("live", "demo"):
+        raise ValueError(f"unknown data domain {mode!r}")
+    if (settings.db_path != ":memory:" and
+            os.path.abspath(settings.db_path) == os.path.abspath(settings.demo_db_path)):
+        raise StorageIsolationError(
+            "TIP_DEMO_DB_PATH must not be the same file as TIP_DB_PATH -- Demo and Live "
+            "lifecycle data are required to live in separate databases."
+        )
+    if mode == "live":
+        if _store is None:
+            _store = QualifyingDaysStore(settings.db_path)
+        return _store
+    if _demo_store is None:
+        _demo_store = QualifyingDaysStore(settings.demo_db_path)
+        # Backfill the demo scenarios that need genuinely distinct
+        # historical scan_date rows -- see seed_demo_history.py. DEMO STORE
+        # ONLY: never written into the Live database.
         try:
             from .seed_demo_history import seed_persistence_progression
-            seed_persistence_progression(_store, settings.fixtures_dir)
+            seed_persistence_progression(_demo_store, settings.fixtures_dir)
         except Exception:
             pass
-    return _store
+    return _demo_store
 
 
 def get_catalog() -> IngestionCatalog:
@@ -446,7 +475,7 @@ def _scheduler_run_ticker_scan(adapter: UWDataAdapter, ticker: str) -> dict:
     (see storage_guard.py) instead of the on-demand one. Intentionally
     NOT a new evaluation pipeline -- see app/scheduler.py's module
     docstring and Chad's item 6."""
-    return _run_scan(adapter, get_store(), ticker, kind="background")
+    return _run_scan(adapter, get_store(_mode_of(adapter)), ticker, kind="background")
 
 
 _scheduler_runner: Optional[scheduler_module.SchedulerRunner] = None
@@ -1459,7 +1488,7 @@ def _radar_impl(refresh: bool):
     ordinary nav) never fabricate a fresh-looking scan time for data that
     was not actually just re-fetched."""
     adapter = get_adapter()
-    store = get_store()
+    store = get_store(_mode_of(adapter))
     catalog = get_catalog()
     universe = adapter.get_universe()
     if not universe:
@@ -1884,7 +1913,7 @@ def _ticker_analysis_impl(ticker: str, refresh: bool) -> dict:
     isn't live at all (Demo Mode keeps its existing always-fresh
     behavior, same rationale as _radar_impl)."""
     adapter = get_adapter()
-    store = get_store()
+    store = get_store(_mode_of(adapter))
     catalog = get_catalog()
     ticker = _validate_ticker_for_analysis(adapter, ticker)
 
@@ -2387,7 +2416,7 @@ def investigate_ticker(ticker: str):
         )
 
     adapter = get_adapter()
-    store = get_store()
+    store = get_store(_mode_of(adapter))
     try:
         scan = _run_scan(adapter, store, safe_ticker)
         evidence = _to_evidence_item(scan)

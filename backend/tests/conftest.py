@@ -100,6 +100,7 @@ def app_main(tmp_path, monkeypatch):
     # state (and in-flight counters) can never leak into the next test.
     _main._catalog = None
     _main._store = None
+    _main._demo_store = None
     _main._reset_scheduler_runner()
     from app.core import uw_concurrency as _uw_concurrency
     _uw_concurrency.reset_shared_gate_for_tests()

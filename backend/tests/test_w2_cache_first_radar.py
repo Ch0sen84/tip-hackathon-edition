@@ -136,7 +136,7 @@ def test_never_evaluated_ticker_with_a_real_prior_lifecycle_state_is_unaffected(
     adapter, mock_session = _wire_live_adapter_with_mock_session(app_main, monkeypatch, watchlist_tickers)
     ticker = watchlist_tickers[0]
     # Give this ticker a real lifecycle record without a cataloged scan.
-    app_main.get_store().record_scan(ticker, any_gate_passed=True, state="BUILDING")
+    app_main.get_store("live").record_scan(ticker, any_gate_passed=True, state="BUILDING")
 
     client = TestClient(app_main.app)
     resp = client.get("/api/radar")

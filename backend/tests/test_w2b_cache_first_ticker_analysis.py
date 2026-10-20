@@ -52,7 +52,7 @@ def test_ticker_analysis_open_refresh_back_direct_link_makes_zero_calls(app_main
     app_main._settings_store.set_watchlist([ticker])
     adapter, mock_session = _wire_live_adapter_with_mock_session(app_main, monkeypatch, [ticker])
     _seed_cached_evaluation(app_main, ticker)
-    app_main.get_store().record_scan(ticker, any_gate_passed=True, state="BUILDING")
+    app_main.get_store("live").record_scan(ticker, any_gate_passed=True, state="BUILDING")
     client = TestClient(app_main.app)
     first_body = None
     for _ in range(4):  # open, F5, Back, direct-link -- all the same route

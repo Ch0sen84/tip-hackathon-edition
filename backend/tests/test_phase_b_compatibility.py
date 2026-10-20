@@ -87,7 +87,7 @@ def _fresh_memory_store(app_main, monkeypatch):
     shared `_store` (with PRSX's seeded demo history other tests in this
     session depend on) is restored automatically at teardown."""
     store = QualifyingDaysStore(db_path=":memory:")
-    monkeypatch.setattr(app_main, "get_store", lambda: store)
+    monkeypatch.setattr(app_main, "get_store", lambda *_a, **_k: store)
     return store
 
 
