@@ -1062,20 +1062,25 @@ class IngestionCatalog:
                  "covered_from_utc": r[2], "covered_through_utc": r[3], "pages_walked": r[4],
                  "rows_seen": r[5], "last_error": r[6], "retrieved_at": r[7]} for r in rows]
 
-    def observations_between(self, dataset: str, ticker: str, start_utc: datetime, end_utc: datetime) -> list:
-        """Deduplicated observation dicts for `ticker` with start <= event_time
-        <= end. Dark-pool rows are deduplicated by the verified print key
-        (darkpool_print_key -- also covers legacy rows stored under older
-        source_id schemes) and CANCELED prints are excluded -- a canceled
-        print is not market activity."""
+    @staticmethod
+    def _window_date_range(start_utc: datetime, end_utc: datetime) -> tuple:
+        return ((start_utc - timedelta(days=1)).date().isoformat(),
+                (end_utc + timedelta(days=1)).date().isoformat())
+
+    def _iter_window(self, dataset: str, ticker: str, start_utc: datetime, end_utc: datetime,
+                     on_duplicate=None):
+        """Yields (ts, key, data) for the deduplicated, non-canceled observations
+        with start <= event_time <= end, in the catalog's event_time order --
+        THE single definition of which raw rows count (observations_between and
+        the completed-session curves both use it). `on_duplicate(ts, key, data)`
+        sees each suppressed duplicate."""
         table = {"darkpool": "darkpool_observations", "options_flow": "options_flow_observations"}[dataset]
-        lo = (start_utc - timedelta(days=1)).date().isoformat()
-        hi = (end_utc + timedelta(days=1)).date().isoformat()
+        lo, hi = self._window_date_range(start_utc, end_utc)
         with self._conn() as conn:
             rows = conn.execute(
                 f"SELECT event_time, raw_json FROM {table} WHERE ticker = ? AND event_time >= ? AND event_time < ? "
                 f"ORDER BY event_time", (ticker, lo, hi)).fetchall()
-        out, seen = [], set()
+        seen = set()
         for event_time, raw_json in rows:
             ts = _parse_iso_dt(str(event_time).replace("Z", "+00:00"))
             if ts is None or ts < start_utc or ts > end_utc:
@@ -1092,11 +1097,64 @@ class IngestionCatalog:
                 key = ("i", data.get("id")) if data.get("id") is not None else (
                     "f", data.get("created_at"), _num(data.get("total_premium")), data.get("type"))
             if key in seen:
+                if on_duplicate is not None:
+                    on_duplicate(ts, key, data)
                 continue
             seen.add(key)
+            yield ts, key, data
+
+    def observations_between(self, dataset: str, ticker: str, start_utc: datetime, end_utc: datetime) -> list:
+        """Deduplicated observation dicts for `ticker` with start <= event_time
+        <= end. Dark-pool rows are deduplicated by the verified print key
+        (darkpool_print_key -- also covers legacy rows stored under older
+        source_id schemes) and CANCELED prints are excluded -- a canceled
+        print is not market activity."""
+        out = []
+        for ts, _key, data in self._iter_window(dataset, ticker, start_utc, end_utc):
             data["_event_time_utc"] = ts.isoformat()
             out.append(data)
         return out
+
+    # --- completed-session value curves (derived cache; raw rows stay authoritative)
+    def observation_window_signature(self, dataset: str, ticker: str, start_utc: datetime,
+                                     end_utc: datetime) -> tuple:
+        """(row count, max id) of every raw row the window query could read.
+        Observation tables are append-only, so any late, corrected or canceled
+        print for that window changes this signature."""
+        table = {"darkpool": "darkpool_observations", "options_flow": "options_flow_observations"}[dataset]
+        lo, hi = self._window_date_range(start_utc, end_utc)
+        with self._conn() as conn:
+            row = conn.execute(f"SELECT COUNT(*), COALESCE(MAX(id), 0) FROM {table} "
+                               f"WHERE ticker = ? AND event_time >= ? AND event_time < ?", (ticker, lo, hi)).fetchone()
+        return int(row[0]), int(row[1])
+
+    def get_session_curve(self, dataset: str, ticker: str, session_date: str, value_key: str) -> Optional[dict]:
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT curve_version, window_start_utc, window_end_utc, src_count, src_max_id, n, monotonic, "
+                "ts_us, vals FROM session_value_curves WHERE dataset = ? AND ticker = ? AND session_date = ? "
+                "AND value_key = ?", (dataset, ticker, session_date, value_key)).fetchone()
+        if not row:
+            return None
+        return {"curve_version": row[0], "window_start_utc": row[1], "window_end_utc": row[2],
+                "src_count": row[3], "src_max_id": row[4], "n": row[5], "monotonic": bool(row[6]),
+                "ts_us": row[7], "vals": row[8]}
+
+    def put_session_curve(self, dataset: str, ticker: str, session_date: str, value_key: str, curve: dict) -> None:
+        with self._conn() as conn:
+            conn.execute(
+                "INSERT INTO session_value_curves (dataset, ticker, session_date, value_key, curve_version, "
+                "window_start_utc, window_end_utc, src_count, src_max_id, n, monotonic, ts_us, vals, built_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(dataset, ticker, session_date, value_key) DO UPDATE SET "
+                "curve_version=excluded.curve_version, window_start_utc=excluded.window_start_utc, "
+                "window_end_utc=excluded.window_end_utc, src_count=excluded.src_count, "
+                "src_max_id=excluded.src_max_id, n=excluded.n, monotonic=excluded.monotonic, "
+                "ts_us=excluded.ts_us, vals=excluded.vals, built_at=excluded.built_at",
+                (dataset, ticker, session_date, value_key, curve["curve_version"], curve["window_start_utc"],
+                 curve["window_end_utc"], curve["src_count"], curve["src_max_id"], curve["n"],
+                 int(curve["monotonic"]), curve["ts_us"], curve["vals"], utcnow_iso()))
+            conn.commit()
 
     def get_last_successful_collection_at(self, ticker: str) -> Optional[str]:
         """collected_at of the newest evaluation whose data collection was

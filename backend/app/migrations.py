@@ -560,6 +560,53 @@ CREATE INDEX IF NOT EXISTS idx_session_coverage_lookup ON session_coverage(datas
 """,
 ))
 
+MIGRATIONS.append(Migration(
+    version=9,
+    name="session_value_curves_and_baseline_jobs",
+    sql="""
+-- Performance (Phase 4): per completed session, the ordered (event time,
+-- value) sequence of the SAME deduplicated observations the baseline reads
+-- from raw rows, so a same-elapsed-slice value is a lookup instead of a
+-- re-parse of every raw row. Derived data only: raw observations stay the
+-- source of truth. A row is used only while its source signature (row count
+-- and max id over the raw window) still matches; otherwise it is rebuilt.
+CREATE TABLE IF NOT EXISTS session_value_curves (
+    dataset TEXT NOT NULL,
+    ticker TEXT NOT NULL,
+    session_date TEXT NOT NULL,
+    value_key TEXT NOT NULL,
+    curve_version INTEGER NOT NULL,
+    window_start_utc TEXT NOT NULL,
+    window_end_utc TEXT NOT NULL,
+    src_count INTEGER NOT NULL,
+    src_max_id INTEGER NOT NULL,
+    n INTEGER NOT NULL,
+    monotonic INTEGER NOT NULL,
+    ts_us BLOB NOT NULL,
+    vals BLOB NOT NULL,
+    built_at TEXT NOT NULL,
+    PRIMARY KEY (dataset, ticker, session_date, value_key)
+);
+
+-- User-initiated historical baseline builds (Phase 4). Durable checkpoint:
+-- per-ticker progress lives in progress_json; session coverage itself is
+-- already checkpointed per window in session_coverage.
+CREATE TABLE IF NOT EXISTS baseline_jobs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    status TEXT NOT NULL,
+    tickers_json TEXT NOT NULL,
+    max_pages_per_ticker INTEGER NOT NULL,
+    step_pages INTEGER NOT NULL,
+    pages_used INTEGER NOT NULL DEFAULT 0,
+    progress_json TEXT NOT NULL,
+    last_error TEXT,
+    requested_by TEXT
+);
+""",
+))
+
 # Migrations at or above this version take a fresh pre-migration backup of an
 # existing, non-empty database file before they are applied (in addition to
 # the one-time first-run backup), so upgrading a real Live install is always
