@@ -2297,7 +2297,13 @@ def _baseline_job_step(ticker: str, pages: int) -> dict:
     if not isinstance(adapter, LiveUWAdapter):
         raise baseline_jobs.JobBlocked("paused: the app is no longer in Live Mode -- switch back to Live and resume")
     with _baseline_backfill_lock:
-        return _run_baseline_backfill(adapter, ticker, pages, "on_demand")
+        result = _run_baseline_backfill(adapter, ticker, pages, "on_demand")
+    # A provider history cutoff found by an EARLIER step or job is already recorded
+    # in coverage; report it so the job labels the ticker honestly.
+    catalog = get_catalog()
+    for dataset, r in result.items():
+        r["history_cutoff"] = any(c["status"] == "unavailable" for c in catalog.list_session_coverage(dataset, ticker))
+    return result
 
 
 def get_baseline_job_runner() -> baseline_jobs.BaselineJobRunner:

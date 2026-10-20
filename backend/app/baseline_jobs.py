@@ -217,7 +217,7 @@ class BaselineJobRunner:
             for ds, r in result.items():
                 touched = r.get("sessions_touched") or []
                 used += int(r.get("pages_used") or 0)
-                cutoff = any(t.get("coverage") == "unavailable" for t in touched)
+                cutoff = bool(r.get("history_cutoff")) or any(t.get("coverage") == "unavailable" for t in touched)
                 err = next((t for t in touched if t.get("status") not in ("ok", None)
                             and t.get("coverage") != "unavailable"), None)
                 if err and not failed:

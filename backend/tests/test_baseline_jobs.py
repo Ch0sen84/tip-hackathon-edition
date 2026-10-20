@@ -239,3 +239,14 @@ def test_leaving_live_mode_pauses_the_job_with_a_clear_reason_and_no_more_reques
     assert job["status"] == "paused" and "no longer in Live Mode" in job["last_error"]
     assert "internal error" not in job["last_error"]
     assert len(uw.calls) == n
+
+
+def test_a_cutoff_found_by_an_earlier_job_is_still_labelled_as_a_cutoff(live):
+    cutoff = prior_sessions(EVIDENCE, 8)[0]
+    live.use_uw(build_uw(history_cutoff=cutoff))
+    client = TestClient(live.app)
+    first = run_job(live, client, max_pages_per_ticker=400)
+    assert first["progress"]["ABCD"]["state"] == "history_cutoff"
+    live._baseline_job_runner = None
+    second = run_job(live, client, max_pages_per_ticker=400)      # nothing left to fetch this time
+    assert second["status"] == "completed" and second["progress"]["ABCD"]["state"] == "history_cutoff"
