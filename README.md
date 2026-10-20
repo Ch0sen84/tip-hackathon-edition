@@ -56,7 +56,10 @@ paths; with neither, the gates stay "insufficient" indefinitely.
    tickers. `disabled` and `dry_run` never backfill.
 
 Measured cost for one SPY-scale ticker (about 50,000 dark-pool prints and 15,000 flow alerts per session):
-- about 3,000–4,500 UW pages to reach 20–30 sessions;
+- about 2,800–4,200 UW pages for 20 sessions, about 4,200–6,300 for the full 30-session lookback;
+- a busy ticker prints roughly 3–5 dark-pool pages per 15 minutes, so the default 4-page budget per
+  Refresh (`TIP_SCAN_COVERAGE_PAGES`) cannot walk the current session back to the open on its own; raise
+  it (e.g. 25) or rely on backfill, otherwise the evidence session stays "not verified from the open";
 - about 1.6 GB of SQLite storage at 30 sessions;
 - about 12 s (mid-session) to 22 s (after the close) of baseline computation per refresh, with ~0.5 GB peak
   memory.
