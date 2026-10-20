@@ -16,7 +16,7 @@ The pytest suite refuses any non-loopback connection (`tests/conftest.py`).
 
 | | |
 |---|---|
-| **Source** | UW `/api/darkpool/{T}?date=&older_than=&limit=500`, paged by `app/session_collection.py` and cataloged (`ingestion.darkpool_observations`, deduplicated by `tracking_id`, canceled prints excluded on read) |
+| **Source** | UW `/api/darkpool/{T}?date=&newer_than=&older_than=&limit=500`, paged in bounded windows by `app/session_collection.py` (contract verified live: [UW_PAGINATION_VERIFICATION.md](UW_PAGINATION_VERIFICATION.md)) and cataloged under the verified print key `(tracking_id, executed_at, price, size, volume)`; canceled prints excluded on read |
 | **Calculation** | `app/core/session_baseline.compute(..., "darkpool")`: session-to-covered-point premium vs the same elapsed slice of ≥ 20 prior complete sessions; ratio ≥ 3 and percentile ≥ 0.95 |
 | **Runtime wiring** | `main._run_scan` → `_collect_session_dataset("darkpool")` → `_session_baseline_gate_inputs` → `scan_service.build_gate_inputs(mode="live")` → `signal_engine.evaluate_gates` |
 | **Live** | supported, once ≥ 20 complete prior sessions are collected (backfill: scheduler / route) |
@@ -37,6 +37,10 @@ Proof:
 - **no look-ahead:** `::test_future_sessions_are_never_used_as_history`
 - **unverifiable provider behaviour:** `::test_pagination_cursor_not_honored_is_unknown_not_complete`,
   `::test_running_out_of_data_is_partial_but_a_stuck_full_page_is_unknown`
+- **coverage semantics on the verified contract** (`test_session_coverage_semantics.py`): bounded windows,
+  holiday, early close, quiet/zero sessions, pre-listing exclusion, history cutoff, shared `tracking_id`
+  prints, boundary-second overlap, stuck cursor, hard page budget, in-progress session, partial never
+  eligible
 
 ---
 
@@ -44,7 +48,7 @@ Proof:
 
 | | |
 |---|---|
-| **Source** | UW `/api/option-trades/flow-alerts?ticker_symbol=&older_than=&limit=200`, paged and cataloged the same way; `older_than` is UW-documented and every page is checked to verify it is honoured |
+| **Source** | UW `/api/option-trades/flow-alerts?ticker_symbol=&newer_than=&older_than=&limit=200`, bounded windows, inclusive cursor, deduplicated by `id` (contract verified live) |
 | **Calculation** | `session_baseline.compute(..., "options_flow")`: the same method as dark pool, on alert `total_premium` |
 | **Runtime wiring** | `_collect_session_dataset("options_flow")` → `_options_baseline` → `build_gate_inputs(options_flow_baseline=...)` |
 | **Live** | supported (same history requirement). The old snapshot rule is never used in Live |
@@ -129,9 +133,10 @@ Proof: `test_signal_engine::test_data_quality_fails_when_a_collection_failed`, `
 
 ---
 
-## End to end on recorded real data
-- `tests/test_e2e_live_replay.py` runs over a real HTTP socket against the recorded capture, through the real
-  Settings flow.
+## End to end
+- `tests/test_e2e_live_replay_synthetic.py` (public, synthetic fixture) and the private, optional
+  `tests/test_e2e_live_replay.py` (a locally built real capture) both run over a real HTTP socket, through
+  the real Settings flow.
 - `frontend/test_e2e_live_replay_cdp.py` checks the rendered UI.
 - On that data every independent gate is honestly `insufficient`, because no session in the capture has
   verified coverage. This is asserted, not worked around.

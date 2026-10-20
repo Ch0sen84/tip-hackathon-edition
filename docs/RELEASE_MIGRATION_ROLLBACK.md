@@ -50,6 +50,32 @@ a real installation. Each step needs explicit owner approval.
    - A refresh shows `insufficient`, not `medium`.
 4. Optionally run `tools/audit_demo_live_contamination.py` against the migrated DB (read-only).
 
+## Verified on disposable copies (2026-10-20)
+A copy of a real pre-05c47ca production DB, plus copies of `settings.json` and `.auth_token`, was taken
+through this full cycle, with UW pointed at a dead port. **29/29 checks passed:**
+1. 05c47ca code migrates it to schema 1–6. Legacy Demo contamination is visible (FLUX = CONFIRMED).
+2. Release-candidate startup applies migrations 7–8:
+   - One automatic `*.pre-migration-*.bak` is created. It passes `integrity_check` and is content-identical
+     to the pre-upgrade DB.
+   - All legacy and catalog tables are content-identical before and after.
+   - The new lifecycle tables start empty, and legacy contamination does not reach Live (FLUX / SPY have no
+     Live state).
+   - Config and token files are unchanged.
+3. A second startup is a no-op: no migration, no backup, no table change. Two backups in the same second get
+   distinct names.
+4. Rollbacks:
+   - **Code-only** (05c47ca on the migrated DB): starts and reads legacy state exactly as before.
+   - **Full DB restore from the automatic `.bak`:** content-identical to pre-upgrade; 05c47ca starts.
+   - **Restore from an operator volume copy:** identical; starts.
+   - **Re-upgrade after restore:** succeeds.
+5. Fresh install: separate Live and Demo DB files, schema 1–8, no pointless backups, Demo activity only in
+   the Demo DB.
+
+**Not exercised: the Docker container path.** The Docker daemon was not running and was deliberately not
+started, because the deployed container could auto-start. Static review: `TIP_DB_PATH=/srv/data/...` keeps
+the Demo DB and all backups in the persistent `tip-data` volume. The new budget variables are forwarded by
+`docker-compose.yml`.
+
 ## Rollback
 - **Code.** Redeploy the 05c47ca image. The extra tables are ignored by the old code, and the legacy tables
   it reads were never modified, so the old app resumes exactly where it was.
