@@ -78,7 +78,12 @@ def _f(v) -> float:
 # rebuilt on any change (late, corrected or canceled prints); raw rows remain
 # the source of truth. TIP_SESSION_CURVE_CACHE=0 disables it.
 CURVE_VERSION = 1
-CURVE_STATS = {"hits": 0, "misses": 0, "uncacheable": 0, "write_errors": 0}
+CURVE_STATS = {"hits": 0, "misses": 0, "uncacheable": 0, "write_errors": 0, "sealed_hits": 0, "sealed_changed": 0}
+# Returned for a session whose raw rows were archived and pruned (tools/retention.py)
+# but which has since received new raw rows: neither the sealed aggregate nor the
+# remaining raw rows are complete, so the session is left out of the baseline until
+# it is restored from its archive.
+SEALED_CHANGED = object()
 _EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 _log = logging.getLogger(__name__)
 
@@ -135,12 +140,27 @@ def _build_curve(catalog, dataset: str, ticker: str, value_key: str, h_open: dat
 
 
 def _session_curve(catalog, dataset: str, ticker: str, value_key: str, session_date: str,
-                   h_open: datetime, h_close: datetime):
-    if not _curve_cache_enabled() or not hasattr(catalog, "get_session_curve"):
+                   h_open: datetime, h_close: datetime, force: bool = False):
+    """`force` (tools/retention.py only) builds/validates the curve even when the
+    runtime cache switch is off."""
+    if not hasattr(catalog, "get_session_curve"):
         return None
+    if not force and not _curve_cache_enabled():
+        row = catalog.get_session_curve(dataset, ticker, session_date, value_key)
+        if not (row and row.get("sealed")):
+            return None          # cache off: raw path, except retained (sealed) sessions which have no raw rows
     w0, w1 = h_open.isoformat(), h_close.isoformat()
     sig = catalog.observation_window_signature(dataset, ticker, h_open, h_close)   # BEFORE any build
     row = catalog.get_session_curve(dataset, ticker, session_date, value_key)
+    if row and row.get("sealed"):
+        if (row["src_count"], row["src_max_id"]) != sig:
+            CURVE_STATS["sealed_changed"] += 1
+            return SEALED_CHANGED
+        ts, vals = array.array("q"), array.array("d")
+        ts.frombytes(row["ts_us"])
+        vals.frombytes(row["vals"])
+        CURVE_STATS["sealed_hits"] += 1
+        return _Curve(ts, vals, row["monotonic"])
     if (row and row["curve_version"] == CURVE_VERSION and row["window_start_utc"] == w0
             and row["window_end_utc"] == w1 and (row["src_count"], row["src_max_id"]) == sig):
         ts, vals = array.array("q"), array.array("d")
@@ -263,6 +283,10 @@ def compute(catalog, dataset: str, ticker: str, evidence_session: date,
         h_close = hinfo.session_close_et.astimezone(timezone.utc)
         cutoff = min(h_open + elapsed, h_close)
         curve = _session_curve(catalog, dataset, ticker, value_key, c["session_date"], h_open, h_close)
+        if curve is SEALED_CHANGED:
+            base.coverage_summary["unknown:sealed_session_changed"] = (
+                base.coverage_summary.get("unknown:sealed_session_changed", 0) + 1)
+            continue
         if curve is not None:
             v, n_obs = curve.upto(cutoff)
             active = curve.n > 0

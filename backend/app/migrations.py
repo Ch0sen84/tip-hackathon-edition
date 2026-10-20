@@ -585,6 +585,11 @@ CREATE TABLE IF NOT EXISTS session_value_curves (
     ts_us BLOB NOT NULL,
     vals BLOB NOT NULL,
     built_at TEXT NOT NULL,
+    -- set only by tools/retention.py after the session's raw rows were archived
+    -- (verified) and pruned: the curve is then the retained aggregate and the
+    -- archive file is the provenance; never set by the app itself.
+    sealed INTEGER NOT NULL DEFAULT 0,
+    archive_ref TEXT,
     PRIMARY KEY (dataset, ticker, session_date, value_key)
 );
 

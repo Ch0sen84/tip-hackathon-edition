@@ -1132,13 +1132,13 @@ class IngestionCatalog:
         with self._conn() as conn:
             row = conn.execute(
                 "SELECT curve_version, window_start_utc, window_end_utc, src_count, src_max_id, n, monotonic, "
-                "ts_us, vals FROM session_value_curves WHERE dataset = ? AND ticker = ? AND session_date = ? "
-                "AND value_key = ?", (dataset, ticker, session_date, value_key)).fetchone()
+                "ts_us, vals, sealed, archive_ref FROM session_value_curves WHERE dataset = ? AND ticker = ? "
+                "AND session_date = ? AND value_key = ?", (dataset, ticker, session_date, value_key)).fetchone()
         if not row:
             return None
         return {"curve_version": row[0], "window_start_utc": row[1], "window_end_utc": row[2],
                 "src_count": row[3], "src_max_id": row[4], "n": row[5], "monotonic": bool(row[6]),
-                "ts_us": row[7], "vals": row[8]}
+                "ts_us": row[7], "vals": row[8], "sealed": bool(row[9]), "archive_ref": row[10]}
 
     def put_session_curve(self, dataset: str, ticker: str, session_date: str, value_key: str, curve: dict) -> None:
         with self._conn() as conn:
@@ -1150,7 +1150,8 @@ class IngestionCatalog:
                 "curve_version=excluded.curve_version, window_start_utc=excluded.window_start_utc, "
                 "window_end_utc=excluded.window_end_utc, src_count=excluded.src_count, "
                 "src_max_id=excluded.src_max_id, n=excluded.n, monotonic=excluded.monotonic, "
-                "ts_us=excluded.ts_us, vals=excluded.vals, built_at=excluded.built_at",
+                "ts_us=excluded.ts_us, vals=excluded.vals, built_at=excluded.built_at "
+                "WHERE session_value_curves.sealed = 0",                # never overwrite a retained aggregate
                 (dataset, ticker, session_date, value_key, curve["curve_version"], curve["window_start_utc"],
                  curve["window_end_utc"], curve["src_count"], curve["src_max_id"], curve["n"],
                  int(curve["monotonic"]), curve["ts_us"], curve["vals"], utcnow_iso()))
