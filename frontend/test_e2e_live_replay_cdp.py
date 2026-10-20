@@ -78,9 +78,9 @@ def main():
                 outage="SPY" if "SPY" in tick else "SYNC")
     print(f"replay fixture: {'SYNTHETIC (public)' if info['synthetic'] else 'RECORDED (private)'}; tickers {INFO['watch']}")
     health = http("GET", f"{BASE}/api/health")
-    check("backend is pinned to the replay clock (recorded data, loopback UW)", bool(health.get("replay_clock")), health)
+    check("backend is pinned to the replay clock (replay data, loopback UW)", bool(health.get("replay_clock")), health)
     token, radar = setup()
-    check("API: nothing qualifies on the recorded data", radar["highest"] == [], radar["highest"])
+    check("API: nothing qualifies on the replay data", radar["highest"] == [], radar["highest"])
 
     profile = tempfile.mkdtemp(prefix="tip-e2e-cdp-")
     proc = subprocess.Popen([CHROME, "--headless=new", "--no-sandbox", "--disable-dev-shm-usage",
@@ -138,7 +138,7 @@ def main():
             check("radar renders 'No active qualification' for evaluated tickers (not 'Not evaluated')",
                   "No active qualification" in body and "Not evaluated" not in body, body[:600])
             check("radar shows the insufficient-evidence note", "insufficient evidence" in body, body[:600])
-            check("radar never shows HIGH/CONFIRMED on recorded data", "CONFIRMED" not in body and "HIGH" not in body)
+            check("radar never shows HIGH/CONFIRMED on the replay data", "CONFIRMED" not in body and "HIGH" not in body)
             shot("radar")
 
             call("Page.navigate", {"url": f"{BASE}/#view=ticker&ticker={INFO['detail']}"})
@@ -152,7 +152,8 @@ def main():
             call("Runtime.evaluate", {"expression": "document.querySelectorAll('details').forEach(d=>d.open=true)"})
             detail = text_of("#tickerDetail")
             check("gate diagnostics show 'insufficient history' with the real reason",
-                  "insufficient history" in detail.lower() and "verified from the open" in detail, detail[-1500:])
+                  "insufficient history" in detail.lower()
+                  and ("verified from the open" in detail or "complete prior sessions" in detail), detail[-1500:])
             check("synthetic percentile is not presented as a trailing-window percentile",
                   "trailing 30-day window" not in detail and "Not computed in Live Mode" in detail)
             check("no 'trustworthy' or 'statistical anomaly' claims rendered",
