@@ -128,7 +128,7 @@ def test_bounds_failure_on_page_1_without_retry_stores_nothing_and_is_unknown(ca
     assert d["page_in_window"] == 1 and d["attempt"] == 1 and d["action"] == "session_left_unknown"
     assert d["violations"]["above_upper"] == 1 and d["classification"] == "upper_bound_violated"
     assert d["request"] == {"date": DAY.isoformat(), "limit": 500, "newer_than": iso(OPEN_UTC),
-                            "older_than": iso(CLOSE_UTC)}
+                            "older_than": iso(CLOSE_UTC + timedelta(seconds=1))}   # [open, close] inclusive
 
 
 def test_bounds_failure_after_several_good_pages_keeps_them_but_claims_no_coverage(cat, monkeypatch):

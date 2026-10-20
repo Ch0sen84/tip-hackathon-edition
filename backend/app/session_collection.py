@@ -42,7 +42,7 @@ Status vocabulary (session_coverage.status) with reason codes (last_error):
                session_in_progress | page_budget_exhausted
   unknown      coverage could not be established -- reasons:
                invalid_rows | bounds_not_honored | wrong_session_date |
-               cursor_stuck | catalog_write_failed
+               rows_out_of_order | cursor_stuck | catalog_write_failed
   unavailable  the provider refuses this session -- reasons:
                provider_history_cutoff | not_entitled
 Transient provider failures (429/5xx/timeout/malformed) leave stored coverage
@@ -56,6 +56,8 @@ Rejected pages (Phase 9 reliability)
                         or has a missing / unparseable timestamp
     bounds_not_honored  a row outside the requested bounds
     wrong_session_date  (dark pool) a row off the requested NY date
+    rows_out_of_order   rows not newest-first (the contract the cursor relies
+                        on: a full page must be the NEWEST rows of the window)
   A sanitized diagnostic (request bounds, observed min/max timestamps,
   violation counts, a few offending timestamps -- no prices, sizes, ids, raw
   rows or credentials) is recorded in collection_diagnostics. The SAME window
@@ -65,6 +67,16 @@ Rejected pages (Phase 9 reliability)
   that passes every check is stored and advances the cursor, so a recovered
   walk proves coverage exactly as a clean one does; if every retry for a page
   is rejected the session stays UNKNOWN with that reason.
+
+Resuming an interrupted walk (page budget)
+  When a walk stops on its page budget, the proven island starts at the bound
+  the NEXT request would have used (`resume_from`), not at the oldest row
+  seen: for dark pool (exclusive older_than, second resolution) that is the
+  oldest second + 1 s, because prints sharing the oldest second may not all
+  have fit on the last page. The resumed backward window [open, resume_from)
+  therefore re-reads that second (deduplicated) instead of skipping it. For
+  flow (inclusive older_than) resume_from is the oldest instant itself and the
+  resumed window [open, resume_from] re-reads it the same way.
 """
 from __future__ import annotations
 
@@ -92,7 +104,7 @@ BOUNDS_RETRY_DELAY_S = max(0.0, min(30.0, float(os.environ.get("TIP_BOUNDS_RETRY
 DIAGNOSTIC_SAMPLE_ROWS = 5
 # unknown reasons meaning the provider returned unusable content for the
 # session: backfills skip such sessions instead of re-walking them every step
-REJECTED_CONTENT_REASONS = ("invalid_rows", "bounds_not_honored", "wrong_session_date")
+REJECTED_CONTENT_REASONS = ("invalid_rows", "bounds_not_honored", "wrong_session_date", "rows_out_of_order")
 _sleep = time.sleep          # patched by tests
 _log = logging.getLogger(__name__)
 
@@ -220,6 +232,8 @@ def _classify_violation(v: dict, samples: list, prev_newest: Optional[datetime],
         return "upper_bound_violated", flags
     if v["below_lower"] and not (v["above_upper"] or v["at_upper"]):
         return "lower_bound_ignored", flags
+    if v["out_of_order"] and not (v["above_upper"] or v["at_upper"] or v["below_lower"] or v["wrong_date"]):
+        return "rows_out_of_order", flags
     return "mixed_bounds_violation", flags
 
 
@@ -227,7 +241,7 @@ def _inspect_page(spec, data: list, ticker: str, session_date: date, lo: datetim
     """Validates a WHOLE page without storing anything: the accepted rows and
     times, or the rejection reason plus sanitized facts about the page. Any
     invalid row rejects the page (reason priority: invalid_rows, then
-    bounds_not_honored, then wrong_session_date)."""
+    bounds_not_honored, then wrong_session_date, then rows_out_of_order)."""
     rows, times, all_times, samples = [], [], [], []
     v = {"below_lower": 0, "at_upper": 0, "above_upper": 0, "wrong_date": 0, "unparseable": 0,
          "other_ticker": 0, "non_object": 0, "out_of_order": 0}
@@ -279,6 +293,8 @@ def _inspect_page(spec, data: list, ticker: str, session_date: date, lo: datetim
         reason = "bounds_not_honored"
     elif v["wrong_date"]:
         reason = "wrong_session_date"
+    elif v["out_of_order"]:
+        reason = "rows_out_of_order"
     else:
         reason = None
     if reason:
@@ -292,7 +308,11 @@ def _fetch_window(spec, client, catalog, ticker, session_date, lo, hi, budget, k
     """Pages newest-first inside [lo, hi]. Returns
        {"outcome": "exhausted" | "budget" | "unverifiable" | "failed" | "cutoff",
         "oldest": earliest row time seen, "pages", "rows", "reason", "status",
-        "bounds_retries", "bounds_recovered"}.
+        "bounds_retries", "bounds_recovered",
+        "resume_from": for "budget" only, the upper bound the next request would
+                       have used. Dark pool (exclusive, 1 s): every row AT OR ABOVE
+                       it is proven. Flow (inclusive): every row ABOVE it is proven;
+                       rows exactly at it are re-read by the resumed window}.
     A rejected page is never stored; the same window is re-requested at most
     `retries` times (BOUNDS_RETRIES_PER_WINDOW) PER PAGE, each against `budget`.
     The allowance resets only when an accepted page advances the cursor."""
@@ -304,7 +324,8 @@ def _fetch_window(spec, client, catalog, ticker, session_date, lo, hi, budget, k
 
     def done(outcome, reason, status=COLLECTION_OK):
         return {"outcome": outcome, "reason": reason, "pages": pages, "rows": n_rows, "oldest": oldest,
-                "status": status, "bounds_retries": retried, "bounds_recovered": recovered}
+                "status": status, "bounds_retries": retried, "bounds_recovered": recovered,
+                "resume_from": cursor if outcome == "budget" and window_page else None}
 
     while pages < budget:
         body = spec.fetch(client, ticker, session_date, lo, cursor)
@@ -424,6 +445,8 @@ def update_session_coverage(client, catalog, dataset: str, ticker: str, session_
                               detail="session has not opened yet")
 
     cov = catalog.get_session_coverage(dataset, ticker, sd) or {}
+    if max_pages <= 0:                    # no budget: no request and no coverage write (keeps the checkpoint)
+        return CoverageUpdate(dataset, ticker, sd, COLLECTION_OK, cov or None, detail="no page budget")
     if cov.get("status") in ("unknown", "unavailable") and cov.get("last_error") in (
             "provider_history_cutoff", "not_entitled"):
         return CoverageUpdate(dataset, ticker, sd, COLLECTION_OK, cov, detail=cov.get("last_error"))
@@ -451,8 +474,11 @@ def update_session_coverage(client, catalog, dataset: str, ticker: str, session_
 
     # 1) newest gap: (c_through, end], or the whole [open, end] if nothing usable yet
     top_lo = c_through if c_through is not None else open_utc
+    # [open, close] is INCLUSIVE (the baseline reads event_time <= close): at the close, an exclusive
+    # upper bound (dark pool) must sit one cursor step above it or prints stamped at the close are lost
+    top_hi = end + spec.cursor_step if end >= close_utc else end
     if c_through is None or c_through < end:
-        w = counted(_fetch_window(spec, client, catalog, ticker, session_date, top_lo, end, budget, kind, sink))
+        w = counted(_fetch_window(spec, client, catalog, ticker, session_date, top_lo, top_hi, budget, kind, sink))
         pages += w["pages"]; rows += w["rows"]; budget -= w["pages"]
         if w["outcome"] == "failed":
             return result(dataset, ticker, sd, w["status"], cov or None, pages=pages, rows_fetched=rows,
@@ -470,11 +496,15 @@ def update_session_coverage(client, catalog, dataset: str, ticker: str, session_
                 c_from, c_through = open_utc, end
             else:
                 c_through = end
-        else:  # budget: newest island [oldest_seen, end] (rows stay cataloged; older part re-walked later)
-            if c_through is not None and w["oldest"] is not None and w["oldest"] <= c_through:
-                c_through = end
+        else:  # budget: newest island [resume_from, end] (rows stay cataloged; older part re-walked later)
+            resume = w["resume_from"]
+            if resume is None:                           # defensive: no accepted page, nothing new proven
+                return result(dataset, ticker, sd, COLLECTION_OK, cov or None, pages=pages, rows_fetched=rows,
+                              detail=w["reason"])
+            if c_through is not None and resume <= c_through:
+                c_through = end                          # the island reaches the old checkpoint: contiguous
             else:
-                c_from, c_through = (w["oldest"] or end), end
+                c_from, c_through = resume, end          # a gap may remain below the island: re-walked later
             reason = w["reason"]
 
     # 2) backward gap: [open, c_from)
@@ -485,7 +515,7 @@ def update_session_coverage(client, catalog, dataset: str, ticker: str, session_
             c_from = open_utc
             reason = None
         elif w["outcome"] == "budget":
-            c_from = min(c_from, w["oldest"]) if w["oldest"] else c_from
+            c_from = min(c_from, w["resume_from"]) if w["resume_from"] else c_from
             reason = w["reason"]
         elif w["outcome"] == "failed":
             status, reason = w["status"], w["reason"]   # keep what was proven so far

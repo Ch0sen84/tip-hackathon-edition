@@ -15,6 +15,9 @@ Safety properties (each covered by tests/test_baseline_jobs.py):
   collector itself; the job row records per-ticker progress after every step,
   so a crash loses at most the step in flight, and resuming never re-fetches
   windows already verified complete.
+- Hard page budget: a step's pages are charged to the persisted job BEFORE its
+  first provider request and settled to the pages actually used afterwards, so
+  an exception or restart mid-step can never hand that budget back to a resume.
 - Pause / cancel are cooperative: honoured between steps. A step is bounded in logical
   pages, not in time or HTTP attempts (retries, timeouts and Retry-After waits apply
   inside the collector).
@@ -228,6 +231,10 @@ class BaselineJobRunner:
                 self.store.transition(job_id, ("running",), "completed")
                 return
             entry = progress[ticker]
+            counters = (job.get("pages_used"), entry.get("pages_used"), job.get("max_pages_per_ticker"))
+            if not all(isinstance(v, int) and not isinstance(v, bool) and v >= 0 for v in counters):
+                raise JobBlocked("paused: inconsistent persisted job progress (page counters); "
+                                 "no request was made -- start a new job")
             remaining = job["max_pages_per_ticker"] - entry["pages_used"]
             if remaining <= 0:
                 entry["state"] = "budget_exhausted"
@@ -241,10 +248,25 @@ class BaselineJobRunner:
                 entry["state"] = self._ticker_done(entry, job["target_sessions"]) or "no_more_work"
                 self.store.update(job_id, progress=progress)
                 continue
-            if needed is None or len(needed) == len(entry["datasets"]):
-                result = self.run_step(ticker, pages)
-            else:
-                result = self.run_step(ticker, pages, datasets=needed)
+            # Charge the step BEFORE any provider request: if the step raises or the process
+            # stops mid-step, the pages stay counted (a resume can under-spend, never overspend).
+            entry["pages_used"] += pages
+            entry["reserved_pages"] = pages
+            self.store.update(job_id, progress=progress, pages_used=job["pages_used"] + pages)
+            try:
+                if needed is None or len(needed) == len(entry["datasets"]):
+                    result = self.run_step(ticker, pages)
+                else:
+                    result = self.run_step(ticker, pages, datasets=needed)
+            except JobBlocked:                        # raised before any provider request: release the reservation
+                entry["pages_used"] -= pages
+                entry.pop("reserved_pages", None)
+                self.store.update(job_id, progress=progress, pages_used=job["pages_used"])
+                raise
+            except Exception as exc:  # noqa: BLE001 -- record the HTTP attempts it made; the pages stay reserved
+                entry["http_attempts"] = (entry.get("http_attempts") or 0) + int(getattr(exc, "tip_http_attempts", 0) or 0)
+                self.store.update(job_id, progress=progress)
+                raise
             used, failed, attempts, starved = 0, None, 0, False
             ds_state = {name: {**d, "last_pages_used": 0, "last_pages_allocated": 0}
                         for name, d in (entry.get("datasets") or {}).items() if name not in result}
@@ -274,14 +296,15 @@ class BaselineJobRunner:
                                 + sum(t.get("bounds_recovered") or 0 for t in touched)}
                 ds_state[ds]["target_met"] = self._dataset_met(ds_state[ds], job["target_sessions"])
             entry["datasets"] = ds_state
-            entry["pages_used"] += used
+            entry["pages_used"] += used - pages               # settle the reservation to the pages actually used
+            entry.pop("reserved_pages", None)
             entry["http_attempts"] = (entry.get("http_attempts") or 0) + attempts     # HTTP layer, incl. retries
             entry["steps"] += 1
             entry["last_error"] = failed
             job = self.store.get(job_id)            # pick up any pause/cancel requested during the step
             if failed:
                 entry["state"] = "running"
-                self.store.update(job_id, progress=progress, pages_used=job["pages_used"] + used,
+                self.store.update(job_id, progress=progress, pages_used=job["pages_used"] - pages + used,
                                   last_error=failed)
                 self.store.transition(job_id, ("running", "pause_requested"), "paused")
                 self.store.transition(job_id, ("cancel_requested",), "cancelled")
@@ -294,4 +317,5 @@ class BaselineJobRunner:
             # used == 0 with a dataset allocated 0 pages (the last page went to a dataset that had
             # nothing to do): that dataset is now marked no_more_work, so the next step gives the
             # remaining page to the one that was starved.
-            self.store.update(job_id, progress=progress, pages_used=job["pages_used"] + used, last_error=None)
+            self.store.update(job_id, progress=progress, pages_used=job["pages_used"] - pages + used,
+                              last_error=None)

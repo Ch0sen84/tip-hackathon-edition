@@ -57,8 +57,8 @@ No confidence value is calibrated or predictive (see [TRADING_VALIDITY.md](TRADI
   - Statuses (with reason codes):
     - `complete`
     - `partial`: `session_in_progress`, `page_budget_exhausted`
-    - `unknown`: `invalid_rows`, `bounds_not_honored`, `wrong_session_date`, `cursor_stuck`,
-      `catalog_write_failed`
+    - `unknown`: `invalid_rows`, `bounds_not_honored`, `wrong_session_date`, `rows_out_of_order`,
+      `cursor_stuck`, `catalog_write_failed`
     - `unavailable`: `provider_history_cutoff`, `not_entitled`
   - A transient provider failure leaves coverage unchanged.
   - **Rejected pages.** Every row of a page is validated before any row is stored. One invalid row rejects the
@@ -67,6 +67,8 @@ No confidence value is calibrated or predictive (see [TRADING_VALIDITY.md](TRADI
       timestamp.
     - `bounds_not_honored`: a row outside the requested bounds. `wrong_session_date`: a dark-pool row off the
       session date.
+    - `rows_out_of_order`: rows that are not newest-first. Equal timestamps in any order are fine. The cursor
+      relies on a full page being the *newest* rows of its window.
     - The same window is re-requested at most `TIP_BOUNDS_RETRIES_PER_WINDOW` times **per page** (default 1,
       max 3, 0 = off). The allowance resets only when an accepted page advances the cursor. Each retry
       counts against the page budget.
@@ -78,12 +80,25 @@ No confidence value is calibrated or predictive (see [TRADING_VALIDITY.md](TRADI
       includes prices, sizes, ids, raw rows or pages, or credentials. Read it with
       `GET /api/diagnostics/collection-bounds` (local, zero UW calls). Nothing reads diagnostics to decide
       coverage, eligibility or signals.
+  - **Session window.** `[open, close]` is inclusive, as the baseline reads it. A dark-pool walk that reaches
+    the close requests `older_than = close + 1 s` (exclusive, second resolution), so prints stamped exactly
+    at the close are collected. While a session is in progress, the live edge stays `now − 60 s` (exclusive).
+  - **Resuming an interrupted walk.** When a walk stops on its page budget, the checkpoint's `covered_from`
+    is the bound the next request would have used, not the oldest row seen.
+    - Dark pool: the oldest second + 1 s. Prints sharing that second may not all have fit on the last page,
+      and the resumed window `[open, covered_from)` re-reads them.
+    - Flow: the oldest instant, which the resumed inclusive window re-reads.
+    - A zero page budget makes no request and writes no coverage.
   - **Page budgets are exact.** A step's logical pages are split between datasets by quotient and remainder,
     so allocations never exceed the remaining budget. With 1 page left and 2 datasets, one gets 1 and the
     other 0. A dataset allocated 0 pages makes no request but still reports its status. This holds for jobs,
     resumed jobs and `POST /api/ticker/{t}/baseline/backfill`.
     - Job progress reports logical pages (`pages_used`) and HTTP attempts (`http_attempts`, which include
       transport-level retries) separately.
+    - A job charges a step's pages before the step's first request and settles them to the pages actually
+      used afterwards. An error or restart mid-step can therefore only under-spend: the reserved pages stay
+      charged, and a resume never exceeds `max_pages_per_ticker`.
+    - Page budgets below 1 are refused (HTTP 400) with no request.
   - **Baseline jobs** stop requesting a dataset once it has the job's target of complete prior sessions,
     and spend later steps on the other dataset. Eligibility, the 30-session lookback and the 20-session
     requirement are unchanged. Current-session evidence is still collected by every Live refresh.

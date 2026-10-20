@@ -688,14 +688,22 @@ def _run_baseline_backfill(adapter, ticker: str, max_pages: int, kind: str, data
     chosen = tuple(d for d in BASELINE_DATASETS if datasets is None or d in datasets) or BASELINE_DATASETS
     allocation = _allocate_pages(max_pages, chosen)
     telemetry = getattr(adapter.client, "telemetry", None)
-    out = {}
+    out, attempts_so_far = {}, 0
     with _collection_lock(ticker):
         for dataset in chosen:
             with (telemetry.meter() if telemetry is not None else contextlib.nullcontext(
                     {"logical_requests": 0, "http_attempts": 0})) as usage:
-                r = session_collection.backfill_baseline(
-                    adapter.client, get_catalog(), dataset, ticker, session_date, max_pages=allocation[dataset],
-                    kind=kind, now_utc=now)
+                try:
+                    r = session_collection.backfill_baseline(
+                        adapter.client, get_catalog(), dataset, ticker, session_date,
+                        max_pages=allocation[dataset], kind=kind, now_utc=now)
+                except Exception as exc:  # noqa: BLE001 -- report what was spent, then propagate unchanged
+                    try:
+                        exc.tip_http_attempts = attempts_so_far + usage["http_attempts"]
+                    except Exception:  # noqa: BLE001 -- an exception type that refuses attributes
+                        pass
+                    raise
+            attempts_so_far += usage["http_attempts"]
             r["pages_allocated"] = allocation[dataset]
             r["provider_requests"] = usage["logical_requests"]
             r["http_attempts"] = usage["http_attempts"]
@@ -2309,6 +2317,8 @@ def ticker_baseline_backfill(ticker: str, max_pages: int = 60):
     ticker = _validate_ticker_for_analysis(adapter, ticker)
     if not isinstance(adapter, LiveUWAdapter):
         raise HTTPException(status_code=400, detail="Baseline backfill is only available in Live Mode.")
+    if int(max_pages) < 1:                               # never turn a 0/negative budget into a request
+        raise HTTPException(status_code=400, detail="max_pages must be at least 1.")
     if not _baseline_backfill_lock.acquire(blocking=False):
         raise HTTPException(status_code=409, detail="A baseline backfill is already running.")
     try:
@@ -2442,6 +2452,8 @@ def baseline_job_create(body: BaselineJobBody):
             tickers.append(v)
     if not tickers or len(tickers) > 20:
         raise HTTPException(status_code=400, detail="Between 1 and 20 tickers.")
+    if int(body.max_pages_per_ticker) < 1:              # never turn a 0/negative budget into a request
+        raise HTTPException(status_code=400, detail="max_pages_per_ticker must be at least 1.")
     lo, hi = baseline_jobs.STEP_PAGES_RANGE
     lookback = session_collection.BACKFILL_LOOKBACK_SESSIONS
     try:
