@@ -46,14 +46,21 @@ a real installation. Each step needs explicit owner approval.
 - [ ] Review and merge the branch via PR (not a direct push to main).
 
 ## Deployment steps (after approval)
-1. Stop the container. Copy the DB file aside: `docker cp <container>:/srv/data/tip_hackathon.db ./backup/`.
-2. Build and start the new image. The migrations run automatically, and migration 7 writes its own backup
-   file first.
+1. Stop the container (`docker compose stop`), then back up the **whole volume** read-only. This is the
+   procedure verified in the Docker rehearsal:
+   ```bash
+   docker run --rm --network none -v tip-hackathon-edition_tip-data:/src:ro -v "<backup-dir>:/dst" python:3.11-slim tar -C /src -cpf /dst/tip-data.tar .
+   ```
+   Record `sha256sum tip-data.tar`.
+2. Build with `tools/build_with_version.sh` and start the new image. The migrations run automatically, and
+   migration 7 writes its own `*.pre-migration-*.bak` first.
 3. Verify:
-   - `GET /api/health` returns `replay_clock: null`.
+   - `GET /api/health` returns `replay_clock: null`, and `GET /api/settings/version` returns the new commit.
+   - Watchlist tickers read "not yet evaluated", not a legacy BUILDING/INVALIDATED verdict.
    - `GET /api/ticker/SPY/baseline` returns coverage (0 sessions at first).
    - A refresh shows `insufficient`, not `medium`.
 4. Optionally run `tools/audit_demo_live_contamination.py` against the migrated DB (read-only).
+5. Build baselines deliberately (README, "Building Live baselines"). A disabled scheduler never backfills.
 
 ## Verified on disposable copies (2026-10-20)
 A copy of a real pre-05c47ca production DB, plus copies of `settings.json` and `.auth_token`, was taken
@@ -76,16 +83,34 @@ through this full cycle, with UW pointed at a dead port. **29/29 checks passed:*
 5. Fresh install: separate Live and Demo DB files, schema 1–8, no pointless backups, Demo activity only in
    the Demo DB.
 
-**Not exercised: the Docker container path.** The Docker daemon was not running and was deliberately not
-started, because the deployed container could auto-start. Static review: `TIP_DB_PATH=/srv/data/...` keeps
-the Demo DB and all backups in the persistent `tip-data` volume. The new budget variables are forwarded by
-`docker-compose.yml`.
+## Verified in Docker on a copied volume (2026-10-20)
+Copy of the deployed `tip-data` volume, isolated Compose project, internal-only network, UW pointed at a dead
+port or a local replay:
+- **Upgrade:** migrations 7–8 applied, with a valid automatic `.bak` identical to the pre-upgrade DB. The
+  only pre-existing table that changed is `schema_version`.
+- **Restart:** container recreation is idempotent.
+- **Demo:** activity wrote only to `<db>.demo.db`.
+- **Failures:** 429, 500, 503, timeout and malformed responses all held state and reported
+  `collection_failed`.
+- **Code-only rollback** (05c47ca image on the upgraded volume): starts, serves every view, and changes no
+  table.
+- **Full restore:** from the `.bak` and from the volume tar, the DB is content-identical to the original.
+  After a full-volume restore and an 05c47ca start, `settings.json`, `.auth_token` and the DB are
+  byte-identical to the original.
+- **Re-upgrade after a restore:** succeeds.
 
 ## Rollback
-- **Code.** Redeploy the 05c47ca image. The extra tables are ignored by the old code, and the legacy tables
-  it reads were never modified, so the old app resumes exactly where it was.
-- **Data.** If a full restore is wanted, stop the container and replace `tip_hackathon.db` with the backup
-  copy or the automatic `*.pre-migration-*.bak`. The Demo DB file can simply be deleted.
+- **Code.** Redeploy the 05c47ca image. The extra tables are ignored by the old code, and the migrations
+  never modify legacy tables. Rows the new version wrote while running (new evaluations, observations) stay,
+  and the old code reads them without error; it shows the newest evaluation, not the pre-upgrade verdict.
+- **Data.** For the exact pre-upgrade state, stop the container and either:
+  - replace `tip_hackathon.db` with the automatic `*.pre-migration-*.bak` (DB only; the upgrade never
+    touches `settings.json` or `.auth_token`), or
+  - restore the whole volume from the step-1 tar:
+    ```bash
+    docker run --rm --network none -v <volume>:/dst -v "<backup-dir>:/bk:ro" python:3.11-slim sh -c "rm -rf /dst/* /dst/.[!.]* ; tar -C /dst -xpf /bk/tip-data.tar"
+    ```
+  The Demo DB file can simply be deleted.
 - **Nothing is deleted by this change**, so no data recovery is needed for a code-only rollback.
 
 ## Explicitly not done

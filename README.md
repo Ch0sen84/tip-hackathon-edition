@@ -36,6 +36,34 @@ dependency, and makes no calls to the production TIP service.
 
 Confidence and lifecycle labels are rule-based evidence-coverage descriptions, **not probabilities and not predictions**. In Live Mode both real gates (dark pool, options flow) need at least 20 fully collected prior trading sessions before they can pass or fail; until then they honestly report "insufficient". A provider failure is reported as unavailable data, never as a quiet market. See [docs/SIGNAL_INTEGRITY_RULES.md](docs/SIGNAL_INTEGRITY_RULES.md), [docs/GATE_PROOF.md](docs/GATE_PROOF.md) and [docs/TRADING_VALIDITY.md](docs/TRADING_VALIDITY.md).
 
+### Building Live baselines
+
+A Live **Refresh** collects only the current evidence session. Prior sessions are collected by one of two
+paths; with neither, the gates stay "insufficient" indefinitely.
+
+1. **Explicit backfill (operator-run, no scheduler needed).** Run on the machine hosting TIP. Each call walks
+   back through prior sessions, newest first, using at most `max_pages` (capped at 200) UW requests through
+   the normal 2-concurrent-request gate. Repeat per ticker until the response shows
+   `eligible_sessions` ≥ 20 for both datasets, or a provider history cutoff:
+
+   ```bash
+   curl -X POST "http://127.0.0.1:8000/api/ticker/SPY/baseline/backfill?max_pages=200" -H "Origin: http://127.0.0.1:8000" -H "Sec-Fetch-Site: same-origin"
+   ```
+
+   (Local Mode accepts these headers only on a loopback-bound install; adjust the port to your `BIND_PORT`.)
+2. **Scheduler `enabled`.** Each evaluating cycle during market hours also backfills
+   `TIP_BASELINE_BACKFILL_PAGES` pages for `TIP_BASELINE_BACKFILL_TICKERS_PER_CYCLE` rotating watchlist
+   tickers. `disabled` and `dry_run` never backfill.
+
+Measured cost for one SPY-scale ticker (about 50,000 dark-pool prints and 15,000 flow alerts per session):
+- about 3,000–4,500 UW pages to reach 20–30 sessions;
+- about 1.6 GB of SQLite storage at 30 sessions;
+- about 12 s (mid-session) to 22 s (after the close) of baseline computation per refresh, with ~0.5 GB peak
+  memory.
+
+Observations are not pruned automatically yet; monitor the size of the data volume. Thinner tickers cost a
+small fraction of this.
+
 ## Why this exists / what's ported vs. rebuilt
 
 | Component | Source | What changed |
