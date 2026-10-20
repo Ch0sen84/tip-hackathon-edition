@@ -2008,6 +2008,13 @@ def _validate_ticker_for_analysis(adapter: UWDataAdapter, ticker: str) -> str:
         raise HTTPException(status_code=400, detail=str(e))
 
 
+def _superseded_evaluation_count(ticker: str) -> int:
+    try:
+        return get_catalog().count_superseded_signal_evaluations(ticker)
+    except Exception:  # noqa: BLE001 -- disclosure only, never fail the route
+        return 0
+
+
 def _not_evaluated_ticker_analysis_response(ticker: str, store: QualifyingDaysStore) -> dict:
     """W2-b honest cache-miss response: a watchlist-style placeholder for
     Ticker Analysis, never fabricating gates/evidence/confidence for a
@@ -2038,6 +2045,7 @@ def _not_evaluated_ticker_analysis_response(ticker: str, store: QualifyingDaysSt
     that real state is still shown honestly, unchanged -- this is not a
     never-evaluated case and must not be mislabeled as one."""
     real_state = store.current_state(ticker)
+    superseded = _superseded_evaluation_count(ticker)
     return {
         "ticker": ticker,
         "state": real_state,
@@ -2051,8 +2059,13 @@ def _not_evaluated_ticker_analysis_response(ticker: str, store: QualifyingDaysSt
         "qualifying_days_count": store.qualifying_days_count(ticker),
         "gates": {},
         "headline": "Not yet evaluated",
-        "current_read": "This ticker has not been scanned yet in this session. Use the explicit "
-                         "Refresh action to run a real evaluation.",
+        "current_read": ("Earlier evaluations of this ticker were made by a previous version of the "
+                         "signal engine; they are kept only as history and are not shown as a current "
+                         "read. Use the explicit Refresh action to run a real evaluation."
+                         if superseded else
+                         "This ticker has not been scanned yet in this session. Use the explicit "
+                         "Refresh action to run a real evaluation."),
+        "superseded_evaluations": superseded,
         "evidence": [],
         "stock_state": None,
         "history": store.history(ticker),

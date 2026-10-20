@@ -50,6 +50,15 @@ from .migrations import run_migrations
 from .storage_guard import BACKGROUND, ONDEMAND, StorageGuard, default_mount_point
 
 ON_DEMAND = ONDEMAND  # re-exported under the name this module's own docs/tests use
+
+# Stamped on every signal_evaluations row this build writes. Rows written by the
+# pre-remediation engine carry "v1": their gates had no explicit status, failed
+# collections read as zero activity and synthetic gates carried weight. Those rows
+# stay in the table as an audit trail, but they are never served as a ticker's
+# *current* read (get_latest_signal_evaluation) or used to annotate new lifecycle
+# history (list_signal_evaluation_rules). Found by the Phase 3 Docker upgrade
+# rehearsal: after upgrading, Live showed 05c47ca's BUILDING/INVALIDATED verdicts.
+ENGINE_RULE_VERSION = "v2-signal-integrity"
 BACKGROUND_KIND = BACKGROUND
 
 
@@ -719,7 +728,7 @@ class IngestionCatalog:
         return snapshot_id
 
     def catalog_signal_evaluation(
-        self, ticker: str, scan: dict, engine_rule_version: str = "v1",
+        self, ticker: str, scan: dict, engine_rule_version: str = ENGINE_RULE_VERSION,
         retrieved_at: Optional[str] = None, kind: str = ON_DEMAND,
         evidence_refs: Optional[list] = None,
     ) -> Optional[int]:
@@ -993,8 +1002,8 @@ class IngestionCatalog:
         with self._conn() as conn:
             rows = conn.execute(
                 "SELECT event_time, state, raw_json FROM signal_evaluations "
-                "WHERE ticker = ? ORDER BY retrieved_at ASC, id ASC",
-                (ticker,),
+                "WHERE ticker = ? AND engine_rule_version = ? ORDER BY retrieved_at ASC, id ASC",
+                (ticker, ENGINE_RULE_VERSION),
             ).fetchall()
         result = []
         for event_time, state, raw_json in rows:
@@ -1103,13 +1112,18 @@ class IngestionCatalog:
             ).fetchone()
         return row[0] if row and row[0] else None
 
-    def get_latest_signal_evaluation(self, ticker: str) -> Optional[dict]:
+    def get_latest_signal_evaluation(self, ticker: str,
+                                     engine_rule_version: Optional[str] = ENGINE_RULE_VERSION) -> Optional[dict]:
+        """Latest evaluation written by `engine_rule_version` (default: this build's
+        engine; None = any version, for audit reads only)."""
+        version_sql, params = ("", (ticker,)) if engine_rule_version is None else (
+            " AND engine_rule_version = ?", (ticker, engine_rule_version))
         with self._conn() as conn:
             row = conn.execute(
                 "SELECT id, ticker, event_time, retrieved_at, state, confidence, "
                 "engine_rule_version, raw_json FROM signal_evaluations "
-                "WHERE ticker = ? ORDER BY retrieved_at DESC, id DESC LIMIT 1",
-                (ticker,),
+                "WHERE ticker = ?" + version_sql + " ORDER BY retrieved_at DESC, id DESC LIMIT 1",
+                params,
             ).fetchone()
         if not row:
             return None
@@ -1118,6 +1132,16 @@ class IngestionCatalog:
             "state": row[4], "confidence": row[5], "engine_rule_version": row[6],
             "raw_json": json.loads(row[7]) if row[7] else None,
         }
+
+    def count_superseded_signal_evaluations(self, ticker: str) -> int:
+        """Evaluations of `ticker` written by an earlier engine version (kept as history,
+        never served as a current read)."""
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) FROM signal_evaluations WHERE ticker = ? AND engine_rule_version != ?",
+                (ticker, ENGINE_RULE_VERSION),
+            ).fetchone()
+        return int(row[0]) if row else 0
 
     # --- freshness decision (used by backfill/pagination jobs ONLY --
     # never by the on-demand Radar/Ticker-Analysis/Discovery routes,

@@ -17,6 +17,11 @@ a real installation. Each step needs explicit owner approval.
      read: they were unscoped, counted server-calendar dates, and contained Demo rows. The captured
      pre-05c47ca DB holds 92 Demo-attributed scan rows and 11 Demo state rows, FLUX/CATX CONFIRMED among them.
    - Run `tools/audit_demo_live_contamination.py --db <live.db>` (read-only) to see what is there.
+   - Legacy `signal_evaluations` rows (`engine_rule_version = 'v1'`) are kept as history but are never
+     served as a ticker's current read. After upgrading, every watchlist ticker reads "not yet evaluated"
+     (with a note that earlier evaluations came from a previous engine version) until its first real
+     evaluation. Found by the Docker upgrade rehearsal, which showed 05c47ca's BUILDING/INVALIDATED verdicts
+     in Live before this fix.
 3. **Demo database.**
    - Demo now writes to `TIP_DEMO_DB_PATH`, which defaults to `<TIP_DB_PATH>.demo.db` in the same volume.
    - The Docker volume layout is unchanged.
