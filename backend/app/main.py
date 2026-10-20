@@ -13,6 +13,7 @@ backend/app/core/tip_evidence.py for display. No business logic lives here.
 """
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import sys
@@ -663,20 +664,43 @@ def _baseline_report(ticker: str, session_date, as_of_utc) -> dict:
     return out
 
 
+def _allocate_pages(max_pages: int, datasets) -> dict:
+    """Exact split of a logical page budget: quotient to every dataset, the
+    remainder one page each to the first datasets (BASELINE_DATASETS order).
+    The allocations always sum to exactly max(0, max_pages) -- never more."""
+    datasets = tuple(datasets)
+    q, r = divmod(max(0, int(max_pages)), len(datasets))
+    return {d: q + (1 if i < r else 0) for i, d in enumerate(datasets)}
+
+
 def _run_baseline_backfill(adapter, ticker: str, max_pages: int, kind: str, datasets=None) -> dict:
     """`datasets` (default: all of BASELINE_DATASETS) limits the step to the
-    datasets that still need history; the page budget is split evenly among
-    them. Which sessions count toward a baseline is decided elsewhere
-    (core/session_baseline.py) and is not affected by this choice."""
+    datasets that still need history. The logical page budget is split
+    exactly (_allocate_pages): a dataset allocated 0 pages makes no provider
+    request but still reports its coverage status. Each dataset's result
+    carries `pages_allocated`, `pages_used` (logical pages) and, separately,
+    `provider_requests` / `http_attempts` measured at the HTTP client (HTTP
+    retries are attempts, never pages). Which sessions count toward a
+    baseline is decided elsewhere (core/session_baseline.py) and is not
+    affected by this choice."""
     now = _utcnow()
     session_date = trading_calendar.evidence_session_date(now)
     chosen = tuple(d for d in BASELINE_DATASETS if datasets is None or d in datasets) or BASELINE_DATASETS
-    per_dataset = max(1, max_pages // len(chosen))
+    allocation = _allocate_pages(max_pages, chosen)
+    telemetry = getattr(adapter.client, "telemetry", None)
+    out = {}
     with _collection_lock(ticker):
-        return {dataset: session_collection.backfill_baseline(
-                    adapter.client, get_catalog(), dataset, ticker, session_date, max_pages=per_dataset,
+        for dataset in chosen:
+            with (telemetry.meter() if telemetry is not None else contextlib.nullcontext(
+                    {"logical_requests": 0, "http_attempts": 0})) as usage:
+                r = session_collection.backfill_baseline(
+                    adapter.client, get_catalog(), dataset, ticker, session_date, max_pages=allocation[dataset],
                     kind=kind, now_utc=now)
-                for dataset in chosen}
+            r["pages_allocated"] = allocation[dataset]
+            r["provider_requests"] = usage["logical_requests"]
+            r["http_attempts"] = usage["http_attempts"]
+            out[dataset] = r
+    return out
 
 
 def _scheduler_baseline_backfill(adapter) -> Optional[dict]:

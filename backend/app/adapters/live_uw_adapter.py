@@ -29,6 +29,7 @@ import random
 import threading
 import time
 from collections import defaultdict
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Optional
 
@@ -128,13 +129,31 @@ class RequestTelemetry:
 
     def __init__(self):
         self._lock = threading.Lock()
+        self._meters = threading.local()
         self._by_path: dict = defaultdict(lambda: {
             "count": 0, "success": 0, "retried": 0, "failed": 0,
             "http_attempts": 0, "by_outcome": defaultdict(int), "total_latency_s": 0.0,
             "by_priority": defaultdict(lambda: {"logical_requests": 0, "http_attempts": 0}),
         })
 
+    @contextmanager
+    def meter(self):
+        """Observation only: counts the logical requests and HTTP attempts
+        recorded BY THE CALLING THREAD while the block runs (a baseline job
+        step reports its own provider usage this way, unaffected by other
+        threads' requests). Changes nothing about how requests are made."""
+        counts = {"logical_requests": 0, "http_attempts": 0}
+        stack = getattr(self._meters, "stack", ())
+        self._meters.stack = stack + (counts,)
+        try:
+            yield counts
+        finally:
+            self._meters.stack = stack
+
     def record(self, outcome: RequestOutcome) -> None:
+        for counts in getattr(self._meters, "stack", ()):
+            counts["logical_requests"] += 1
+            counts["http_attempts"] += max(outcome.attempts, 0)
         with self._lock:
             entry = self._by_path[outcome.path]
             entry["count"] += 1

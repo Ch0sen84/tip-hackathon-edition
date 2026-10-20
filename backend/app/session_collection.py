@@ -41,24 +41,30 @@ Status vocabulary (session_coverage.status) with reason codes (last_error):
   partial      a contiguous sub-interval only -- reasons:
                session_in_progress | page_budget_exhausted
   unknown      coverage could not be established -- reasons:
-               bounds_not_honored | wrong_session_date | cursor_stuck |
-               catalog_write_failed
+               invalid_rows | bounds_not_honored | wrong_session_date |
+               cursor_stuck | catalog_write_failed
   unavailable  the provider refuses this session -- reasons:
                provider_history_cutoff | not_entitled
 Transient provider failures (429/5xx/timeout/malformed) leave stored coverage
 untouched and are reported as a failed COLLECTION, never as coverage.
 
-Out-of-window pages (Phase 9 reliability)
-  A page with a row outside the requested bounds (or, for dark pool, off the
-  requested NY date) is rejected WHOLE and never stored. A sanitized
-  diagnostic (request bounds, observed min/max timestamps, a few offending
-  timestamps -- no prices, sizes, ids or credentials) is recorded in
-  collection_diagnostics. The SAME window is then re-requested at most
-  BOUNDS_RETRIES_PER_WINDOW times (each retry is a logical page against the
-  same page budget). Only a response that passes every check is stored and
-  advances the cursor, so a recovered walk proves coverage exactly as a clean
-  one does; if every retry is also rejected the session stays UNKNOWN
-  (bounds_not_honored / wrong_session_date), as before.
+Rejected pages (Phase 9 reliability)
+  Every row of a page is validated before ANY row is stored. One invalid row
+  rejects the WHOLE page -- nothing from it is stored and a short invalid page
+  never proves a window exhausted:
+    invalid_rows        a row that is not an object, carries another ticker,
+                        or has a missing / unparseable timestamp
+    bounds_not_honored  a row outside the requested bounds
+    wrong_session_date  (dark pool) a row off the requested NY date
+  A sanitized diagnostic (request bounds, observed min/max timestamps,
+  violation counts, a few offending timestamps -- no prices, sizes, ids, raw
+  rows or credentials) is recorded in collection_diagnostics. The SAME window
+  is then re-requested at most BOUNDS_RETRIES_PER_WINDOW times; each retry is
+  a logical page against the same page budget, and the allowance is per page:
+  it resets only when an accepted page advances the cursor. Only a response
+  that passes every check is stored and advances the cursor, so a recovered
+  walk proves coverage exactly as a clean one does; if every retry for a page
+  is rejected the session stays UNKNOWN with that reason.
 """
 from __future__ import annotations
 
@@ -84,6 +90,9 @@ BACKFILL_LOOKBACK_SESSIONS = int(os.environ.get("TIP_BASELINE_LOOKBACK_SESSIONS"
 BOUNDS_RETRIES_PER_WINDOW = max(0, min(3, int(os.environ.get("TIP_BOUNDS_RETRIES_PER_WINDOW", "1"))))
 BOUNDS_RETRY_DELAY_S = max(0.0, min(30.0, float(os.environ.get("TIP_BOUNDS_RETRY_DELAY_S", "1.0"))))
 DIAGNOSTIC_SAMPLE_ROWS = 5
+# unknown reasons meaning the provider returned unusable content for the
+# session: backfills skip such sessions instead of re-walking them every step
+REJECTED_CONTENT_REASONS = ("invalid_rows", "bounds_not_honored", "wrong_session_date")
 _sleep = time.sleep          # patched by tests
 _log = logging.getLogger(__name__)
 
@@ -187,6 +196,9 @@ def _classify_violation(v: dict, samples: list, prev_newest: Optional[datetime],
     flags = []
     if v["out_of_order"]:
         flags.append("rows_not_newest_first")
+    if v["non_object"] or v["other_ticker"] or v["unparseable"]:
+        return "invalid_rows", flags
+    samples = [x for x in samples if "delta_s" in x]
     if any(x["fractional_seconds"] for x in samples):
         flags.append("fractional_second_timestamps")
     offs = [abs(x["delta_s"]) for x in samples if x["kind"] in ("above_upper", "below_lower")]
@@ -213,22 +225,31 @@ def _classify_violation(v: dict, samples: list, prev_newest: Optional[datetime],
 
 def _inspect_page(spec, data: list, ticker: str, session_date: date, lo: datetime, cursor: datetime) -> dict:
     """Validates a WHOLE page without storing anything: the accepted rows and
-    times, or the rejection reason plus sanitized facts about the page."""
+    times, or the rejection reason plus sanitized facts about the page. Any
+    invalid row rejects the page (reason priority: invalid_rows, then
+    bounds_not_honored, then wrong_session_date)."""
     rows, times, all_times, samples = [], [], [], []
     v = {"below_lower": 0, "at_upper": 0, "above_upper": 0, "wrong_date": 0, "unparseable": 0,
-         "other_ticker": 0, "out_of_order": 0}
-    reason, prev_ts = None, None
+         "other_ticker": 0, "non_object": 0, "out_of_order": 0}
+    prev_ts = None
+
+    def invalid(idx, kind, value_type):
+        v[kind] += 1
+        if len(samples) < DIAGNOSTIC_SAMPLE_ROWS:     # position and type only -- never the row content
+            samples.append({"index": idx, "kind": kind, "value_type": value_type})
+
     for idx, raw in enumerate(data):
         if not isinstance(raw, dict):
+            invalid(idx, "non_object", type(raw).__name__)
             continue
         own = raw.get("ticker") or raw.get("ticker_symbol")
         if own and str(own).upper() != ticker.upper():
-            v["other_ticker"] += 1
+            invalid(idx, "other_ticker", type(own).__name__)
             continue
         raw_ts = raw.get(spec.time_field)
         ts = _parse(raw_ts)
         if ts is None:
-            v["unparseable"] += 1
+            invalid(idx, "unparseable", type(raw_ts).__name__)
             continue
         all_times.append(ts)
         if prev_ts is not None and ts > prev_ts:
@@ -239,11 +260,8 @@ def _inspect_page(spec, data: list, ticker: str, session_date: date, lo: datetim
             bad = "below_lower"
         elif not spec.in_bounds(ts, lo, cursor):
             bad = "at_upper" if ts == cursor else "above_upper"
-        if bad:
-            reason = reason or "bounds_not_honored"
-        elif spec.date_scoped and ts.astimezone(tc.NY_TZ).date() != session_date:
+        if not bad and spec.date_scoped and ts.astimezone(tc.NY_TZ).date() != session_date:
             bad = "wrong_date"
-            reason = reason or "wrong_session_date"
         if bad:
             v[bad] += 1
             if len(samples) < DIAGNOSTIC_SAMPLE_ROWS:
@@ -255,6 +273,16 @@ def _inspect_page(spec, data: list, ticker: str, session_date: date, lo: datetim
             continue
         rows.append(spec.normalize(raw))
         times.append(ts)
+    if v["non_object"] or v["other_ticker"] or v["unparseable"]:
+        reason = "invalid_rows"
+    elif v["below_lower"] or v["at_upper"] or v["above_upper"]:
+        reason = "bounds_not_honored"
+    elif v["wrong_date"]:
+        reason = "wrong_session_date"
+    else:
+        reason = None
+    if reason:
+        rows, times = [], []                          # nothing from a rejected page may be stored
     return {"rows": rows, "times": times, "all_times": all_times, "reason": reason, "violations": v,
             "samples": samples}
 
@@ -266,9 +294,11 @@ def _fetch_window(spec, client, catalog, ticker, session_date, lo, hi, budget, k
         "oldest": earliest row time seen, "pages", "rows", "reason", "status",
         "bounds_retries", "bounds_recovered"}.
     A rejected page is never stored; the same window is re-requested at most
-    `retries` times (BOUNDS_RETRIES_PER_WINDOW), each against `budget`."""
+    `retries` times (BOUNDS_RETRIES_PER_WINDOW) PER PAGE, each against `budget`.
+    The allowance resets only when an accepted page advances the cursor."""
     cursor, pages, n_rows, oldest, prev_oldest = hi, 0, 0, None, None
-    retries_left = BOUNDS_RETRIES_PER_WINDOW if retries is None else max(0, retries)
+    per_page = BOUNDS_RETRIES_PER_WINDOW if retries is None else max(0, retries)
+    retries_left = per_page
     retried = recovered = 0
     attempt, window_page, newest_seen = 0, 0, None
 
@@ -346,6 +376,7 @@ def _fetch_window(spec, client, catalog, ticker, session_date, lo, hi, budget, k
             return done("unverifiable", "cursor_stuck")
         prev_oldest = page_oldest
         cursor = page_oldest + spec.cursor_step
+        retries_left = per_page                     # a new page: its own retry allowance
         if cursor >= hi and pages > 1:  # cannot make progress inside this window
             return done("unverifiable", "cursor_stuck")
     return done("budget", "page_budget_exhausted")
@@ -514,7 +545,7 @@ def backfill_baseline(client, catalog, dataset: str, ticker: str, evidence_sessi
             break
         cov = catalog.get_session_coverage(dataset, ticker, d.isoformat()) or {}
         if cov.get("status") in ("complete", "unavailable") or (
-                cov.get("status") == "unknown" and cov.get("last_error") in ("bounds_not_honored", "wrong_session_date")):
+                cov.get("status") == "unknown" and cov.get("last_error") in REJECTED_CONTENT_REASONS):
             if cov.get("status") == "unavailable":
                 break  # history cutoff: older sessions are unavailable too
             continue

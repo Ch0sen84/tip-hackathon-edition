@@ -57,20 +57,33 @@ No confidence value is calibrated or predictive (see [TRADING_VALIDITY.md](TRADI
   - Statuses (with reason codes):
     - `complete`
     - `partial`: `session_in_progress`, `page_budget_exhausted`
-    - `unknown`: `bounds_not_honored`, `wrong_session_date`, `cursor_stuck`, `catalog_write_failed`
+    - `unknown`: `invalid_rows`, `bounds_not_honored`, `wrong_session_date`, `cursor_stuck`,
+      `catalog_write_failed`
     - `unavailable`: `provider_history_cutoff`, `not_entitled`
   - A transient provider failure leaves coverage unchanged.
-  - **Out-of-window pages.** A page with any row outside the requested bounds or session date is rejected
-    whole and never stored.
-    - The same window is re-requested at most `TIP_BOUNDS_RETRIES_PER_WINDOW` times (default 1, max 3,
-      0 = off). Each retry counts against the page budget.
-    - Only a page that passes every check advances the cursor. If every retry is rejected, the session stays
-      `unknown`.
+  - **Rejected pages.** Every row of a page is validated before any row is stored. One invalid row rejects the
+    whole page: nothing from it is stored, and an invalid short page never proves a window exhausted.
+    - `invalid_rows`: a row that is not an object, carries another ticker, or has a missing or unparseable
+      timestamp.
+    - `bounds_not_honored`: a row outside the requested bounds. `wrong_session_date`: a dark-pool row off the
+      session date.
+    - The same window is re-requested at most `TIP_BOUNDS_RETRIES_PER_WINDOW` times **per page** (default 1,
+      max 3, 0 = off). The allowance resets only when an accepted page advances the cursor. Each retry
+      counts against the page budget.
+    - Only a page that passes every check advances the cursor. If every retry for a page is rejected, the
+      session stays `unknown` with that reason, and backfills skip it.
     - Each rejection is recorded as a sanitized diagnostic: request bounds, observed min/max timestamps,
-      violation counts, at most 5 offending timestamps, and a classification *hypothesis*. It never
-      includes prices, sizes, ids, raw pages or credentials. Read it with
+      violation counts, at most 5 samples, and a classification *hypothesis*. Samples of out-of-window rows
+      carry the timestamp only; samples of invalid rows carry their position and value type only. It never
+      includes prices, sizes, ids, raw rows or pages, or credentials. Read it with
       `GET /api/diagnostics/collection-bounds` (local, zero UW calls). Nothing reads diagnostics to decide
       coverage, eligibility or signals.
+  - **Page budgets are exact.** A step's logical pages are split between datasets by quotient and remainder,
+    so allocations never exceed the remaining budget. With 1 page left and 2 datasets, one gets 1 and the
+    other 0. A dataset allocated 0 pages makes no request but still reports its status. This holds for jobs,
+    resumed jobs and `POST /api/ticker/{t}/baseline/backfill`.
+    - Job progress reports logical pages (`pages_used`) and HTTP attempts (`http_attempts`, which include
+      transport-level retries) separately.
   - **Baseline jobs** stop requesting a dataset once it has the job's target of complete prior sessions,
     and spend later steps on the other dataset. Eligibility, the 30-session lookback and the 20-session
     requirement are unchanged. Current-session evidence is still collected by every Live refresh.

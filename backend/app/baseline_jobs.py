@@ -181,11 +181,12 @@ class BaselineJobRunner:
     @classmethod
     def _datasets_needed(cls, entry: dict, target: int) -> Optional[list]:
         """None before the first step (every dataset runs); afterwards the
-        datasets still below the target."""
+        datasets still below the target that still had fetchable work (a
+        dataset given pages that used none has nothing left in the lookback)."""
         ds = entry.get("datasets") or {}
         if not ds:
             return None
-        return [name for name, d in ds.items() if not cls._dataset_met(d, target)]
+        return [name for name, d in ds.items() if not cls._dataset_met(d, target) and not d.get("no_more_work")]
 
     @staticmethod
     def _ticker_done(entry: dict, target: int) -> Optional[str]:
@@ -236,16 +237,16 @@ class BaselineJobRunner:
             self.store.update(job_id, progress=progress)     # visible as "in progress" during the step
             pages = min(job["step_pages"], remaining)
             needed = self._datasets_needed(entry, job["target_sessions"])
-            if needed == []:                         # every dataset already met (defensive: done is set below)
-                entry["state"] = self._ticker_done(entry, job["target_sessions"]) or "complete"
+            if needed == []:                         # nothing left to request for this ticker
+                entry["state"] = self._ticker_done(entry, job["target_sessions"]) or "no_more_work"
                 self.store.update(job_id, progress=progress)
                 continue
             if needed is None or len(needed) == len(entry["datasets"]):
                 result = self.run_step(ticker, pages)
             else:
                 result = self.run_step(ticker, pages, datasets=needed)
-            used, failed = 0, None
-            ds_state = {name: {**d, "last_pages_used": 0, "target_met": True}
+            used, failed, attempts, starved = 0, None, 0, False
+            ds_state = {name: {**d, "last_pages_used": 0, "last_pages_allocated": 0}
                         for name, d in (entry.get("datasets") or {}).items() if name not in result}
             for ds, r in result.items():
                 touched = r.get("sessions_touched") or []
@@ -256,9 +257,17 @@ class BaselineJobRunner:
                 if err and not failed:
                     failed = f"{ds} {err.get('session_date')}: {err.get('status')} ({err.get('reason') or 'no detail'})"
                 prev = (entry["datasets"].get(ds) or {})
+                allocated = r.get("pages_allocated")
+                ds_used = int(r.get("pages_used") or 0)
+                attempts += int(r.get("http_attempts") or 0)
+                starved = starved or allocated == 0
                 ds_state[ds] = {"complete_prior_sessions": r.get("complete_prior_sessions"),
                                 "history_cutoff": bool(cutoff or prev.get("history_cutoff")),
                                 "last_pages_used": r.get("pages_used"),
+                                "last_pages_allocated": allocated,
+                                "no_more_work": bool(prev.get("no_more_work")) or (bool(allocated) and ds_used == 0),
+                                "pages_used": (prev.get("pages_used") or 0) + ds_used,
+                                "http_attempts": (prev.get("http_attempts") or 0) + int(r.get("http_attempts") or 0),
                                 "bounds_retries": (prev.get("bounds_retries") or 0)
                                 + sum(t.get("bounds_retries") or 0 for t in touched),
                                 "bounds_recovered": (prev.get("bounds_recovered") or 0)
@@ -266,6 +275,7 @@ class BaselineJobRunner:
                 ds_state[ds]["target_met"] = self._dataset_met(ds_state[ds], job["target_sessions"])
             entry["datasets"] = ds_state
             entry["pages_used"] += used
+            entry["http_attempts"] = (entry.get("http_attempts") or 0) + attempts     # HTTP layer, incl. retries
             entry["steps"] += 1
             entry["last_error"] = failed
             job = self.store.get(job_id)            # pick up any pause/cancel requested during the step
@@ -279,6 +289,9 @@ class BaselineJobRunner:
             done = self._ticker_done(entry, job["target_sessions"])
             if done:
                 entry["state"] = done
-            elif used == 0:
+            elif used == 0 and not starved:
                 entry["state"] = "no_more_work"      # nothing fetchable inside the lookback window
+            # used == 0 with a dataset allocated 0 pages (the last page went to a dataset that had
+            # nothing to do): that dataset is now marked no_more_work, so the next step gives the
+            # remaining page to the one that was starved.
             self.store.update(job_id, progress=progress, pages_used=job["pages_used"] + used, last_error=None)
