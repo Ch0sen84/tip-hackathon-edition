@@ -69,7 +69,7 @@ def _seed_one(store, adapter, ticker: str) -> Optional[str]:
             qualifying_days_count=qualifying_days,
             price_move_pct=price_move_pct,
         )
-        any_gate_passed = len(scan["gates_passed"]) > 0
+        any_gate_passed = len(scan["independent_gates_passed"]) > 0
         store.record_scan(ticker, any_gate_passed, scan["state"], scan_date=d.isoformat())
         current_state = scan["state"]
     return current_state

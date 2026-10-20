@@ -102,7 +102,8 @@ def build_gate_inputs(ticker: str, flow_alerts: list, darkpool_trades: list,
                        is_new_qualifying_day: bool = False,
                        api_errors: int = 0,
                        catalyst_identified: bool = False,
-                       catalog_dark_pool_baseline: Optional[dict] = None) -> dict:
+                       catalog_dark_pool_baseline: Optional[dict] = None,
+                       mode: str = "demo") -> dict:
     """Pure transform: raw UW-shaped lists -> the keyword arguments
     signal_engine.evaluate_gates expects. Exposed separately from
     evaluate_ticker_scan so tests can assert on the intermediate shape.
@@ -121,11 +122,24 @@ def build_gate_inputs(ticker: str, flow_alerts: list, darkpool_trades: list,
     supply for the dark_pool_anomaly gate -- signal_engine.evaluate_gates
     itself is untouched; this only changes what gets passed INTO its
     existing tier1_* keyword arguments."""
-    dp = catalog_dark_pool_baseline if catalog_dark_pool_baseline is not None else _darkpool_metrics(darkpool_trades or [])
+    # Live Mode NEVER uses the fixture-style avg_premium_baseline path: a real
+    # dark-pool baseline comes only from the cataloged session history
+    # (dark_pool_baseline.py). Without one the gate is "insufficient".
+    if catalog_dark_pool_baseline is not None:
+        dp = catalog_dark_pool_baseline
+        dp_source = "uw_darkpool_session_baseline"
+    elif mode == "live":
+        dp = {"tier1_hit": False, "tier1_bootstrap": True, "tier1_ratio": None, "tier1_z": None,
+              "total_premium": sum(float(t.get("premium") or 0) for t in darkpool_trades or []),
+              "reason": "no session baseline available"}
+        dp_source = "uw_darkpool_session_baseline"
+    else:
+        dp = _darkpool_metrics(darkpool_trades or [])
+        dp_source = "demo_fixture_baseline"
     of = _options_flow_metrics(flow_alerts or [])
     direction_detail = flow_direction.classify_flow(flow_alerts or [])
     direction = direction_detail["lean"]
-    today_premium = dp["total_premium"] + of["today_premium_from_alerts"]
+    today_premium = (dp.get("total_premium") or 0.0) + of["today_premium_from_alerts"]
     return dict(
         ticker=ticker,
         tier1_hit=dp["tier1_hit"], tier1_bootstrap=dp["tier1_bootstrap"],
@@ -137,6 +151,12 @@ def build_gate_inputs(ticker: str, flow_alerts: list, darkpool_trades: list,
         price_move_pct=price_move_pct, direction_heuristic=direction,
         catalyst_identified=catalyst_identified, api_errors=api_errors,
         direction_detail=direction_detail,
+        mode=mode,
+        dark_pool_source=dp_source,
+        dark_pool_metrics={k: v for k, v in dp.items()
+                           if k not in ("tier1_hit", "tier1_bootstrap", "tier1_ratio", "tier1_z")},
+        options_flow_source=("demo_fixture_snapshot_threshold" if mode != "live"
+                             else "uw_flow_alerts_snapshot_threshold"),
     )
 
 
@@ -148,7 +168,8 @@ def evaluate_ticker_scan(ticker: str, flow_alerts: list, darkpool_trades: list,
                           catalyst_identified: bool = False,
                           percentile_gate_fn=None,
                           catalog_dark_pool_baseline: Optional[dict] = None,
-                          collection_status: Optional[dict] = None) -> dict:
+                          collection_status: Optional[dict] = None,
+                          mode: str = "demo") -> dict:
     """End-to-end: raw adapter data -> gates -> confidence -> state
     transition. Returns everything the API layer needs to render both
     Market Radar and Ticker Analysis for one ticker.
@@ -161,7 +182,8 @@ def evaluate_ticker_scan(ticker: str, flow_alerts: list, darkpool_trades: list,
                                 is_new_qualifying_day=is_new_qualifying_day,
                                 api_errors=api_errors,
                                 catalyst_identified=catalyst_identified,
-                                catalog_dark_pool_baseline=catalog_dark_pool_baseline)
+                                catalog_dark_pool_baseline=catalog_dark_pool_baseline,
+                                mode=mode)
     # Collection status (audit B4/E9): a source that could not be collected
     # is "unavailable", never an empty-but-successful observation.
     collection_status = dict(collection_status or {})
@@ -187,12 +209,20 @@ def evaluate_ticker_scan(ticker: str, flow_alerts: list, darkpool_trades: list,
     new_state, rule_id = se.determine_transition(
         current_state, gates, qualifying_days_count, price_move_pct, lifecycle_direction,
         collection_complete=collection_complete)
+    # Display list: real evidence that passed (independent + corroborating
+    # price_confirmation). Zero-weight gates (synthetic percentile,
+    # persistence) never appear here. Lifecycle bookkeeping uses
+    # independent_gates_passed only.
     gates_passed = [name for name, g in gates.items() if g["passed"]
-                    and name not in ("multi_signal_confirmation", "catalyst_identified", "data_quality")]
+                    and name not in ("multi_signal_confirmation", "catalyst_identified", "data_quality",
+                                     "historical_percentile", "persistence")]
+    independent_passed = se.independent_gates_passed(gates)
     return {
         "ticker": ticker,
         "gates": gates,
         "gates_passed": gates_passed,
+        "independent_gates_passed": independent_passed,
+        "mode": mode,
         "confidence": confidence,
         "signal_type": signal_type,
         "confidence_reason": reason,

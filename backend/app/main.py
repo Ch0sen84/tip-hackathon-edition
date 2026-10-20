@@ -717,11 +717,12 @@ def _run_scan(adapter: UWDataAdapter, store: QualifyingDaysStore, ticker: str, k
         catalyst_identified=adapter.get_catalyst_identified(ticker),
         catalog_dark_pool_baseline=catalog_dark_pool_baseline,
         collection_status=collection_status,
+        mode=_mode_of(adapter),
     )
     result["collection"] = {name: collection_summary(c) for name, c in collections.items()}
     # When this scan's data was collected (newest per-source retrieval).
     result["collected_at"] = max(c["retrieved_at"] for c in collections.values())
-    any_gate_passed = len(result["gates_passed"]) > 0
+    any_gate_passed = len(result["independent_gates_passed"]) > 0
     try:
         # An incomplete collection is recorded as an attempt in the catalog
         # (below) but never written into lifecycle history: it is neither a

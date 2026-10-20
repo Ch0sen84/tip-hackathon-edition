@@ -187,7 +187,9 @@ class TestIncompleteCoverageCannotProducePassingGateRegardlessOfMagnitude:
         # data_quality also keys off tier1_bootstrap -- confirms the
         # existing gate's OWN bootstrap semantics (unmodified) are what
         # makes this hold, not a new conditional bolted onto signal_engine.
-        assert gates["data_quality"]["passed"] is False
+        # insufficient history is reported on the dark-pool gate itself;
+        # data_quality now tracks collection success (signal-integrity remediation)
+        assert gates["dark_pool_anomaly"]["status"] == "insufficient"
 
     def test_blocked_gate_cannot_reach_confirmed_even_combined_with_a_second_category(self):
         """Belt-and-suspenders: even if a genuinely independent SECOND

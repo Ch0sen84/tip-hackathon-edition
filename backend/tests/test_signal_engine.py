@@ -39,9 +39,20 @@ class TestEvaluateGates:
         assert gates["options_flow_anomaly"]["metrics"] == {"foo": 1}
 
     def test_historical_percentile_uses_default_synthetic_estimator(self):
+        # Signal-integrity remediation: still computed in Demo for display,
+        # but it is illustrative only -- `passed` is never True and the
+        # bucket result lives in metrics.
         gates = se.evaluate_gates("ABC", today_premium=60_000_000)
-        assert gates["historical_percentile"]["passed"] is True
+        assert gates["historical_percentile"]["passed"] is False
+        assert gates["historical_percentile"]["status"] == "synthetic"
+        assert gates["historical_percentile"]["metrics"]["bucket_passed"] is True
         assert gates["historical_percentile"]["metrics"]["synthetic"] is True
+        assert "window_days" not in gates["historical_percentile"]["metrics"]
+
+    def test_historical_percentile_is_unsupported_in_live_mode(self):
+        gates = se.evaluate_gates("ABC", today_premium=60_000_000, mode="live")
+        assert gates["historical_percentile"]["passed"] is False
+        assert gates["historical_percentile"]["status"] == "unsupported"
 
     def test_historical_percentile_not_evaluated_without_premium(self):
         gates = se.evaluate_gates("ABC")
@@ -57,7 +68,8 @@ class TestEvaluateGates:
 
         gates = se.evaluate_gates("XYZ", today_premium=1000, percentile_gate_fn=fake_gate)
         assert calls == [("XYZ", 1000)]
-        assert gates["historical_percentile"]["passed"] is True
+        assert gates["historical_percentile"]["passed"] is False  # zero decision weight
+        assert gates["historical_percentile"]["metrics"]["bucket_passed"] is True
         assert gates["historical_percentile"]["metrics"]["window_days"] == 10
 
     def test_persistence_passes_on_new_qualifying_day(self):
@@ -97,9 +109,19 @@ class TestEvaluateGates:
         gates = se.evaluate_gates("ABC", api_errors=2)
         assert gates["data_quality"]["passed"] is False
 
-    def test_data_quality_fails_when_bootstrap(self):
+    def test_bootstrap_is_insufficient_history_not_a_data_quality_failure(self):
+        # Signal-integrity remediation: data_quality now means "every
+        # required collection succeeded"; missing baseline history is
+        # reported on the dark-pool gate itself as "insufficient".
         gates = se.evaluate_gates("ABC", tier1_bootstrap=True)
+        assert gates["dark_pool_anomaly"]["status"] == "insufficient"
+        assert gates["data_quality"]["passed"] is True
+
+    def test_data_quality_fails_when_a_collection_failed(self):
+        gates = se.evaluate_gates("ABC", collection_status={"options_flow": "error", "darkpool": "ok"},
+                                  options_flow_available=False)
         assert gates["data_quality"]["passed"] is False
+        assert gates["data_quality"]["metrics"]["failed_sources"] == ["options_flow"]
 
     def test_no_gates_pass_on_empty_input_nothing_crashes(self):
         gates = se.evaluate_gates("ABC")
@@ -154,15 +176,14 @@ class TestClassifyConfidence:
         conf, sig_type, reason, qualifies = se.classify_confidence(gates)
         assert (conf, sig_type, qualifies) == ("low", "none", False)
 
-    def test_price_confirmation_alone_is_medium_not_high(self):
-        """price_confirmation is a real gate but is excluded from
-        INDEPENDENT_SIGNAL_GATES (its direction input is sourced from the
-        same options-flow feed as options_flow_anomaly) -- passing alone
-        caps at medium, never high/CONFIRMED-eligible."""
+    def test_price_confirmation_alone_is_never_medium(self):
+        """price_confirmation only corroborates the lean of qualifying
+        options flow (signal-integrity remediation) -- on its own it adds
+        no evidence category, so it can never lift confidence above low."""
         gates = make_gates(price_confirmation={"passed": True, "metrics": {"confirmed": True}})
         conf, sig_type, reason, qualifies = se.classify_confidence(gates)
-        assert conf == "medium"
-        assert sig_type == "single-signal-price-confirmation"
+        assert conf == "low"
+        assert sig_type != "single-signal-price-confirmation"
 
     def test_catalyst_identified_alone_is_medium_not_high(self):
         gates = make_gates(catalyst_identified={"passed": True, "metrics": {}})

@@ -133,7 +133,8 @@ class TestMultiSignalAltCombination:
         change, not a regression: a synthetic-gate-backed "multi-signal"
         reading must not survive this rule change."""
         scan = _scan("VOLX")
-        assert scan["gates"]["historical_percentile"]["passed"] is True  # still computed/shown
+        assert scan["gates"]["historical_percentile"]["passed"] is False  # zero weight
+        assert scan["gates"]["historical_percentile"]["metrics"]["bucket_passed"] is True  # still shown
         assert scan["gates"]["dark_pool_anomaly"]["passed"] is False
         assert scan["gates"]["options_flow_anomaly"]["passed"] is True
         assert scan["gates"]["multi_signal_confirmation"]["passed"] is False

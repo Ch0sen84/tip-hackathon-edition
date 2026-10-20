@@ -71,7 +71,9 @@ HIGHEST_MAX = 5               # visual emphasis only; never a minimum
 INDEX_CONTEXT_TICKERS = ("SPY", "QQQ")  # eligible under the same rules; labelled, never forced
 FLOOR_TRADE_RULES = ("FloorTradeSmallCap", "FloorTradeMidCap", "FloorTradeLargeCap")  # frozen UW family
 STATE_RANK = {"CONFIRMED": 3, "STRENGTHENING": 3, "BUILDING": 2, "NEW": 1}
-ANOMALY_GATES = ("dark_pool_anomaly", "historical_percentile", "options_flow_anomaly")
+# historical_percentile removed (signal-integrity remediation): the synthetic
+# estimator can never make a ticker qualify for Market Radar.
+ANOMALY_GATES = ("dark_pool_anomaly", "options_flow_anomaly")
 FAMILY_LABELS = {"dark_pool": "Dark pool", "options": "Options", "alerts": "UW alerts", "floor": "FloorTrade",
                  "synthetic_baseline": "Synthetic baseline estimate"}
 
