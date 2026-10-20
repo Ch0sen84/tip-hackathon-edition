@@ -870,6 +870,9 @@ def get_settings():
             "last_test_result": _last_uw_test_result,
             "verified": _settings_store.is_key_verified(uw_key),
             "env_fallback_present": env_key_present,
+            # Non-secret: lets test harnesses refuse to run a real-network
+            # "Test Connection" step against the public UW host by accident.
+            "base_url_is_default": settings.uw_base_url.rstrip("/") == "https://api.unusualwhales.com",
             "env_fallback_disclosure": (
                 "UI-saved key removed. A .env-configured key is still present and will be used."
                 if env_key_present and not ui_key_present
