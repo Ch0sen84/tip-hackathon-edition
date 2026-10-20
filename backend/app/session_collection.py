@@ -1,41 +1,52 @@
 """Session-coverage collection for the real-baseline gates.
 
-Signal-integrity remediation (audit B1/B8/B18). In 05c47ca the dark-pool
-baseline could never become ready in Live Mode: the only writer of coverage
-status (dark_pool_pagination.paginate_ticker_day) had no caller, every scan
-read just the newest single page (500 prints / 100 alerts), and the captured
-Live database held 12,356 prints and zero coverage rows.
+Signal-integrity remediation (audit B1/B8/B18; Phase 2: rebuilt on the
+LIVE-VERIFIED Unusual Whales pagination contract).
 
-This module is the one place that pages UW backward through an NYSE trading
-session and records -- per dataset ('darkpool' | 'options_flow'), ticker
-and session -- the contiguous interval it has VERIFIABLY collected
-(ingestion.session_coverage). It is called by:
+What this module guarantees
+---------------------------
+For one dataset ('darkpool' | 'options_flow'), ticker and NYSE session, it
+records the contiguous time interval it has PROVABLY collected
+(ingestion.session_coverage) and why. It is called by every Live scan (small
+page budget, evidence session) and by the bounded baseline backfill
+(scheduler hook / explicit route).
 
-  * every Live scan, for the evidence session, with a small interactive page
-    budget (top-up of the newest data, then backward extension), and
-  * the bounded baseline backfill (backfill_baseline) that the background
-    scheduler and the explicit POST /api/ticker/{t}/baseline/backfill route
-    run for earlier sessions.
+Verified provider contract (10 bounded live requests, SPY, 2026-10-20 --
+see docs/UW_PAGINATION_VERIFICATION.md)
+  dark pool  /api/darkpool/{T}?date=D&newer_than=&older_than=&limit<=500
+             date-scoped to NY date D; newest first; `newer_than` INCLUSIVE,
+             `older_than` EXCLUSIVE; second-resolution timestamps; a query
+             with nothing in range returns HTTP 200 + []; >= 30 sessions of
+             history on Basic; a date outside entitlement is documented as
+             403 historic_data_access_missing.
+  flow       /api/option-trades/flow-alerts?ticker_symbol=T&newer_than=
+             &older_than=&limit<=200
+             newest first; BOTH bounds INCLUSIVE; microsecond timestamps;
+             unique `id`; crosses sessions/weekends; no `date` parameter;
+             without `newer_than` only 7 days before `older_than` (doc).
+  For both: every returned row lay inside the requested bounds, and a page
+  shorter than `limit` exhausted its window.
 
-Verification -- coverage is only claimed for what was proven:
-  * every page must respect the cursor (no row newer than `older_than`),
-    dark-pool pages must belong to the requested session date, and the
-    cursor must advance; otherwise coverage is 'unknown' and the reason is
-    recorded. (UW's `older_than` on flow-alerts is documented but has not
-    been live-verified by this project -- this check is what makes relying
-    on it safe.)
-  * an empty FIRST page proves nothing (no data vs. no access) -> 'unknown'.
-  * only a page containing a row at or before the session open proves the
-    interval reaches the open; running out of data first (an empty later
-    page) leaves the session "partial" -- a provider history-depth limit
-    looks identical to "no earlier activity".
-  * a provider failure leaves the existing coverage untouched and is
-    reported as a failed collection, never as an empty session.
+Coverage proof (no assumption that a print exists at the open)
+  Each fetch asks for a BOUNDED window [lo, hi] (newer_than=lo, older_than=hi)
+  and pages newest-first inside it. A page shorter than `limit` -- including
+  an empty page -- proves the window exhausted (verified semantics). Every
+  page is checked: rows inside the bounds, dark-pool rows on the requested
+  session date, cursor advancing; any violation makes the session UNKNOWN.
+  So a quiet or thinly traded session can be COMPLETE with few or zero rows,
+  and a liquid session is COMPLETE only once every page has been walked.
 
-The interval only ever grows contiguously. If a top-up cannot reach the
-previously covered interval within its page budget, the newer island
-replaces it (rows stay cataloged and deduplicated; the older part will be
-re-walked), so a gap can never be counted as covered.
+Status vocabulary (session_coverage.status) with reason codes (last_error):
+  complete     [open, close] provably collected
+  partial      a contiguous sub-interval only -- reasons:
+               session_in_progress | page_budget_exhausted
+  unknown      coverage could not be established -- reasons:
+               bounds_not_honored | wrong_session_date | cursor_stuck |
+               catalog_write_failed
+  unavailable  the provider refuses this session -- reasons:
+               provider_history_cutoff | not_entitled
+Transient provider failures (429/5xx/timeout/malformed) leave stored coverage
+untouched and are reported as a failed COLLECTION, never as coverage.
 """
 from __future__ import annotations
 
@@ -48,8 +59,7 @@ from .adapters.base import COLLECTION_OK
 from .adapters.live_uw_adapter import LiveUWAdapter, _normalize_flow_alert
 from .core import trading_calendar as tc
 
-REPORTING_LAG = timedelta(seconds=60)  # newest minute may still be reported late
-CURSOR_OVERLAP = timedelta(seconds=1)   # UW timestamps are second-resolution
+REPORTING_LAG = timedelta(seconds=60)  # newest minute of an open session may still be reported late
 
 DEFAULT_SCAN_PAGES = int(os.environ.get("TIP_SCAN_COVERAGE_PAGES", "4"))
 DEFAULT_BACKFILL_PAGES = int(os.environ.get("TIP_BASELINE_BACKFILL_PAGES", "60"))
@@ -67,7 +77,10 @@ def _parse(ts) -> Optional[datetime]:
 
 
 def _iso(dt: datetime) -> str:
-    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    dt = dt.astimezone(timezone.utc)
+    if dt.microsecond:
+        return dt.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 @dataclass(frozen=True)
@@ -76,12 +89,14 @@ class DatasetSpec:
     time_field: str
     page_limit: int
     date_scoped: bool
+    upper_inclusive: bool          # older_than inclusive? (verified per endpoint)
+    cursor_step: timedelta         # how far ABOVE the page's oldest row the next cursor sits
 
-    def fetch(self, client, ticker: str, session_date: date, older_than: datetime) -> dict:
+    def fetch(self, client, ticker: str, session_date: date, lo: datetime, hi: datetime) -> dict:
         if self.name == "darkpool":
             return client.darkpool_ticker(ticker, date=session_date.isoformat(), limit=self.page_limit,
-                                          older_than=_iso(older_than))
-        return client.flow_alerts(ticker=ticker, limit=self.page_limit, older_than=_iso(older_than))
+                                          newer_than=_iso(lo), older_than=_iso(hi))
+        return client.flow_alerts(ticker=ticker, limit=self.page_limit, newer_than=_iso(lo), older_than=_iso(hi))
 
     def normalize(self, row: dict) -> dict:
         return _normalize_flow_alert(row) if self.name == "options_flow" else row
@@ -91,10 +106,19 @@ class DatasetSpec:
             return catalog.catalog_darkpool_observations(ticker, rows, kind=kind)
         return catalog.catalog_options_flow_observations(ticker, rows, kind=kind)
 
+    def in_bounds(self, ts: datetime, lo: datetime, hi: datetime) -> bool:
+        if ts < lo:
+            return False
+        return ts <= hi if self.upper_inclusive else ts < hi
+
 
 DATASETS = {
-    "darkpool": DatasetSpec("darkpool", "executed_at", 500, True),
-    "options_flow": DatasetSpec("options_flow", "created_at", 200, False),
+    # dark pool: older_than EXCLUSIVE at second resolution -> next cursor is
+    # oldest+1s so prints sharing the boundary second are re-read (deduped).
+    "darkpool": DatasetSpec("darkpool", "executed_at", 500, True, False, timedelta(seconds=1)),
+    # flow alerts: older_than INCLUSIVE (microseconds) -> cursor = oldest;
+    # the boundary rows come back again and are deduplicated by `id`.
+    "options_flow": DatasetSpec("options_flow", "created_at", 200, False, True, timedelta(0)),
 }
 
 
@@ -120,23 +144,30 @@ class CoverageUpdate:
                 "coverage": self.coverage, "source": "unusual_whales"}
 
 
-def _walk(spec, client, catalog, ticker, session_date, start_cursor, stop_at, open_utc, budget, kind):
-    """Pages backward from `start_cursor` until a page reaches `stop_at`
-    (or the session open). Returns dict(status, pages, rows, oldest,
-    reached, bottom, error)."""
-    cursor, pages, n_rows = start_cursor, 0, 0
-    oldest, prev_oldest = None, None
+def _fetch_window(spec, client, catalog, ticker, session_date, lo, hi, budget, kind) -> dict:
+    """Pages newest-first inside [lo, hi]. Returns
+       {"outcome": "exhausted" | "budget" | "unverifiable" | "failed" | "cutoff",
+        "oldest": earliest row time seen, "pages", "rows", "reason", "status"}."""
+    cursor, pages, n_rows, oldest, prev_oldest = hi, 0, 0, None, None
     while pages < budget:
-        body = spec.fetch(client, ticker, session_date, cursor)
+        body = spec.fetch(client, ticker, session_date, lo, cursor)
         pages += 1
         failure = LiveUWAdapter._failure_status(body)
         if failure:
-            return {"status": failure[0], "error": failure[1], "pages": pages, "rows": n_rows,
-                    "oldest": oldest, "reached": False, "bottom": False}
+            status, detail, code = failure
+            detail_l = (detail or "").lower()
+            if status == "unavailable_on_tier" and "historic" in detail_l:
+                return {"outcome": "cutoff", "reason": "provider_history_cutoff", "pages": pages, "rows": n_rows,
+                        "oldest": oldest, "status": COLLECTION_OK}
+            if status in ("unavailable_on_tier", "unauthorized"):
+                return {"outcome": "cutoff", "reason": "not_entitled", "pages": pages, "rows": n_rows,
+                        "oldest": oldest, "status": status}
+            return {"outcome": "failed", "reason": detail, "pages": pages, "rows": n_rows, "oldest": oldest,
+                    "status": status}
         data = body.get("data")
         if not isinstance(data, list):
-            return {"status": "malformed", "error": "data is not a list", "pages": pages, "rows": n_rows,
-                    "oldest": oldest, "reached": False, "bottom": False}
+            return {"outcome": "failed", "reason": "data is not a list", "pages": pages, "rows": n_rows,
+                    "oldest": oldest, "status": "malformed"}
         rows, times = [], []
         for raw in data:
             if not isinstance(raw, dict):
@@ -147,60 +178,45 @@ def _walk(spec, client, catalog, ticker, session_date, start_cursor, stop_at, op
             ts = _parse(raw.get(spec.time_field))
             if ts is None:
                 continue
-            if ts > cursor + CURSOR_OVERLAP:
-                return {"status": "ok", "error": "pagination cursor not honored by provider", "pages": pages,
-                        "rows": n_rows, "oldest": oldest, "reached": False, "bottom": False, "unverifiable": True}
+            if not spec.in_bounds(ts, lo, cursor):
+                return {"outcome": "unverifiable", "reason": "bounds_not_honored", "pages": pages,
+                        "rows": n_rows, "oldest": oldest, "status": COLLECTION_OK}
             if spec.date_scoped and ts.astimezone(tc.NY_TZ).date() != session_date:
-                return {"status": "ok", "error": "provider returned rows outside the requested session date",
-                        "pages": pages, "rows": n_rows, "oldest": oldest, "reached": False, "bottom": False,
-                        "unverifiable": True}
+                return {"outcome": "unverifiable", "reason": "wrong_session_date", "pages": pages,
+                        "rows": n_rows, "oldest": oldest, "status": COLLECTION_OK}
             rows.append(spec.normalize(raw))
             times.append(ts)
-        if not rows:
-            if pages == 1 and oldest is None:
-                return {"status": "ok", "error": "first page empty: cannot distinguish no activity from no access",
-                        "pages": pages, "rows": 0, "oldest": None, "reached": False, "bottom": False,
-                        "unverifiable": True}
-            # Ran out of data before seeing a row at/before the open: this
-            # does NOT prove coverage from the open (history-depth limits look
-            # identical to "no earlier activity").
-            return {"status": "ok", "error": "no data at or before the session open was returned; "
-                    "coverage from the open is unverified", "pages": pages, "rows": n_rows,
-                    "oldest": oldest, "reached": False, "bottom": True}
-        try:
-            spec.catalog(catalog, ticker, rows, kind)
-        except Exception as e:  # noqa: BLE001 -- storage guard / write failure: cannot prove coverage
-            return {"status": "ok", "error": f"catalog write failed: {type(e).__name__}", "pages": pages,
-                    "rows": n_rows, "oldest": oldest, "reached": False, "bottom": False, "unverifiable": True}
-        n_rows += len(rows)
-        page_oldest = min(times)
-        oldest = page_oldest if oldest is None else min(oldest, page_oldest)
-        if page_oldest <= stop_at or page_oldest <= open_utc:
-            return {"status": "ok", "error": None, "pages": pages, "rows": n_rows, "oldest": oldest,
-                    "reached": True, "bottom": False}
-        if prev_oldest is not None and page_oldest >= prev_oldest:
-            if len(data) < spec.page_limit:
-                # A non-full page with nothing older than the boundary second:
-                # the provider has no earlier data. Same as running out of
-                # data -- coverage from the open stays unverified (partial).
-                return {"status": "ok", "error": "no data at or before the session open was returned; "
-                        "coverage from the open is unverified", "pages": pages, "rows": n_rows,
-                        "oldest": oldest, "reached": False, "bottom": True}
-            # A FULL page that cannot move past one second: genuinely stuck.
-            return {"status": "ok", "error": "pagination cursor did not advance", "pages": pages, "rows": n_rows,
-                    "oldest": oldest, "reached": False, "bottom": False, "unverifiable": True}
+        if rows:
+            try:
+                spec.catalog(catalog, ticker, rows, kind)
+            except Exception:  # noqa: BLE001 -- storage guard / write failure: cannot prove coverage
+                return {"outcome": "unverifiable", "reason": "catalog_write_failed", "pages": pages,
+                        "rows": n_rows, "oldest": oldest, "status": COLLECTION_OK}
+            n_rows += len(rows)
+            page_oldest = min(times)
+            oldest = page_oldest if oldest is None else min(oldest, page_oldest)
+        if len(data) < spec.page_limit:
+            # verified: a short (or empty) page exhausts the bounded window
+            return {"outcome": "exhausted", "reason": None, "pages": pages, "rows": n_rows, "oldest": oldest,
+                    "status": COLLECTION_OK}
+        page_oldest = min(times) if times else None
+        if page_oldest is None or (prev_oldest is not None and page_oldest >= prev_oldest):
+            return {"outcome": "unverifiable", "reason": "cursor_stuck", "pages": pages, "rows": n_rows,
+                    "oldest": oldest, "status": COLLECTION_OK}
         prev_oldest = page_oldest
-        # +1s overlap: rows sharing the boundary second are re-read (and
-        # deduplicated) rather than skipped.
-        cursor = page_oldest + CURSOR_OVERLAP
-    return {"status": "ok", "error": "page budget exhausted", "pages": pages, "rows": n_rows,
-            "oldest": oldest, "reached": False, "bottom": False}
+        cursor = page_oldest + spec.cursor_step
+        if cursor >= hi and pages > 1:  # cannot make progress inside this window
+            return {"outcome": "unverifiable", "reason": "cursor_stuck", "pages": pages, "rows": n_rows,
+                    "oldest": oldest, "status": COLLECTION_OK}
+    return {"outcome": "budget", "reason": "page_budget_exhausted", "pages": pages, "rows": n_rows,
+            "oldest": oldest, "status": COLLECTION_OK}
 
 
 def update_session_coverage(client, catalog, dataset: str, ticker: str, session_date: date,
                             now_utc: Optional[datetime] = None, max_pages: int = DEFAULT_SCAN_PAGES,
                             kind: str = "on_demand") -> CoverageUpdate:
-    """Extend verified coverage of one session. Never raises."""
+    """Extend proven coverage of one session within `max_pages` requests.
+    Never raises on provider behaviour; never claims unproven coverage."""
     spec = DATASETS[dataset]
     now_utc = now_utc or datetime.now(timezone.utc)
     sd = session_date.isoformat()
@@ -209,87 +225,133 @@ def update_session_coverage(client, catalog, dataset: str, ticker: str, session_
         return CoverageUpdate(dataset, ticker, sd, COLLECTION_OK, None, detail="not a trading session")
     open_utc = info.session_open_et.astimezone(timezone.utc)
     close_utc = info.session_close_et.astimezone(timezone.utc)
-    target_end = min(close_utc, now_utc - REPORTING_LAG)
-    if target_end <= open_utc:
+    end = min(close_utc, now_utc - REPORTING_LAG)
+    if end <= open_utc:
         return CoverageUpdate(dataset, ticker, sd, COLLECTION_OK, catalog.get_session_coverage(dataset, ticker, sd),
                               detail="session has not opened yet")
 
     cov = catalog.get_session_coverage(dataset, ticker, sd) or {}
-    c_from = _parse(cov.get("covered_from_utc")) if cov.get("status") != "unknown" else None
-    c_through = _parse(cov.get("covered_through_utc")) if cov.get("status") != "unknown" else None
-    budget, pages, rows, error, status = max_pages, 0, 0, None, COLLECTION_OK
-    unverifiable = False
+    if cov.get("status") in ("unknown", "unavailable") and cov.get("last_error") in (
+            "provider_history_cutoff", "not_entitled"):
+        return CoverageUpdate(dataset, ticker, sd, COLLECTION_OK, cov, detail=cov.get("last_error"))
+    usable = cov.get("status") in ("complete", "partial")
+    c_from = _parse(cov.get("covered_from_utc")) if usable else None
+    c_through = _parse(cov.get("covered_through_utc")) if usable else None
 
-    # 1) top-up: contiguous coverage up to target_end
-    if c_through is None or c_through < target_end:
-        stop_at = c_through if c_through is not None else open_utc
-        w = _walk(spec, client, catalog, ticker, session_date, target_end + CURSOR_OVERLAP, stop_at,
-                  open_utc, budget, kind)
+    budget, pages, rows = max_pages, 0, 0
+    reason = None
+    status = COLLECTION_OK
+
+    def store(cov_status, frm, thr, why):
+        catalog.upsert_session_coverage(dataset, ticker, sd, cov_status, frm.isoformat() if frm else None,
+                                        thr.isoformat() if thr else None, pages, rows, why, kind=kind)
+
+    # 1) newest gap: (c_through, end], or the whole [open, end] if nothing usable yet
+    top_lo = c_through if c_through is not None else open_utc
+    if c_through is None or c_through < end:
+        w = _fetch_window(spec, client, catalog, ticker, session_date, top_lo, end, budget, kind)
         pages += w["pages"]; rows += w["rows"]; budget -= w["pages"]
-        status, error = w["status"], w.get("error")
-        unverifiable = bool(w.get("unverifiable"))
-        if status != COLLECTION_OK:
-            return CoverageUpdate(dataset, ticker, sd, status, cov or None, pages=pages, rows_fetched=rows,
-                                  detail=error)
-        if unverifiable:
-            catalog.upsert_session_coverage(dataset, ticker, sd, "unknown", None, None, pages, rows, error, kind=kind)
-            return CoverageUpdate(dataset, ticker, sd, COLLECTION_OK,
-                                  catalog.get_session_coverage(dataset, ticker, sd), pages=pages,
-                                  rows_fetched=rows, detail=error)
-        if w["reached"] and w["oldest"] is not None and w["oldest"] <= open_utc:
-            c_from, c_through = open_utc, target_end        # walked back past the open
-        elif w["reached"] and c_through is not None:
-            c_through = target_end                          # joined the existing interval
-        elif w["oldest"] is not None:                       # budget/data ran out first: new island
-            c_from, c_through = w["oldest"], target_end
-            error = error or w.get("error")
+        if w["outcome"] == "failed":
+            return CoverageUpdate(dataset, ticker, sd, w["status"], cov or None, pages=pages, rows_fetched=rows,
+                                  detail=w["reason"])
+        if w["outcome"] == "cutoff":
+            store("unavailable", None, None, w["reason"])
+            return CoverageUpdate(dataset, ticker, sd, w["status"], catalog.get_session_coverage(dataset, ticker, sd),
+                                  pages=pages, rows_fetched=rows, detail=w["reason"])
+        if w["outcome"] == "unverifiable":
+            store("unknown", None, None, w["reason"])
+            return CoverageUpdate(dataset, ticker, sd, COLLECTION_OK, catalog.get_session_coverage(dataset, ticker, sd),
+                                  pages=pages, rows_fetched=rows, detail=w["reason"])
+        if w["outcome"] == "exhausted":
+            if c_through is None:
+                c_from, c_through = open_utc, end
+            else:
+                c_through = end
+        else:  # budget: newest island [oldest_seen, end] (rows stay cataloged; older part re-walked later)
+            if c_through is not None and w["oldest"] is not None and w["oldest"] <= c_through:
+                c_through = end
+            else:
+                c_from, c_through = (w["oldest"] or end), end
+            reason = w["reason"]
 
-    # 2) backward extension toward the open
+    # 2) backward gap: [open, c_from)
     if c_from is not None and c_from > open_utc and budget > 0:
-        w = _walk(spec, client, catalog, ticker, session_date, c_from + CURSOR_OVERLAP, open_utc,
-                  open_utc, budget, kind)
+        w = _fetch_window(spec, client, catalog, ticker, session_date, open_utc, c_from, budget, kind)
         pages += w["pages"]; rows += w["rows"]
-        if w["status"] != COLLECTION_OK:
-            error = w.get("error")  # top-up succeeded; keep what was proven, report the failure
-            status = w["status"]
-        elif w.get("unverifiable"):
-            error = w.get("error")
-        elif w["reached"] and w["oldest"] is not None and w["oldest"] <= open_utc:
+        if w["outcome"] == "exhausted":
             c_from = open_utc
-        elif w["oldest"] is not None:
-            c_from = min(c_from, w["oldest"])
-            error = w.get("error")
+            reason = None
+        elif w["outcome"] == "budget":
+            c_from = min(c_from, w["oldest"]) if w["oldest"] else c_from
+            reason = w["reason"]
+        elif w["outcome"] == "failed":
+            status, reason = w["status"], w["reason"]   # keep what was proven so far
+        elif w["outcome"] == "unverifiable":
+            store("unknown", None, None, w["reason"])
+            return CoverageUpdate(dataset, ticker, sd, COLLECTION_OK, catalog.get_session_coverage(dataset, ticker, sd),
+                                  pages=pages, rows_fetched=rows, detail=w["reason"])
+        else:  # cutoff
+            store("unavailable", None, None, w["reason"])
+            return CoverageUpdate(dataset, ticker, sd, w["status"], catalog.get_session_coverage(dataset, ticker, sd),
+                                  pages=pages, rows_fetched=rows, detail=w["reason"])
+    elif c_from is not None and c_from > open_utc:
+        reason = reason or "page_budget_exhausted"
 
-    complete = c_from is not None and c_from <= open_utc and c_through is not None and c_through >= close_utc
-    cov_status = "complete" if complete else "partial"
-    catalog.upsert_session_coverage(dataset, ticker, sd, cov_status, c_from.isoformat() if c_from else None,
-                                    c_through.isoformat() if c_through else None, pages, rows, error, kind=kind)
+    if c_from is not None and c_from <= open_utc and c_through is not None and c_through >= close_utc:
+        cov_status, why = "complete", None
+    else:
+        cov_status = "partial"
+        why = reason or ("session_in_progress" if c_through is not None and c_through < close_utc
+                         else "page_budget_exhausted")
+    store(cov_status, c_from, c_through, why)
     return CoverageUpdate(dataset, ticker, sd, status, catalog.get_session_coverage(dataset, ticker, sd),
-                          pages=pages, rows_fetched=rows, detail=error)
+                          pages=pages, rows_fetched=rows, detail=why)
 
 
 def backfill_baseline(client, catalog, dataset: str, ticker: str, evidence_session: date,
                       max_pages: int = DEFAULT_BACKFILL_PAGES,
                       lookback_sessions: int = BACKFILL_LOOKBACK_SESSIONS,
                       kind: str = "background", now_utc: Optional[datetime] = None) -> dict:
-    """Bounded backfill of COMPLETE coverage for sessions before
-    `evidence_session` (newest first), spending at most `max_pages` UW
-    requests. Never raises; never fabricates coverage."""
+    """Bounded backfill, spending at most `max_pages` UW requests: first
+    extends the EVIDENCE session (the comparison needs it covered from the
+    open), then completes prior sessions newest-first. Never fabricates
+    coverage; stops on a provider failure or history cutoff."""
     now_utc = now_utc or datetime.now(timezone.utc)
-    budget, d, results = max_pages, evidence_session, []
+    budget, results = max_pages, []
+
+    def touch(d):
+        nonlocal budget
+        u = update_session_coverage(client, catalog, dataset, ticker, d, now_utc=now_utc, max_pages=budget, kind=kind)
+        budget -= max(u.pages, 0)
+        cov = u.coverage or {}
+        results.append({"session_date": d.isoformat(), "status": u.collection_status,
+                        "coverage": cov.get("status"), "reason": cov.get("last_error"), "pages": u.pages})
+        return u, cov
+
+    if tc.is_trading_day(evidence_session):
+        cov = catalog.get_session_coverage(dataset, ticker, evidence_session.isoformat()) or {}
+        if budget > 0 and cov.get("status") not in ("complete", "unavailable"):
+            u, cov = touch(evidence_session)
+            if not u.ok:
+                return _backfill_result(catalog, dataset, ticker, evidence_session, max_pages, budget, results)
+    d = evidence_session
     for _ in range(lookback_sessions):
         d = tc.previous_trading_day(d)
         if budget <= 0:
             break
-        cov = catalog.get_session_coverage(dataset, ticker, d.isoformat())
-        if cov and cov["status"] in ("complete", "unknown"):
+        cov = catalog.get_session_coverage(dataset, ticker, d.isoformat()) or {}
+        if cov.get("status") in ("complete", "unavailable") or (
+                cov.get("status") == "unknown" and cov.get("last_error") in ("bounds_not_honored", "wrong_session_date")):
+            if cov.get("status") == "unavailable":
+                break  # history cutoff: older sessions are unavailable too
             continue
-        u = update_session_coverage(client, catalog, dataset, ticker, d, now_utc=now_utc, max_pages=budget, kind=kind)
-        budget -= max(u.pages, 1)
-        results.append({"session_date": d.isoformat(), "status": u.collection_status,
-                        "coverage": (u.coverage or {}).get("status"), "pages": u.pages, "detail": u.detail})
-        if not u.ok:
-            break  # provider failure: stop spending budget
+        u, cov = touch(d)
+        if not u.ok or cov.get("status") == "unavailable":
+            break
+    return _backfill_result(catalog, dataset, ticker, evidence_session, max_pages, budget, results)
+
+
+def _backfill_result(catalog, dataset, ticker, evidence_session, max_pages, budget, results):
     complete = sum(1 for c in catalog.list_session_coverage(dataset, ticker)
                    if c["status"] == "complete" and c["session_date"] < evidence_session.isoformat())
     return {"dataset": dataset, "ticker": ticker, "pages_used": max_pages - max(budget, 0),

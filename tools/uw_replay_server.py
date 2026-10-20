@@ -8,14 +8,23 @@ without any live UW request. Point the backend at it with
 UW_BASE_URL=http://127.0.0.1:<port> and pin its clock with TIP_REPLAY_CLOCK
 (honored only for a loopback UW_BASE_URL).
 
-Semantics follow UW's documented cursors:
-  GET /api/darkpool/{T}?date=D&older_than=TS&limit=N   prints of NY date D, executed_at < TS
-  GET /api/option-trades/flow-alerts?ticker_symbol=T&older_than=TS&limit=N
+Semantics follow the LIVE-VERIFIED UW contract (docs/UW_PAGINATION_VERIFICATION.md):
+  GET /api/darkpool/{T}?date=D&newer_than=A&older_than=B&limit=N
+      prints of NY date D, A <= executed_at < B (older_than exclusive)
+  GET /api/option-trades/flow-alerts?ticker_symbol=T&newer_than=A&older_than=B&limit=N
+      A <= created_at <= B (older_than inclusive); 7-day default window
   GET /api/stock/{T}/stock-state      the latest recorded snapshot at/before --as-of
   GET /api/stock/{T}/ohlc/{size}      recorded bars (wire rows, market_time "r")
   GET /api/stock/{T}/info             {"data": {"ticker": T}}  (connection test)
   GET /api/screener/stocks            {"data": []}
-Rows newer than --as-of are never served (no look-ahead).
+Rows newer than --as-of are never served (no look-ahead). Before the first
+recorded row of a ticker the replay answers 403 historic_data_access_missing
+(it has no history there). LIMITATION: inside the recorded dates the capture
+is a sparse sample (each Live scan saw only the newest page), so coverage
+"completeness" computed against this replay reflects the recording, not the
+real provider -- real coverage semantics are tested with exact paginated
+fakes (backend/tests/uw_paginated.py) and were verified live
+(docs/UW_PAGINATION_VERIFICATION.md).
 
 Failure injection / introspection (loopback only, for tests):
   POST /__control/fail?path=<substring>&status=<code>   e.g. path=flow-alerts&status=503
@@ -63,13 +72,25 @@ class ReplayData:
             if s["stock_state"] and _ts(s["retrieved_at"]) <= as_of:
                 self.stock_state[s["ticker"].upper()] = s["stock_state"]  # scans are chronological
         self.bars = data["price_bars"]
+        # The replay's own history cutoff: before the first recorded row for a
+        # ticker it has NO data, so it answers like UW's documented
+        # 403 historic_data_access_missing instead of pretending the session
+        # was empty. (Inside the recorded dates the capture is still a SPARSE
+        # sample -- newest pages only -- which the replay cannot reveal; see
+        # the module docstring.)
+        self.first_dp_date = {t: min(_ts(r["executed_at"]).astimezone(NY).date() for r in rows)
+                              for t, rows in self.darkpool.items()}
+        self.first_flow_ts = {t: min(_ts(r["created_at"]) for r in rows) for t, rows in self.flow.items()}
 
     @staticmethod
-    def page(rows, field, q):
+    def page(rows, field, q, upper_inclusive=False):
+        if q.get("newer_than"):
+            lo = _ts(q["newer_than"])
+            rows = [r for r in rows if _ts(r[field]) >= lo]
         if q.get("older_than"):
             cut = _ts(q["older_than"])
-            rows = [r for r in rows if _ts(r[field]) < cut]
-        rows = sorted(rows, key=lambda r: r[field], reverse=True)
+            rows = [r for r in rows if (_ts(r[field]) <= cut if upper_inclusive else _ts(r[field]) < cut)]
+        rows = sorted(rows, key=lambda r: _ts(r[field]), reverse=True)
         return rows[: int(q.get("limit") or 100)]
 
 
@@ -121,11 +142,21 @@ def make_handler(data: ReplayData, state: dict):
                 rows = data.darkpool.get(t, [])
                 if q.get("date"):
                     d = date.fromisoformat(q["date"])
+                    if t not in data.first_dp_date or d < data.first_dp_date[t]:
+                        return self._send(403, {"code": "historic_data_access_missing"})
                     rows = [r for r in rows if _ts(r["executed_at"]).astimezone(NY).date() == d]
-                return self._send(200, {"data": data.page(rows, "executed_at", q)})
+                return self._send(200, {"data": data.page(rows, "executed_at", q, upper_inclusive=False)})
             if p == "/api/option-trades/flow-alerts":
-                rows = data.flow.get(str(q.get("ticker_symbol", "")).upper(), [])
-                return self._send(200, {"data": data.page(rows, "created_at", q)})
+                t = str(q.get("ticker_symbol", "")).upper()
+                rows = data.flow.get(t, [])
+                if q.get("newer_than") and (t not in data.first_flow_ts or _ts(q["newer_than"]).astimezone(NY).date()
+                                            < data.first_flow_ts[t].astimezone(NY).date()):
+                    return self._send(403, {"code": "historic_data_access_missing"})
+                if not q.get("newer_than"):
+                    from datetime import timedelta
+                    hi = _ts(q["older_than"]) if q.get("older_than") else data.as_of
+                    q = {**q, "newer_than": (hi - timedelta(days=7)).isoformat()}
+                return self._send(200, {"data": data.page(rows, "created_at", q, upper_inclusive=True)})
             parts = p.strip("/").split("/")
             if len(parts) >= 4 and parts[:2] == ["api", "stock"]:
                 t = parts[2].upper()

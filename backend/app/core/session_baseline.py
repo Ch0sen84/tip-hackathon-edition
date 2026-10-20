@@ -83,6 +83,8 @@ class SessionBaseline:
     percentile: Optional[float] = None
     history_sessions: list = field(default_factory=list)
     evidence_coverage: Optional[dict] = None
+    coverage_summary: dict = field(default_factory=dict)
+    excluded_before_first_activity: int = 0
 
     def as_metrics(self) -> dict:
         return {
@@ -97,6 +99,8 @@ class SessionBaseline:
             "thresholds": {"ratio": RATIO_THRESHOLD, "percentile": PERCENTILE_THRESHOLD},
             "history_sessions": self.history_sessions,
             "evidence_coverage": self.evidence_coverage,
+            "coverage_summary": self.coverage_summary,
+            "excluded_before_first_activity": self.excluded_before_first_activity,
         }
 
     def as_dark_pool_gate_inputs(self) -> dict:
@@ -114,11 +118,17 @@ def compute(catalog, dataset: str, ticker: str, evidence_session: date,
     sd = evidence_session.isoformat()
     info = tc.session_info(evidence_session)
     all_cov = catalog.list_session_coverage(dataset, ticker)
-    eligible = [c for c in all_cov if c["status"] == "complete" and c["session_date"] < sd]
+    prior = [c for c in all_cov if c["session_date"] < sd]
+    summary: dict = {}
+    for c in prior:
+        k = c["status"] + (f":{c['last_error']}" if c.get("last_error") else "")
+        summary[k] = summary.get(k, 0) + 1
+    eligible = [c for c in prior if c["status"] == "complete"]
     eligible = eligible[-MAX_HISTORY_SESSIONS:]
     tier = classify_tier(len(eligible)) if min_sessions == BASELINE_READY_MIN else (
         TIER_PRELIMINARY if len(eligible) < min_sessions else "baseline_ready")
     base = SessionBaseline(dataset, ticker, sd, "insufficient", "", tier, len(eligible))
+    base.coverage_summary = summary
     if not info.is_trading_day:
         base.reason = "evidence session is not a trading day"
         return base
@@ -142,7 +152,7 @@ def compute(catalog, dataset: str, ticker: str, evidence_session: date,
     base.value = sum(_f(o.get(value_key)) for o in obs)
     base.observations = len(obs)
 
-    hist_values = []
+    hist_rows = []
     for c in eligible:
         hinfo = tc.session_info(date.fromisoformat(c["session_date"]))
         if not hinfo.is_trading_day:
@@ -152,10 +162,21 @@ def compute(catalog, dataset: str, ticker: str, evidence_session: date,
         cutoff = min(h_open + elapsed, h_close)
         h_obs = catalog.observations_between(dataset, ticker, h_open, cutoff)
         v = sum(_f(o.get(value_key)) for o in h_obs)
-        hist_values.append(v)
-        base.history_sessions.append({"session_date": c["session_date"], "value": v, "observations": len(h_obs)})
+        full_day = catalog.observations_between(dataset, ticker, h_open, h_close) if not h_obs else h_obs
+        hist_rows.append({"session_date": c["session_date"], "value": v, "observations": len(h_obs),
+                          "active": bool(full_day)})
+    # A verified-empty session BEFORE the ticker's first observed activity
+    # (e.g. pre-listing) is not a genuine "zero activity" baseline day.
+    first_active = next((i for i, r in enumerate(hist_rows) if r["active"]), len(hist_rows))
+    base.excluded_before_first_activity = first_active
+    hist_rows = hist_rows[first_active:]
+    base.history_sessions = [{k: r[k] for k in ("session_date", "value", "observations")} for r in hist_rows]
+    hist_values = [r["value"] for r in hist_rows]
+    base.eligible_sessions = len(hist_values)
+    base.tier = classify_tier(len(hist_values)) if min_sessions == BASELINE_READY_MIN else (
+        TIER_PRELIMINARY if len(hist_values) < min_sessions else "baseline_ready")
 
-    if len(hist_values) < min_sessions:
+    if not hist_values or len(hist_values) < min_sessions:
         base.reason = (f"only {len(hist_values)} complete prior sessions (need >= {min_sessions}) -- "
                        "insufficient history, not evidence either way")
         return base

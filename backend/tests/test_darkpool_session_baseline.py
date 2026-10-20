@@ -59,12 +59,13 @@ def test_backfill_route_populates_complete_prior_sessions_through_the_collector(
     before = client.get("/api/ticker/ABCD/baseline").json()
     assert before["datasets"]["darkpool"]["complete_prior_sessions"] == 0
     body = client.post("/api/ticker/ABCD/baseline/backfill?max_pages=200").json()
-    assert body["datasets"]["darkpool"]["complete_prior_sessions"] == 25
-    touched = body["backfill"]["darkpool"]["sessions_touched"]
-    # 25 constructed sessions are complete; older sessions with no data at all
-    # are "unknown" (no activity vs no access cannot be told apart) -- never complete.
-    assert sum(1 for t in touched if t["coverage"] == "complete") == 25
-    assert all(t["coverage"] == "unknown" for t in touched if t["coverage"] != "complete")
+    # Verified UW contract: a date-scoped, bounded window answered with a short
+    # (even empty) page is exhausted -- so the 5 constructed-empty older
+    # sessions are provably complete with zero prints. They precede the
+    # ticker's first observed activity, so the baseline excludes them.
+    assert body["datasets"]["darkpool"]["complete_prior_sessions"] == 30
+    b = body["datasets"]["darkpool"]["baseline"]
+    assert b["excluded_before_first_activity"] == 5
 
 
 def test_coverage_already_current_makes_no_request(live):
@@ -119,20 +120,27 @@ def test_without_any_backfill_a_single_refresh_is_insufficient(live):
     assert body["confidence"] in ("insufficient", "low")
 
 
-def test_partial_evidence_session_coverage_cannot_qualify(live):
-    # one print every 3 seconds: ~3,600 prints by noon = 8 pages; the
-    # interactive scan budget (4 pages) cannot reach the open in one scan
+def test_partial_evidence_session_coverage_cannot_qualify(live, tmp_path):
+    """A dense evidence session (a print every 3 s -> ~3,600 by noon = 8 pages)
+    collected with a 4-page budget covers only the newest part: the baseline
+    is insufficient until a later call walks the rest back to the open."""
+    from app import session_collection
+    from app.ingestion import IngestionCatalog
+
     uw = build_uw(evidence_kwargs={"every_minutes": 0.05})
-    live.use_uw(uw)
-    client = TestClient(live.app)
-    client.post("/api/ticker/ABCD/baseline/backfill?max_pages=200")
-    body = client.post("/api/ticker/ABCD/refresh").json()
-    dp = body["gates"]["dark_pool_anomaly"]
-    assert dp["status"] == "insufficient"
-    assert "not verified from the open" in dp["metrics"]["baseline"]["reason"]
-    # a second refresh continues backward from where the first stopped
-    body = client.post("/api/ticker/ABCD/refresh").json()
-    assert body["gates"]["dark_pool_anomaly"]["status"] == "pass"
+    client = uw.adapter().client
+    cat = IngestionCatalog(str(tmp_path / "partial.db"))
+    for d in prior_sessions(EVIDENCE, 25):
+        u = session_collection.update_session_coverage(client, cat, "darkpool", "ABCD", d, now_utc=AS_OF, max_pages=10)
+        assert u.coverage["status"] == "complete"
+    u = session_collection.update_session_coverage(client, cat, "darkpool", "ABCD", EVIDENCE, now_utc=AS_OF, max_pages=4)
+    assert u.coverage["status"] == "partial" and u.coverage["last_error"] == "page_budget_exhausted"
+    b = session_baseline.compute(cat, "darkpool", "ABCD", EVIDENCE, as_of_utc=AS_OF)
+    assert b.status == "insufficient" and "not verified from the open" in b.reason
+    u = session_collection.update_session_coverage(client, cat, "darkpool", "ABCD", EVIDENCE, now_utc=AS_OF, max_pages=10)
+    assert u.coverage["covered_from_utc"].startswith("2026-10-16T13:30")
+    assert u.coverage["last_error"] == "session_in_progress"
+    assert session_baseline.compute(cat, "darkpool", "ABCD", EVIDENCE, as_of_utc=AS_OF).status == "pass"
 
 
 def test_future_sessions_are_never_used_as_history(live, monkeypatch):
@@ -187,7 +195,7 @@ def test_provider_failure_during_collection_is_unavailable_and_keeps_coverage(li
 def test_pagination_cursor_not_honored_is_unknown_not_complete(live):
     class IgnoresCursor(PaginatedUW):
         @staticmethod
-        def _page(rows, field, params):
+        def _page(rows, field, params, upper_inclusive=False):   # ignores newer_than/older_than
             return sorted(rows, key=lambda r: r[field], reverse=True)[: int(params.get("limit") or 100)]
 
     uw = IgnoresCursor(darkpool=[r for d in prior_sessions(EVIDENCE, 3)
@@ -195,8 +203,10 @@ def test_pagination_cursor_not_honored_is_unknown_not_complete(live):
                        static={"stock-state": STATE, "flow-alerts": ok([])})
     live.use_uw(uw)
     body = TestClient(live.app).post("/api/ticker/ABCD/baseline/backfill?max_pages=50").json()
-    statuses = {c["status"] for c in body["datasets"]["darkpool"]["coverage"]}
-    assert "complete" not in statuses
+    cov = {c["session_date"]: c for c in body["datasets"]["darkpool"]["coverage"]}
+    for d in prior_sessions(EVIDENCE, 3):
+        c = cov[d.isoformat()]
+        assert c["status"] == "unknown" and c["last_error"] == "bounds_not_honored", c
 
 
 def test_demo_mode_has_no_session_baseline(app_main):
@@ -261,13 +271,16 @@ def test_running_out_of_data_is_partial_but_a_stuck_full_page_is_unknown(live, t
     from app import session_collection
     from app.ingestion import IngestionCatalog
 
-    # (a) prints start at 10:00 ET with nothing earlier: data simply ends -> partial
+    # (a) thin ticker: prints start at 10:00 ET, nothing at/before the open.
+    # The bounded window [open, end] returns a short page -> verified
+    # exhausted -> covered from the open (still in progress at 12:00 ET).
     uw = PaginatedUW(darkpool=session_prints("ABCD", EVIDENCE, 1.0, start=dtime(10, 0), end=dtime(11, 0)),
                      static={"stock-state": STATE, "flow-alerts": ok([])})
     cat = IngestionCatalog(str(tmp_path / "a.db"))
     u = session_collection.update_session_coverage(uw.adapter().client, cat, "darkpool", "ABCD", EVIDENCE,
                                                    now_utc=AS_OF, max_pages=10)
-    assert u.coverage["status"] == "partial" and "unverified" in u.coverage["last_error"]
+    assert u.coverage["status"] == "partial" and u.coverage["last_error"] == "session_in_progress"
+    assert u.coverage["covered_from_utc"].startswith("2026-10-16T13:30")
 
     # (b) 600 prints in ONE second (> page limit 500): the cursor cannot advance -> unknown
     burst = [{"ticker": "ABCD", "executed_at": "2026-10-16T15:00:00Z", "price": "1", "size": 1,
@@ -276,4 +289,4 @@ def test_running_out_of_data_is_partial_but_a_stuck_full_page_is_unknown(live, t
     cat2 = IngestionCatalog(str(tmp_path / "b.db"))
     u2 = session_collection.update_session_coverage(uw2.adapter().client, cat2, "darkpool", "ABCD", EVIDENCE,
                                                     now_utc=AS_OF, max_pages=10)
-    assert u2.coverage["status"] == "unknown" and "did not advance" in u2.coverage["last_error"]
+    assert u2.coverage["status"] == "unknown" and u2.coverage["last_error"] == "cursor_stuck"

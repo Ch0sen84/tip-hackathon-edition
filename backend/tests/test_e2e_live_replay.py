@@ -110,8 +110,12 @@ def test_backfill_on_recorded_data_cannot_manufacture_a_baseline(live):
     m, client, url, state = live
     body = client.post("/api/ticker/SPY/baseline/backfill?max_pages=40").json()
     for dataset in ("darkpool", "options_flow"):
-        assert body["datasets"][dataset]["complete_prior_sessions"] == 0
-        assert body["datasets"][dataset]["baseline"]["status"] == "insufficient"
+        b = body["datasets"][dataset]["baseline"]
+        assert b["status"] == "insufficient" and b["eligible_sessions"] < 20, b
+        # before the recording begins the replay answers the documented history
+        # cutoff -> those sessions are "unavailable", never counted as empty
+        touched = body["backfill"][dataset]["sessions_touched"]
+        assert any(t["coverage"] == "unavailable" and t["reason"] == "provider_history_cutoff" for t in touched), touched
     after = client.post("/api/ticker/SPY/refresh").json()
     assert after["confidence"] == "insufficient"
 

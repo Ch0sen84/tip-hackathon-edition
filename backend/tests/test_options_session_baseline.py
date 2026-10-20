@@ -103,10 +103,10 @@ def test_unusually_heavy_options_activity_passes(live):
     body = refresh(live)
     g = body["gates"]["options_flow_anomaly"]
     assert g["status"] == "pass", g
-    # 24, not 25: the OLDEST constructed session starts at 09:35 with nothing
-    # older to page into, so its coverage from the open cannot be proven --
-    # the conservative coverage rule, working as intended.
-    assert g["metrics"]["baseline"]["eligible_sessions"] == 24
+    # all 25: bounded windows prove a session exhausted without needing a
+    # pre-open alert (verified UW semantics), so even the oldest constructed
+    # session -- first alert 09:35 -- is complete
+    assert g["metrics"]["baseline"]["eligible_sessions"] == 25
     assert body["collection"]["options_flow"]["coverage"]["covered_from_utc"].startswith("2026-10-16T13:30")
     assert body["confidence"] == "medium"
 
