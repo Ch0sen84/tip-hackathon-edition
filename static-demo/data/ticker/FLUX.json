@@ -155,7 +155,7 @@
       "scan_date": "2026-10-19",
       "any_gate_passed": true,
       "state": "CONFIRMED",
-      "created_at": "2026-10-20T03:31:44.788306+00:00",
+      "created_at": "2026-10-20T03:55:11.401067+00:00",
       "transition_rule": "opened_confirmed_two_independent_categories",
       "episode_id": 6
     },
@@ -163,7 +163,7 @@
       "scan_date": "2026-10-19",
       "any_gate_passed": true,
       "state": "CONFIRMED",
-      "created_at": "2026-10-20T03:31:44.838684+00:00",
+      "created_at": "2026-10-20T03:55:11.447069+00:00",
       "transition_rule": "still_confirmed",
       "episode_id": 6
     }
@@ -195,13 +195,13 @@
     ]
   },
   "eval_freshness": "current",
-  "last_evaluated_at": "2026-10-20T03:31:44.838684+00:00",
+  "last_evaluated_at": "2026-10-20T03:55:11.447069+00:00",
   "served_from_cache": false,
   "collection": {
     "options_flow": {
       "status": "ok",
       "ok": true,
-      "retrieved_at": "2026-10-20T03:31:44.838684+00:00",
+      "retrieved_at": "2026-10-20T03:55:11.447069+00:00",
       "row_count": 1,
       "detail": null,
       "http_status": null,
@@ -211,7 +211,7 @@
     "darkpool": {
       "status": "ok",
       "ok": true,
-      "retrieved_at": "2026-10-20T03:31:44.838684+00:00",
+      "retrieved_at": "2026-10-20T03:55:11.447069+00:00",
       "row_count": 1,
       "detail": null,
       "http_status": null,
@@ -221,7 +221,7 @@
     "stock_state": {
       "status": "ok",
       "ok": true,
-      "retrieved_at": "2026-10-20T03:31:44.838684+00:00",
+      "retrieved_at": "2026-10-20T03:55:11.447069+00:00",
       "row_count": 1,
       "detail": null,
       "http_status": null,
@@ -236,5 +236,5 @@
     "darkpool_trades": 1,
     "cap": 500
   },
-  "last_successful_collection_at": "2026-10-20T03:31:44.838684+00:00"
+  "last_successful_collection_at": "2026-10-20T03:55:11.447069+00:00"
 }

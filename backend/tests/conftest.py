@@ -101,6 +101,10 @@ def app_main(tmp_path, monkeypatch):
     _main._catalog = None
     _main._store = None
     _main._demo_store = None
+    # the reusable Live HTTP client (and its base URL / circuit-breaker
+    # state) must not leak from one test into the next
+    _main._last_live_client = None
+    _main._last_live_client_key_sig = None
     _main._reset_scheduler_runner()
     from app.core import uw_concurrency as _uw_concurrency
     _uw_concurrency.reset_shared_gate_for_tests()

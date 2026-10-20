@@ -1234,7 +1234,10 @@ function collapseHistory(history) {
   const entries = Array.isArray(history) ? history : [];
   const segments = [];
   entries.forEach((raw) => {
-    const e = (typeof raw === "string") ? { state: raw } : (raw || {});
+    // Signal-integrity remediation: an evaluated scan with no open
+    // qualification episode has state null -- shown as NONE, never "null".
+    const e0 = (typeof raw === "string" || raw === null) ? { state: raw } : (raw || {});
+    const e = e0.state ? e0 : { ...e0, state: "NONE" };
     const last = segments[segments.length - 1];
     if (last && last.state === e.state) {
       last.scanCount += 1;
@@ -2110,6 +2113,7 @@ const STATE_GLOSS = {
   CONFIRMED: "two independent evidence categories on the latest scan",
   STABLE: "two-category confirmation on 3+ distinct trading sessions",
   FADING: "episode still open, but no independent category passed on the latest scan",
+  NONE: "no active qualification episode",
   INVALIDATED: "the inferred flow lean was contradicted by a 3%+ adverse move; this episode is closed (a new one can open on a later session)",
 };
 
@@ -3820,12 +3824,16 @@ function historyEntryGloss(e) {
   if (e && isZeroGateTransitionReason(e.transition_rule)) {
     return "no qualifying evidence yet";
   }
+  if (e && e.state === "NONE" && TRANSITION_RULE_GLOSS[e.transition_rule]) {
+    return TRANSITION_RULE_GLOSS[e.transition_rule];
+  }
   return STATE_GLOSS[e && e.state] || "";
 }
 
-function renderRawHistoryStep(e, i, entries) {
+function renderRawHistoryStep(e0, i, entries) {
+  const e = e0.state ? e0 : { ...e0, state: "NONE" };
   const gloss = historyEntryGloss(e);
-  const prev = i > 0 ? entries[i - 1].state : null;
+  const prev = i > 0 ? (entries[i - 1].state || "NONE") : null;
   const changed = prev && prev !== e.state;
   return `
     <div class="timeline-step">
@@ -3861,7 +3869,7 @@ function renderLifecycleTimeline(history, currentState) {
       </div>`;
   }
   if (entries.length === 1) {
-    const e = entries[0];
+    const e = entries[0].state ? entries[0] : { ...entries[0], state: "NONE" };
     const gloss = historyEntryGloss(e);
     return `
       <div class="card timeline-card">
@@ -3879,7 +3887,7 @@ function renderLifecycleTimeline(history, currentState) {
   return `
     <div class="card timeline-card">
       <div class="card-head"><strong>Signal Lifecycle</strong>
-        <span class="muted">(${segments.length} segment(s) from ${entries.length} recorded scans &mdash; current state: ${esc(currentState || "")})</span></div>
+        <span class="muted">(${segments.length} segment(s) from ${entries.length} recorded scans &mdash; current state: ${esc(currentState || "NONE")})</span></div>
       ${progressionHtml}
       <details class="how history-details">
         <summary>Full real scan-by-scan history (${entries.length} entries)</summary>
@@ -4057,7 +4065,9 @@ function renderTickerDetail(d) {
       </div>
       <div class="read primary-headline" id="tickerPrimaryHeadline">${esc(primaryHeadline)}</div>
       <div class="read">${esc(primaryCurrentRead(d))}</div>
-      <div class="read">${esc(transitionLabel(d.previous_state, d.state))}</div>
+      <div class="read">${esc(!d.state && !isNotEvaluated(d)
+        ? `Evaluated: no active qualification (${TRANSITION_RULE_GLOSS[d.transition_rule] || "no qualifying evidence"})`
+        : transitionLabel(d.previous_state, d.state))}</div>
       <div class="read">Confidence reason: ${esc(d.confidence_reason)}</div>
     </div>
     <div class="card chart-card chart-card-prominent">

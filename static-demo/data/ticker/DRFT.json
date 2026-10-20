@@ -109,7 +109,7 @@
       }
     }
   },
-  "headline": "Unusual activity",
+  "headline": "No qualifying evidence this scan",
   "current_read": "Unusual activity; stock little changed.",
   "evidence": [
     {
@@ -129,7 +129,7 @@
       "scan_date": "2026-10-19",
       "any_gate_passed": false,
       "state": null,
-      "created_at": "2026-10-20T03:31:44.788306+00:00",
+      "created_at": "2026-10-20T03:55:11.401067+00:00",
       "transition_rule": "no_qualifying_evidence_yet",
       "episode_id": null
     },
@@ -137,7 +137,7 @@
       "scan_date": "2026-10-19",
       "any_gate_passed": false,
       "state": null,
-      "created_at": "2026-10-20T03:31:44.830697+00:00",
+      "created_at": "2026-10-20T03:55:11.440148+00:00",
       "transition_rule": "no_qualifying_evidence_yet",
       "episode_id": null
     }
@@ -147,13 +147,13 @@
     "darkpool_trades": []
   },
   "eval_freshness": "current",
-  "last_evaluated_at": "2026-10-20T03:31:44.830697+00:00",
+  "last_evaluated_at": "2026-10-20T03:55:11.440148+00:00",
   "served_from_cache": false,
   "collection": {
     "options_flow": {
       "status": "ok",
       "ok": true,
-      "retrieved_at": "2026-10-20T03:31:44.830697+00:00",
+      "retrieved_at": "2026-10-20T03:55:11.440148+00:00",
       "row_count": 0,
       "detail": null,
       "http_status": null,
@@ -163,7 +163,7 @@
     "darkpool": {
       "status": "ok",
       "ok": true,
-      "retrieved_at": "2026-10-20T03:31:44.830697+00:00",
+      "retrieved_at": "2026-10-20T03:55:11.440148+00:00",
       "row_count": 0,
       "detail": null,
       "http_status": null,
@@ -173,7 +173,7 @@
     "stock_state": {
       "status": "ok",
       "ok": true,
-      "retrieved_at": "2026-10-20T03:31:44.830697+00:00",
+      "retrieved_at": "2026-10-20T03:55:11.440148+00:00",
       "row_count": 1,
       "detail": null,
       "http_status": null,
@@ -188,5 +188,5 @@
     "darkpool_trades": 0,
     "cap": 500
   },
-  "last_successful_collection_at": "2026-10-20T03:31:44.830697+00:00"
+  "last_successful_collection_at": "2026-10-20T03:55:11.440148+00:00"
 }

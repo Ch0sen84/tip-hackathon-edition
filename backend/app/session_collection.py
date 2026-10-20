@@ -179,6 +179,14 @@ def _walk(spec, client, catalog, ticker, session_date, start_cursor, stop_at, op
             return {"status": "ok", "error": None, "pages": pages, "rows": n_rows, "oldest": oldest,
                     "reached": True, "bottom": False}
         if prev_oldest is not None and page_oldest >= prev_oldest:
+            if len(data) < spec.page_limit:
+                # A non-full page with nothing older than the boundary second:
+                # the provider has no earlier data. Same as running out of
+                # data -- coverage from the open stays unverified (partial).
+                return {"status": "ok", "error": "no data at or before the session open was returned; "
+                        "coverage from the open is unverified", "pages": pages, "rows": n_rows,
+                        "oldest": oldest, "reached": False, "bottom": True}
+            # A FULL page that cannot move past one second: genuinely stuck.
             return {"status": "ok", "error": "pagination cursor did not advance", "pages": pages, "rows": n_rows,
                     "oldest": oldest, "reached": False, "bottom": False, "unverifiable": True}
         prev_oldest = page_oldest

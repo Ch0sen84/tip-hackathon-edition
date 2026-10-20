@@ -503,7 +503,10 @@ def headline(item):
     parts = [p for p in parts if p]
     if not parts:
         gp = item.get("gates_passed") or []
-        parts = ["TIP anomaly gate passed: " + ", ".join(g.replace("_", " ") for g in gp)] if gp else ["Unusual activity"]
+        # Signal-integrity remediation: with no evidence family at all, the
+        # old "Unusual activity" fallback asserted something nothing showed.
+        parts = (["TIP anomaly gate passed: " + ", ".join(g.replace("_", " ") for g in gp)] if gp
+                 else ["No qualifying evidence this scan"])
     return " \u00b7 ".join(parts)
 
 

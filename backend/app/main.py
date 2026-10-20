@@ -617,9 +617,29 @@ BACKFILL_TICKERS_PER_CYCLE = int(os.environ.get("TIP_BASELINE_BACKFILL_TICKERS_P
 _backfill_rotation = {"i": 0}
 
 
+def _replay_clock() -> Optional[datetime]:
+    """TIP_REPLAY_CLOCK pins the scan pipeline's clock for offline replay of
+    RECORDED data (tools/uw_replay_server.py). Honored ONLY when the UW base
+    URL is a loopback address, so it can never be combined with the real
+    Unusual Whales API."""
+    raw = os.environ.get("TIP_REPLAY_CLOCK")
+    if not raw:
+        return None
+    from urllib.parse import urlparse
+    host = (urlparse(settings.uw_base_url).hostname or "").lower()
+    if host not in ("127.0.0.1", "localhost", "::1"):
+        logging.getLogger(__name__).warning("TIP_REPLAY_CLOCK ignored: UW_BASE_URL is not loopback")
+        return None
+    try:
+        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
 def _utcnow() -> datetime:
-    """The scan pipeline's clock (one indirection so tests can pin it)."""
-    return datetime.now(timezone.utc)
+    """The scan pipeline's clock (one indirection so tests/replay can pin it)."""
+    return _replay_clock() or datetime.now(timezone.utc)
 
 
 def _baseline_report(ticker: str, session_date, as_of_utc) -> dict:
@@ -887,7 +907,9 @@ def _to_evidence_item(scan: dict) -> dict:
 @app.get("/api/health")
 def health():
     adapter = get_adapter()
-    return {"ok": True, "mode": _settings_store.get_mode(), "adapter": adapter.health()}
+    rc = _replay_clock()
+    return {"ok": True, "mode": _settings_store.get_mode(), "adapter": adapter.health(),
+            "replay_clock": rc.isoformat() if rc else None}
 
 
 @app.get("/api/mode")

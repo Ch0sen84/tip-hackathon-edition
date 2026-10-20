@@ -253,3 +253,27 @@ def test_scheduler_runs_backfill_only_on_evaluating_cycles(tmp_path):
     assert calls == []
     out = runner.run_once_with_depth("discovery_plus_evaluation")
     assert len(calls) == 1
+
+
+def test_running_out_of_data_is_partial_but_a_stuck_full_page_is_unknown(live, tmp_path):
+    from datetime import time as dtime
+
+    from app import session_collection
+    from app.ingestion import IngestionCatalog
+
+    # (a) prints start at 10:00 ET with nothing earlier: data simply ends -> partial
+    uw = PaginatedUW(darkpool=session_prints("ABCD", EVIDENCE, 1.0, start=dtime(10, 0), end=dtime(11, 0)),
+                     static={"stock-state": STATE, "flow-alerts": ok([])})
+    cat = IngestionCatalog(str(tmp_path / "a.db"))
+    u = session_collection.update_session_coverage(uw.adapter().client, cat, "darkpool", "ABCD", EVIDENCE,
+                                                   now_utc=AS_OF, max_pages=10)
+    assert u.coverage["status"] == "partial" and "unverified" in u.coverage["last_error"]
+
+    # (b) 600 prints in ONE second (> page limit 500): the cursor cannot advance -> unknown
+    burst = [{"ticker": "ABCD", "executed_at": "2026-10-16T15:00:00Z", "price": "1", "size": 1,
+              "premium": "1", "tracking_id": f"b{i}"} for i in range(600)]
+    uw2 = PaginatedUW(darkpool=burst, static={"stock-state": STATE, "flow-alerts": ok([])})
+    cat2 = IngestionCatalog(str(tmp_path / "b.db"))
+    u2 = session_collection.update_session_coverage(uw2.adapter().client, cat2, "darkpool", "ABCD", EVIDENCE,
+                                                    now_utc=AS_OF, max_pages=10)
+    assert u2.coverage["status"] == "unknown" and "did not advance" in u2.coverage["last_error"]

@@ -11,7 +11,7 @@ const src = fs.readFileSync(fileURLToPath(new URL("./app.core.js", import.meta.u
 (0, eval)(src + `
 globalThis.__exports = { gateWhyItMatters, classifyGate, renderGateItem, isNotEvaluated, stateTagHtml,
   renderCard, renderRow, renderFeaturedSignal, freshnessBadgeHtml, renderRawDataSummary,
-  markerProvenanceText, TRANSITION_RULE_GLOSS, GATE_LIMITATION_NOTES, renderTickerDetail };`);
+  markerProvenanceText, TRANSITION_RULE_GLOSS, GATE_LIMITATION_NOTES, renderTickerDetail, renderLifecycleTimeline, renderHistoryChip };`);
 const X = globalThis.__exports;
 
 let passed = 0;
@@ -124,6 +124,17 @@ check("every lifecycle rule the backend can emit has a gloss", () => {
     "no_gate_passed_while_building", "no_gate_passed_while_confirmed", "no_gate_passed_while_stable",
     "still_fading", "no_gate_passed_remains_new"];
   for (const r of rules) assert.ok(X.TRANSITION_RULE_GLOSS[r], `missing gloss for ${r}`);
+});
+
+check("history with no open episode renders NONE, never 'null', and the header says evaluated", () => {
+  const hist = [{ scan_date: "2026-10-16", state: null, any_gate_passed: false, transition_rule: "held_insufficient_evidence" },
+                { scan_date: "2026-10-16", state: null, any_gate_passed: false, transition_rule: "held_insufficient_evidence" }];
+  const tl = X.renderLifecycleTimeline(hist, null);
+  assert.ok(!/null/.test(tl) && tl.includes("NONE") && tl.includes("current state: NONE"), tl);
+  assert.ok(!/null/.test(X.renderHistoryChip([null, "NEW"])));
+  const html = X.renderTickerDetail({ ticker: "SPY", state: null, previous_state: null, confidence: "insufficient",
+    signal_type: "insufficient_evidence", gates: {}, history: hist, raw: {}, transition_rule: "held_insufficient_evidence" });
+  assert.ok(!html.includes("No evaluation recorded yet") && html.includes("Evaluated: no active qualification"), "header");
 });
 
 console.log(`\n${passed} check(s) passed.`);
