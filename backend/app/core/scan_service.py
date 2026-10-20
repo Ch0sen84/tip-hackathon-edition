@@ -153,7 +153,8 @@ def evaluate_ticker_scan(ticker: str, flow_alerts: list, darkpool_trades: list,
                           api_errors: int = 0,
                           catalyst_identified: bool = False,
                           percentile_gate_fn=None,
-                          catalog_dark_pool_baseline: Optional[dict] = None) -> dict:
+                          catalog_dark_pool_baseline: Optional[dict] = None,
+                          collection_status: Optional[dict] = None) -> dict:
     """End-to-end: raw adapter data -> gates -> confidence -> state
     transition. Returns everything the API layer needs to render both
     Market Radar and Ticker Analysis for one ticker.
@@ -167,11 +168,28 @@ def evaluate_ticker_scan(ticker: str, flow_alerts: list, darkpool_trades: list,
                                 api_errors=api_errors,
                                 catalyst_identified=catalyst_identified,
                                 catalog_dark_pool_baseline=catalog_dark_pool_baseline)
+    # Collection status (audit B4/E9): a source that could not be collected
+    # is "unavailable", never an empty-but-successful observation.
+    collection_status = dict(collection_status or {})
+    failed = sorted(k for k, v in collection_status.items() if v != "ok")
+    collection_complete = not failed
+    if failed:
+        inputs["api_errors"] = max(inputs.get("api_errors") or 0, len(failed))
+    if collection_status.get("stock_state", "ok") != "ok":
+        inputs["price_move_pct"] = None
+        price_move_pct = None
     direction = inputs["direction_heuristic"]
-    gates = se.evaluate_gates(percentile_gate_fn=percentile_gate_fn, **inputs)
-    confidence, signal_type, reason, qualifies = se.classify_confidence(gates)
+    gates = se.evaluate_gates(
+        percentile_gate_fn=percentile_gate_fn,
+        options_flow_available=collection_status.get("options_flow", "ok") == "ok",
+        darkpool_available=collection_status.get("darkpool", "ok") == "ok",
+        collection_status=collection_status,
+        **inputs)
+    confidence, signal_type, reason, qualifies = se.classify_confidence(
+        gates, collection_complete=collection_complete)
     new_state, rule_id = se.determine_transition(
-        current_state, gates, qualifying_days_count, price_move_pct, direction)
+        current_state, gates, qualifying_days_count, price_move_pct, direction,
+        collection_complete=collection_complete)
     gates_passed = [name for name, g in gates.items() if g["passed"]
                     and name not in ("multi_signal_confirmation", "catalyst_identified", "data_quality")]
     return {
@@ -188,4 +206,6 @@ def evaluate_ticker_scan(ticker: str, flow_alerts: list, darkpool_trades: list,
         "qualifying_days_count": qualifying_days_count,
         "direction_heuristic": direction,
         "price_move_pct": price_move_pct,
+        "collection_complete": collection_complete,
+        "collection_failed_sources": failed,
     }

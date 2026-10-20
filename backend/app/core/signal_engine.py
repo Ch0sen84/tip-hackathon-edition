@@ -237,7 +237,10 @@ def evaluate_gates(ticker: str, *, tier1_hit: bool = False, tier1_bootstrap: boo
                     direction_heuristic: Optional[str] = None,
                     catalyst_identified: bool = False,
                     api_errors: int = 0,
-                    percentile_gate_fn: Optional[PercentileGateFn] = None) -> dict:
+                    percentile_gate_fn: Optional[PercentileGateFn] = None,
+                    options_flow_available: bool = True,
+                    darkpool_available: bool = True,
+                    collection_status: Optional[dict] = None) -> dict:
     """Evaluates every named gate for one ticker/scan. Returns
     {gate_name: {"passed": bool, "metrics": {...}}}. Pure function -- does
     not touch the DB or network. `percentile_gate_fn` defaults to the
@@ -250,11 +253,20 @@ def evaluate_gates(ticker: str, *, tier1_hit: bool = False, tier1_bootstrap: boo
         "passed": bool(tier1_hit and not tier1_bootstrap),
         "metrics": {"ratio": tier1_ratio, "z_score": tier1_z, "bootstrap": tier1_bootstrap},
     }
+    if not darkpool_available:
+        # Provider failure: NOT a negative observation. See adapters/base.py.
+        gates["dark_pool_anomaly"] = {"passed": False, "status": "unavailable", "metrics": {
+            "unavailable": True, "reason": "dark-pool data could not be collected this scan",
+            "collection_status": (collection_status or {}).get("darkpool")}}
 
     gates["options_flow_anomaly"] = {
         "passed": bool(options_flow_hit),
         "metrics": options_flow_metrics or {},
     }
+    if not options_flow_available:
+        gates["options_flow_anomaly"] = {"passed": False, "status": "unavailable", "metrics": {
+            "unavailable": True, "reason": "options flow could not be collected this scan",
+            "collection_status": (collection_status or {}).get("options_flow")}}
 
     pct_gate = None
     if today_premium is not None:
@@ -302,7 +314,8 @@ def evaluate_gates(ticker: str, *, tier1_hit: bool = False, tier1_bootstrap: boo
 
     gates["data_quality"] = {
         "passed": api_errors == 0 and not tier1_bootstrap,
-        "metrics": {"api_errors": api_errors, "bootstrap": tier1_bootstrap},
+        "metrics": {"api_errors": api_errors, "bootstrap": tier1_bootstrap,
+                    "collection_status": dict(collection_status or {})},
     }
 
     return gates
@@ -310,7 +323,7 @@ def evaluate_gates(ticker: str, *, tier1_hit: bool = False, tier1_bootstrap: boo
 
 # --- Confidence --------------------------------------------------------------
 
-def classify_confidence(gates: dict, is_watchlist: bool = False) -> tuple:
+def classify_confidence(gates: dict, is_watchlist: bool = False, collection_complete: bool = True) -> tuple:
     """Returns (confidence, signal_type, reason, qualifies).
 
     SIGNAL-INTEGRITY RULE CHANGE (see this module's docstring): "high"
@@ -329,6 +342,11 @@ def classify_confidence(gates: dict, is_watchlist: bool = False) -> tuple:
     if is_watchlist:
         return ("manual", "watchlist-manual",
                 "Manually marked for tracking (named watchlist ticker)", True)
+
+    if not collection_complete:
+        return ("insufficient", "collection_incomplete",
+                "Required market data could not be collected this scan -- no confidence is assigned "
+                "(a provider failure is not evidence either way)", False)
 
     multi = gates["multi_signal_confirmation"]
     dp = gates["dark_pool_anomaly"]
@@ -388,7 +406,7 @@ def classify_confidence(gates: dict, is_watchlist: bool = False) -> tuple:
 
 def determine_transition(current_state: Optional[str], gates: dict,
                           qualifying_days_count: int, price_move_pct: Optional[float],
-                          direction_heuristic: Optional[str]) -> tuple:
+                          direction_heuristic: Optional[str], collection_complete: bool = True) -> tuple:
     """Pure, deterministic. Returns (new_state, rule_id). current_state is
     None for a brand-new ticker (no open qualification record yet).
 
@@ -408,6 +426,11 @@ def determine_transition(current_state: Optional[str], gates: dict,
     see docstring rule 5 for the one residual limitation this does NOT
     close (repeated identical real evidence across qualifying days).
     """
+    # Incomplete collection (a provider 429/5xx/timeout/malformed body)
+    # is not evidence: never promote, demote or invalidate on it.
+    if not collection_complete:
+        return (current_state, "held_incomplete_collection")
+
     # Invalidation check first -- overrides everything else.
     if price_move_pct is not None and direction_heuristic in ("bullish-lean", "bearish-lean"):
         expected_up = direction_heuristic == "bullish-lean"

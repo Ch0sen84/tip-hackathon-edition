@@ -41,7 +41,7 @@ from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from .adapters.base import UWDataAdapter
+from .adapters.base import UWDataAdapter, collection_summary
 from .adapters.live_uw_adapter import DISCOVERY_LIMIT_CAP, ERROR, UNAUTHORIZED, UNAVAILABLE, LiveUWAdapter, UWRestClient
 from .adapters.synthetic_adapter import SyntheticDataAdapter
 from .ai import orchestrator as ai_orchestrator
@@ -687,9 +687,23 @@ def _run_scan(adapter: UWDataAdapter, store: QualifyingDaysStore, ticker: str, k
     (see app.main._scheduler_run_ticker_scan) rather than get the
     on-demand-route-shaped HTTPException(507) below, which only makes
     sense for an interactive HTTP request."""
-    flow_alerts = adapter.get_flow_alerts(ticker)
-    darkpool_trades = adapter.get_darkpool_trades(ticker)
-    stock_state = adapter.get_stock_state(ticker)
+    # Collection status (signal-integrity remediation, audit B4/E9): each
+    # source reports ok / error / rate_limited / unauthorized /
+    # unavailable_on_tier / malformed / circuit_open. Only "ok" rows are a
+    # real answer; a failure is carried through as "unavailable", never as
+    # an empty observation, and never moves the lifecycle.
+    collections = {
+        "options_flow": adapter.collect_flow_alerts(ticker),
+        "darkpool": adapter.collect_darkpool_trades(ticker),
+        "stock_state": adapter.collect_stock_state(ticker),
+    }
+    flow_alerts = collections["options_flow"]["rows"]
+    darkpool_trades = collections["darkpool"]["rows"]
+    if collections["stock_state"]["ok"]:
+        stock_state = collections["stock_state"]["record"]
+    else:
+        stock_state = {"unavailable": True, "reason": collection_summary(collections["stock_state"])}
+    collection_status = {name: c["status"] for name, c in collections.items()}
     current_state = store.current_state(ticker)
     qualifying_days = store.qualifying_days_count(ticker)
     catalog_dark_pool_baseline = _catalog_dark_pool_baseline_best_effort(adapter, ticker)
@@ -702,10 +716,18 @@ def _run_scan(adapter: UWDataAdapter, store: QualifyingDaysStore, ticker: str, k
         price_move_pct=_price_move_pct(stock_state),
         catalyst_identified=adapter.get_catalyst_identified(ticker),
         catalog_dark_pool_baseline=catalog_dark_pool_baseline,
+        collection_status=collection_status,
     )
+    result["collection"] = {name: collection_summary(c) for name, c in collections.items()}
+    # When this scan's data was collected (newest per-source retrieval).
+    result["collected_at"] = max(c["retrieved_at"] for c in collections.values())
     any_gate_passed = len(result["gates_passed"]) > 0
     try:
-        store.record_scan(ticker, any_gate_passed, result["state"], kind=kind)
+        # An incomplete collection is recorded as an attempt in the catalog
+        # (below) but never written into lifecycle history: it is neither a
+        # qualifying nor a non-qualifying observation.
+        if result["collection_complete"] and result["state"] is not None:
+            store.record_scan(ticker, any_gate_passed, result["state"], kind=kind)
     except StorageGuardPausedError as e:
         if kind != "on_demand":
             raise  # background caller: let it propagate for its own handling, never shaped as an HTTP 507
@@ -1415,6 +1437,25 @@ def _cached_scan_for_ticker(catalog: IngestionCatalog, store: QualifyingDaysStor
     return latest["raw_json"], freshness
 
 
+def _last_successful_collection_at(catalog: IngestionCatalog, ticker: str) -> Optional[str]:
+    try:
+        return catalog.get_last_successful_collection_at(ticker)
+    except Exception:  # noqa: BLE001 -- disclosure only, never fail the route
+        return None
+
+
+def _scan_last_successful_collection_at(scan: dict, catalog: IngestionCatalog, ticker: str,
+                                        is_live: bool, just_fetched: bool) -> Optional[str]:
+    """When this response's own scan collected everything successfully,
+    that scan IS the last successful collection (read from the scan, never
+    from a best-effort catalog write). Otherwise ask the catalog."""
+    if scan.get("collection_complete") and scan.get("collected_at") and (just_fetched or not is_live):
+        return scan["collected_at"]
+    if not is_live:
+        return None
+    return _last_successful_collection_at(catalog, ticker)
+
+
 def _not_evaluated_evidence_item(ticker: str, state: Optional[str] = None) -> dict:
     """Placeholder evidence item for a watchlist ticker that has never
     been evaluated yet (no cataloged signal_evaluations row at all) --
@@ -1531,10 +1572,13 @@ def _radar_impl(refresh: bool):
     for ticker in universe:
         if live_fetch:
             scan = _run_scan(adapter, store, ticker)
-            # Freshness after a real fetch is always "current" by definition
-            # (it was just retrieved) -- avoid a second catalog round-trip.
+            # A real fetch is "current" ONLY if its data collection actually
+            # succeeded; a failed collection is reported as such.
             freshness_by_ticker[ticker] = scheduler_freshness.FreshnessResult(
-                ticker=ticker, state=scheduler_freshness.CURRENT, evaluation=None, age_s=0.0,
+                ticker=ticker,
+                state=(scheduler_freshness.CURRENT if scan.get("collection_complete", True)
+                       else scheduler_freshness.COLLECTION_FAILED),
+                evaluation=None, age_s=0.0,
                 window_s=scheduler_freshness.freshness_window_s(),
             )
         else:
@@ -1694,6 +1738,9 @@ def _radar_impl(refresh: bool):
         else:
             entry["eval_freshness"] = "current"
             entry["last_evaluated_at"] = None
+        entry["collection"] = s.get("collection")
+        entry["last_successful_collection_at"] = _scan_last_successful_collection_at(
+            s, catalog, entry["ticker"], is_live, just_fetched=live_fetch)
         return entry
 
     # W2-a fix: only a REAL live fetch may write a new last_scan_at/
@@ -1939,7 +1986,7 @@ def _ticker_analysis_impl(ticker: str, refresh: bool) -> dict:
         # best-effort catalog write underneath it happens to succeed.
         fetched_at = _ingestion_utcnow_iso()
         scan = _run_scan(adapter, store, ticker)
-        eval_freshness = "current"
+        eval_freshness = "current" if scan.get("collection_complete", True) else "collection_failed"
         last_evaluated_at = fetched_at
         served_from_cache = False
     else:
@@ -2021,6 +2068,13 @@ def _ticker_analysis_impl(ticker: str, refresh: bool) -> dict:
         "eval_freshness": eval_freshness,
         "last_evaluated_at": last_evaluated_at,
         "served_from_cache": served_from_cache,
+        # Per-source collection status of the evaluation shown, and when
+        # data was last collected successfully -- distinct from
+        # last_evaluated_at, which also counts failed attempts.
+        "collection": scan.get("collection"),
+        "collection_complete": scan.get("collection_complete", True),
+        "last_successful_collection_at": _scan_last_successful_collection_at(
+            scan, catalog, ticker, is_live, just_fetched=live_fetch),
     }
 
 
@@ -2173,8 +2227,17 @@ def _ticker_ohlc_impl(ticker: str, timeframe: str, limit: int, range: Optional[s
         # live_uw_adapter.stock_ohlc()'s docstring for the full bug
         # writeup.
         ohlc = adapter.get_ohlc(ticker, timeframe=timeframe, limit=limit, window=range)
-        flow_alerts = adapter.get_flow_alerts(ticker)
-        darkpool_trades = adapter.get_darkpool_trades(ticker)
+        flow_collection = adapter.collect_flow_alerts(ticker)
+        darkpool_collection = adapter.collect_darkpool_trades(ticker)
+        flow_alerts = flow_collection["rows"]
+        darkpool_trades = darkpool_collection["rows"]
+        # Marker provenance: this chart's markers come from THIS fetch; a
+        # failed source is disclosed, never shown as "no activity".
+        marker_sources = {
+            "origin": "live_fetch",
+            "options_flow": collection_summary(flow_collection),
+            "darkpool": collection_summary(darkpool_collection),
+        }
         candles = ohlc.get("candles", [])
         unavailable = ohlc.get("unavailable", False)
         reason = ohlc.get("reason")
@@ -2213,6 +2276,14 @@ def _ticker_ohlc_impl(ticker: str, timeframe: str, limit: int, range: Optional[s
         flow_alerts = catalog.get_cached_flow_observations(ticker)
         darkpool_trades = catalog.get_cached_darkpool_observations(ticker)
         cached_at = catalog.get_price_bars_cached_at(ticker, timeframe)
+        # Marker provenance: a cache read shows EVERY cataloged observation
+        # for this ticker (all scans/refreshes so far), which is generally a
+        # wider set than any single signal evaluation's snapshot.
+        marker_sources = {
+            "origin": "catalog",
+            "options_flow": {"row_count": len(flow_alerts)},
+            "darkpool": {"row_count": len(darkpool_trades)},
+        }
         # Honest: an empty cache is reported as genuinely unavailable
         # (never fabricated/padded), with a reason that makes clear this
         # is a "nothing cataloged yet" state, not a real UW-side failure
@@ -2315,6 +2386,7 @@ def _ticker_ohlc_impl(ticker: str, timeframe: str, limit: int, range: Optional[s
         # show a scoped "refresh last bar" affordance even when the
         # range is otherwise fully cached/satisfied.
         "latest_bar_is_final": latest_bar_is_final,
+        "marker_sources": marker_sources,
     }
 
 

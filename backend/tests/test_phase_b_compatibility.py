@@ -116,6 +116,9 @@ EXPECTED_TICKER_ANALYSIS_KEYS = {
     "confidence_reason", "qualifies", "qualifying_days_count", "gates", "headline",
     "current_read", "evidence", "stock_state", "history", "raw",
     "eval_freshness", "last_evaluated_at", "served_from_cache",
+    # Signal-integrity remediation: per-source collection status and the
+    # last SUCCESSFUL collection time (distinct from last_evaluated_at).
+    "collection", "collection_complete", "last_successful_collection_at",
 }
 
 EXPECTED_RADAR_KEYS = {
@@ -204,7 +207,7 @@ def test_ticker_analysis_response_identical_whether_ingestion_succeeds_or_is_bro
     # asserted equal, by design.
     body_ok.pop("last_evaluated_at", None)
     body_broken.pop("last_evaluated_at", None)
-    assert body_ok == body_broken
+    assert _strip_collection_timestamps(body_ok) == _strip_collection_timestamps(body_broken)
 
 
 def test_radar_response_shape_unaffected_when_ingestion_catalog_write_is_paused(app_main, monkeypatch):
@@ -264,4 +267,23 @@ def test_radar_response_shape_unaffected_when_ingestion_catalog_write_is_paused(
     # the equality check below, which covers everything else.
     body_ok.pop("last_scan_at", None)
     body_paused.pop("last_scan_at", None)
-    assert body_paused == body_ok
+    assert _strip_collection_timestamps(body_paused) == _strip_collection_timestamps(body_ok)
+
+
+def _strip_collection_timestamps(body):
+    """Collection retrieved_at / last_successful_collection_at are genuine
+    per-call wall-clock timestamps (same exclusion class as
+    last_evaluated_at / last_scan_at): drop them before comparing two
+    separate live calls for equality."""
+    def scrub(entry):
+        if isinstance(entry, dict):
+            entry.pop("last_successful_collection_at", None)
+            for c in (entry.get("collection") or {}).values():
+                if isinstance(c, dict):
+                    c.pop("retrieved_at", None)
+        return entry
+    scrub(body)
+    for key in ("highest", "other"):
+        for e in body.get(key) or []:
+            scrub(e)
+    return body

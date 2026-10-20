@@ -725,7 +725,9 @@ class IngestionCatalog:
                 "INSERT OR IGNORE INTO signal_evaluations "
                 "(source_id, ticker, event_time, retrieved_at, state, confidence, engine_rule_version, raw_json) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (source_id, ticker, event_time, retrieved_at, scan.get("state"),
+                # NO_STATE: an evaluation attempt whose collection failed for a
+                # ticker with no lifecycle record yet (state stays None in raw_json).
+                (source_id, ticker, event_time, retrieved_at, scan.get("state") or "NO_STATE",
                  scan.get("confidence"), engine_rule_version, json.dumps(scan, default=str)),
             )
             row = conn.execute(
@@ -989,6 +991,20 @@ class IngestionCatalog:
                 "transition_rule": raw.get("transition_rule"),
             })
         return result
+
+    def get_last_successful_collection_at(self, ticker: str) -> Optional[str]:
+        """collected_at of the newest evaluation whose data collection was
+        explicitly complete. Evaluations recorded before collection status
+        existed carry no such flag and are NOT counted (their completeness
+        is unknown -- the pre-remediation adapter turned failures into
+        empty lists)."""
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT MAX(json_extract(raw_json, '$.collected_at')) FROM signal_evaluations "
+                "WHERE ticker = ? AND json_extract(raw_json, '$.collection_complete') = 1",
+                (ticker,),
+            ).fetchone()
+        return row[0] if row and row[0] else None
 
     def get_latest_signal_evaluation(self, ticker: str) -> Optional[dict]:
         with self._conn() as conn:

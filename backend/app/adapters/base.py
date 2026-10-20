@@ -8,7 +8,50 @@ core/signal_engine.py gate logic run unmodified on either one.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from datetime import datetime, timezone
 from typing import Optional
+
+# --- Collection status (signal-integrity remediation, audit B4/E9) ---------
+#
+# A provider failure (HTTP 429/5xx, timeout, malformed body, unentitled or
+# unauthorized endpoint, open circuit breaker) must NEVER be indistinguishable
+# from "UW answered and there was genuinely nothing". Every collect_* method
+# returns one of these dicts; only status == "ok" means the rows are a real,
+# complete answer from the provider.
+COLLECTION_OK = "ok"
+COLLECTION_FAILURE_STATUSES = (
+    "error", "rate_limited", "unauthorized", "unavailable_on_tier", "malformed", "circuit_open",
+)
+
+
+def collection_result(status: str, rows: Optional[list] = None, record: Optional[dict] = None,
+                      detail: Optional[str] = None, http_status: Optional[int] = None,
+                      source: Optional[str] = None, dropped_rows: int = 0) -> dict:
+    return {
+        "status": status,
+        "ok": status == COLLECTION_OK,
+        "rows": list(rows or []),
+        "record": record,
+        "retrieved_at": datetime.now(timezone.utc).isoformat(),
+        "detail": detail,
+        "http_status": http_status,
+        "source": source,
+        "dropped_rows": dropped_rows,
+    }
+
+
+def collection_summary(result: dict) -> dict:
+    """The persisted/API-facing view of one collection: never the rows."""
+    return {
+        "status": result.get("status"),
+        "ok": bool(result.get("ok")),
+        "retrieved_at": result.get("retrieved_at"),
+        "row_count": len(result.get("rows") or []) if result.get("record") is None else (1 if result.get("record") else 0),
+        "detail": result.get("detail"),
+        "http_status": result.get("http_status"),
+        "source": result.get("source"),
+        "dropped_rows": result.get("dropped_rows", 0),
+    }
 
 
 class UWDataAdapter(ABC):
@@ -70,6 +113,23 @@ class UWDataAdapter(ABC):
         scan_service pipeline for that one ticker -- this method itself
         does none of that."""
         raise NotImplementedError
+
+    # --- status-carrying collection (preferred by the scan pipeline) -----
+    # Defaults wrap the list-returning methods above for adapters (the
+    # synthetic/demo one) whose data source cannot fail transiently.
+    collection_source = "adapter"
+
+    def collect_flow_alerts(self, ticker: str) -> dict:
+        return collection_result(COLLECTION_OK, rows=self.get_flow_alerts(ticker), source=self.collection_source)
+
+    def collect_darkpool_trades(self, ticker: str) -> dict:
+        return collection_result(COLLECTION_OK, rows=self.get_darkpool_trades(ticker), source=self.collection_source)
+
+    def collect_stock_state(self, ticker: str) -> dict:
+        record = self.get_stock_state(ticker)
+        if isinstance(record, dict) and record.get("unavailable"):
+            return collection_result("error", detail="stock state unavailable", source=self.collection_source)
+        return collection_result(COLLECTION_OK, record=record, source=self.collection_source)
 
     def get_catalyst_identified(self, ticker: str) -> bool:
         """Whether a real catalyst has been explicitly identified for this
