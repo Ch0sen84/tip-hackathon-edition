@@ -1,8 +1,9 @@
 """Loader for the recorded real-UW fixture (fixtures/recorded_uw/).
 
 Tests that need it call `require()`, which skips when the file is absent
-(it is real third-party market data and may be excluded from a public
-distribution -- see that directory's README)."""
+(it is real third-party market data and is NOT distributed publicly -- see
+that directory's README). Public end-to-end coverage uses the synthetic
+fixture (SYNTHETIC_FIXTURE) instead."""
 from __future__ import annotations
 
 import gzip
@@ -13,6 +14,8 @@ from pathlib import Path
 import pytest
 
 FIXTURE = Path(__file__).resolve().parents[2] / "fixtures" / "recorded_uw" / "uw_capture_2026-10-15_17.json.gz"
+# public, fully synthetic replay fixture (tools/build_synthetic_uw_fixture.py)
+SYNTHETIC_FIXTURE = Path(__file__).resolve().parents[2] / "fixtures" / "synthetic_uw" / "synthetic_capture.json.gz"
 
 
 def available() -> bool:

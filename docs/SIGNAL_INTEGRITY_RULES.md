@@ -48,11 +48,22 @@ No confidence value is calibrated or predictive (see [TRADING_VALIDITY.md](TRADI
   earlier **complete** sessions. Each earlier session is cut at its own close on early-close days.
 - **Pass condition** (thresholds unchanged from Phase C): ratio ≥ 3× the mean **and** percentile ≥ 0.95.
 - **Otherwise** `insufficient` (missing history or unverified coverage) or `fail`.
-- **Coverage must be proven by pagination, never assumed.** Each page's cursor and date scoping are checked;
-  coverage reaches the open only when a row at or before the open is seen; an empty first page proves
-  nothing. A provider failure leaves coverage unchanged.
+- **Coverage must be proven by pagination, never assumed** (contract verified live:
+  [UW_PAGINATION_VERIFICATION.md](UW_PAGINATION_VERIFICATION.md)).
+  - Every request is a **bounded window** (`newer_than` / `older_than`). A page shorter than the limit,
+    including an empty one, proves the window exhausted. So a quiet or thin session can be complete without
+    a print at the open.
+  - Each page's bounds, session date and cursor progress are checked.
+  - Statuses (with reason codes):
+    - `complete`
+    - `partial`: `session_in_progress`, `page_budget_exhausted`
+    - `unknown`: `bounds_not_honored`, `wrong_session_date`, `cursor_stuck`, `catalog_write_failed`
+    - `unavailable`: `provider_history_cutoff`, `not_entitled`
+  - A transient provider failure leaves coverage unchanged.
+  - Sessions before a ticker's first observed activity (pre-listing) are excluded from the baseline.
 - **No look-ahead.** Only sessions strictly before the evidence session are eligible.
-- **Data hygiene.** Dark-pool prints are deduplicated by UW `tracking_id`; canceled prints are excluded.
+- **Data hygiene.** Dark-pool prints are identified by `(tracking_id, executed_at, price, size, volume)`.
+  UW `tracking_id` alone is **not** unique (verified live). Canceled prints are excluded.
 - **How coverage grows:**
   - every Live refresh (small page budget for the evidence session),
   - each evaluating scheduler cycle (bounded, rotating watchlist backfill),
@@ -95,8 +106,8 @@ No confidence value is calibrated or predictive (see [TRADING_VALIDITY.md](TRADI
 ## Known limitations
 - **HIGH/CONFIRMED in Live** requires ≥ 20 complete prior sessions of verified coverage for *both* real
   gates. A fresh install, or the recorded 2026-10-15..17 capture, honestly yields `insufficient`.
-- **`older_than` on flow-alerts** is UW-documented but not live-verified by this project. If UW ignores it,
-  the collector marks coverage `unknown` and the options gate stays `insufficient`, rather than guessing.
-- **Thinly traded tickers:** the oldest available session, or a ticker with no pre-open dark-pool print,
-  cannot be proven complete. That is a conservative choice.
+- **Pagination semantics** for both endpoints were verified with 10 bounded live requests (2026-10-20). If
+  UW ever changes them, the per-page checks mark coverage `unknown` rather than guessing.
+- **Basic plan rate limits and the exact history cutoff** were not probed (≥ ~30 sessions verified
+  accessible).
 - **`catalyst_identified` is unsupported in Live** (no verification workflow).

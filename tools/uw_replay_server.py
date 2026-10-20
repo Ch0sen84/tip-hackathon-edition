@@ -48,7 +48,10 @@ from urllib.parse import parse_qs, unquote, urlparse
 from zoneinfo import ZoneInfo
 
 NY = ZoneInfo("America/New_York")
-DEFAULT_FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "recorded_uw" / "uw_capture_2026-10-15_17.json.gz"
+_ROOT = Path(__file__).resolve().parents[1]
+PRIVATE_FIXTURE = _ROOT / "fixtures" / "recorded_uw" / "uw_capture_2026-10-15_17.json.gz"   # private, git-ignored
+SYNTHETIC_FIXTURE = _ROOT / "fixtures" / "synthetic_uw" / "synthetic_capture.json.gz"     # public, constructed
+DEFAULT_FIXTURE = PRIVATE_FIXTURE if PRIVATE_FIXTURE.exists() else SYNTHETIC_FIXTURE
 
 
 def _ts(v):
@@ -60,6 +63,8 @@ class ReplayData:
         with gzip.open(fixture, "rt", encoding="utf-8") as fh:
             data = json.load(fh)
         self.as_of = as_of
+        self.provenance = data.get("provenance") or {}
+        self.tickers = sorted({s["ticker"] for s in data["scans"]})
         self.darkpool, self.flow = {}, {}
         for r in data["darkpool"].values():
             if r.get("executed_at") and _ts(r["executed_at"]) <= as_of:
@@ -127,6 +132,10 @@ def make_handler(data: ReplayData, state: dict):
             q = {k: v[0] for k, v in parse_qs(u.query).items()}
             if u.path == "/__control/calls":
                 return self._send(200, {"calls": state["calls"]})
+            if u.path == "/__control/info":
+                return self._send(200, {"as_of": data.as_of.isoformat(), "tickers": data.tickers,
+                                        "bar_tickers": sorted(data.bars), "synthetic":
+                                        data.provenance.get("contains_real_market_data") is False})
             state["calls"].append(self.path)
             for frag, code in state["fail"].items():
                 if frag in self.path:

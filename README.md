@@ -688,6 +688,21 @@ degrading or raising the documented way, all via `monkeypatch` on
 `subprocess.run`, no network or real `mcp` SDK/venv required for the suite
 to pass.
 
+### Signal-integrity, replay and network safety
+
+- The pytest suite refuses any non-loopback network connection (`backend/tests/conftest.py`);
+  set `TIP_ALLOW_LIVE_NETWORK_TESTS=1` only for a deliberate, bounded live check.
+- End-to-end Live-mode tests replay data over a real local socket with
+  `tools/uw_replay_server.py`, which implements the live-verified UW pagination
+  semantics (`docs/UW_PAGINATION_VERIFICATION.md`):
+  - **public:** `fixtures/synthetic_uw/` (fully synthetic) --
+    `backend/tests/test_e2e_live_replay_synthetic.py`, `frontend/test_e2e_live_replay_cdp.py`;
+  - **private, optional:** a locally built real capture in `fixtures/recorded_uw/`
+    (git-ignored, never distributed). Tests that need it skip when it is absent.
+- Browser end-to-end: start `tools/uw_replay_server.py --as-of 2026-10-16T15:02:30Z`, a
+  backend with `UW_BASE_URL=http://127.0.0.1:<replay port>`, `TIP_REPLAY_CLOCK=2026-10-16T15:02:30Z`
+  and matching `BIND_PORT`, then run `frontend/test_e2e_live_replay_cdp.py`.
+
 ## Fixtures
 
 See `fixtures/README_SYNTHETIC.md`. Every `scenario_*.json` file there is

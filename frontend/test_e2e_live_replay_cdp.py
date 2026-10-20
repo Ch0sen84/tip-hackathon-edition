@@ -30,7 +30,9 @@ CHROME = os.environ.get("CHROME_BIN", "chromium")
 BASE = os.environ.get("TIP_TEST_BASE", "http://127.0.0.1:18766")
 REPLAY = os.environ.get("TIP_REPLAY_URL", "http://127.0.0.1:18901")
 SHOTS = pathlib.Path(os.environ.get("TIP_SCREENSHOT_DIR", tempfile.mkdtemp(prefix="tip-e2e-shots-")))
-WATCH = ["SPY", "QQQ", "NVDA", "TSLA", "PLTR"]
+# Tickers come from the replay itself (/__control/info): the PUBLIC synthetic
+# fixture (SYNP/SYNC/SYNQ) or, when present locally, the PRIVATE recorded one.
+INFO = {}
 
 passed = failed = 0
 
@@ -61,13 +63,20 @@ def setup():
     http("POST", f"{BASE}/api/settings/uw-key", {"api_key": "replay-ui-key"}, token)
     assert http("POST", f"{BASE}/api/settings/uw-key/test", {}, token)["result"] == "success"
     http("POST", f"{BASE}/api/settings/mode", {"mode": "live"}, token)
-    http("PUT", f"{BASE}/api/settings/watchlist", {"watchlist": WATCH}, token)
+    http("PUT", f"{BASE}/api/settings/watchlist", {"watchlist": INFO["watch"]}, token)
     radar = http("POST", f"{BASE}/api/radar/refresh", {}, token)
-    http("POST", f"{BASE}/api/ticker/NVDA/ohlc/refresh?range=1M", {}, token)
+    http("POST", f"{BASE}/api/ticker/{INFO['chart']}/ohlc/refresh?range=1M", {}, token)
     return token, radar
 
 
 def main():
+    info = http("GET", f"{REPLAY}/__control/info")
+    tick = info["tickers"]
+    INFO.update(watch=tick[:5],
+                detail="PLTR" if "PLTR" in tick else "SYNP",
+                chart="NVDA" if "NVDA" in info["bar_tickers"] else info["bar_tickers"][0],
+                outage="SPY" if "SPY" in tick else "SYNC")
+    print(f"replay fixture: {'SYNTHETIC (public)' if info['synthetic'] else 'RECORDED (private)'}; tickers {INFO['watch']}")
     health = http("GET", f"{BASE}/api/health")
     check("backend is pinned to the replay clock (recorded data, loopback UW)", bool(health.get("replay_clock")), health)
     token, radar = setup()
@@ -130,9 +139,9 @@ def main():
                   "No active qualification" in body and "Not evaluated" not in body, body[:600])
             check("radar shows the insufficient-evidence note", "insufficient evidence" in body, body[:600])
             check("radar never shows HIGH/CONFIRMED on recorded data", "CONFIRMED" not in body and "HIGH" not in body)
-            shot("radar_recorded")
+            shot("radar")
 
-            call("Page.navigate", {"url": f"{BASE}/#view=ticker&ticker=PLTR"})
+            call("Page.navigate", {"url": f"{BASE}/#view=ticker&ticker={INFO['detail']}"})
             detail = wait_for("#tickerDetail", "Last successful data collection")
             check("ticker header distinguishes Last evaluated vs Last successful data collection",
                   "Last evaluated" in detail and "Last successful data collection" in detail, detail[:600])
@@ -148,9 +157,9 @@ def main():
                   "trailing 30-day window" not in detail and "Not computed in Live Mode" in detail)
             check("no 'trustworthy' or 'statistical anomaly' claims rendered",
                   "trustworthy" not in detail and "statistical anomaly" not in detail)
-            shot("ticker_pltr_recorded")
+            shot("ticker_detail")
 
-            call("Page.navigate", {"url": f"{BASE}/#view=ticker&ticker=NVDA"})
+            call("Page.navigate", {"url": f"{BASE}/#view=ticker&ticker={INFO['chart']}"})
             prov = wait_for("#chartMarkerProvenance", "Markers:")
             check("chart marker provenance line is rendered", prov.startswith("Markers:"), prov)
 
@@ -159,7 +168,7 @@ def main():
             # already be current at the pinned replay clock, in which case the
             # collector correctly makes no new request for them).
             http("POST", f"{REPLAY}/__control/fail?path=stock-state&status=503")
-            call("Page.navigate", {"url": f"{BASE}/#view=ticker&ticker=SPY"})
+            call("Page.navigate", {"url": f"{BASE}/#view=ticker&ticker={INFO['outage']}"})
             wait_for("#tickerDetail", "Refresh this ticker")   # rendered, not the "Loading SPY..." placeholder
             call("Runtime.evaluate", {"expression": "document.getElementById('tickerRefreshBtn') && document.getElementById('tickerRefreshBtn').click()"})
             failed_txt = wait_for("#tickerDetail", "Data collection failed", timeout=60)
@@ -172,7 +181,7 @@ def main():
                   "Collection failed for: stock state" in failed_txt and "state held" in failed_txt, failed_txt[-1500:])
             check("price confirmation reports unavailable data, not a negative observation",
                   "Price data could not be collected this scan" in failed_txt, failed_txt[-1500:])
-            shot("ticker_spy_outage")
+            shot("ticker_outage")
             http("POST", f"{REPLAY}/__control/reset")
     finally:
         proc.terminate()

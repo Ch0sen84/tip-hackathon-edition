@@ -33,11 +33,10 @@ a real installation. Each step needs explicit owner approval.
      `TIP_BASELINE_BACKFILL_TICKERS_PER_CYCLE`, `TIP_BASELINE_LOOKBACK_SESSIONS`.
 
 ## Pre-release checklist (needs approval)
-- [ ] Decide whether `fixtures/recorded_uw/` (real UW data, commit `8015621`) may be published. If not, drop
-      that commit before pushing; tests that need it skip cleanly.
-- [ ] One bounded, approved live verification run with a real key, to confirm UW honours `older_than` on
-      flow-alerts and `date` + `older_than` on dark pool. The collector already marks coverage `unknown` if
-      not, so this verifies capability rather than correctness.
+- [x] Real UW data excluded from the release branch's entire history (`release/signal-integrity-rc`);
+      the private capture is git-ignored; public tests use the synthetic fixture.
+- [x] Bounded live verification of UW pagination (10 requests, 2026-10-20; see
+      [UW_PAGINATION_VERIFICATION.md](UW_PAGINATION_VERIFICATION.md)).
 - [ ] Back up the deployed volume (`tip_hackathon.db`, `settings.json`, `.auth_token`).
 - [ ] Review and merge the branch via PR (not a direct push to main).
 
