@@ -143,5 +143,31 @@
   "available_span_days": null,
   "raw_records_requested": null,
   "raw_records_returned": null,
-  "regular_session_records_retained": null
+  "regular_session_records_retained": null,
+  "served_from_cache": false,
+  "cached_at": null,
+  "latest_bar_is_final": null,
+  "marker_sources": {
+    "origin": "live_fetch",
+    "options_flow": {
+      "status": "ok",
+      "ok": true,
+      "retrieved_at": "2026-10-20T03:31:22.782647+00:00",
+      "row_count": 1,
+      "detail": null,
+      "http_status": null,
+      "source": "synthetic_fixture",
+      "dropped_rows": 0
+    },
+    "darkpool": {
+      "status": "ok",
+      "ok": true,
+      "retrieved_at": "2026-10-20T03:31:22.782647+00:00",
+      "row_count": 1,
+      "detail": null,
+      "http_status": null,
+      "source": "synthetic_fixture",
+      "dropped_rows": 0
+    }
+  }
 }

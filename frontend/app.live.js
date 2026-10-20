@@ -436,6 +436,8 @@ async function loadOhlcChart(ticker, range, mySeq) {
     const ohlc = await apiGet(`/api/ticker/${encodeURIComponent(ticker)}/ohlc?range=${encodeURIComponent(range)}`);
     if (mySeq !== _navSeq) return;
     mountCandlestickChart("ohlcChartContainer", ohlc, { showLoadButton: true });
+    const provEl = document.getElementById("chartMarkerProvenance");
+    if (provEl) provEl.textContent = markerProvenanceText(ohlc);
     if (!noteEl) { wireLoadChartDataButton(ticker, range, mySeq); return; }
     const unit = range === "1D" ? "5-minute bar(s)" : "trading day(s)";
     // 2026-10-15 (Chad's item #4): real raw-record disclosure, not just
@@ -555,6 +557,8 @@ function wireLoadChartDataButton(ticker, range, mySeq) {
         const kind = range === "1D" ? "5-minute candles (pre/regular/post-market)" : "daily candles";
         noteEl.textContent = `${range} \u00b7 ${ohlc.candle_count} ${kind} (just loaded)`;
       }
+      const provEl = document.getElementById("chartMarkerProvenance");
+      if (provEl) provEl.textContent = markerProvenanceText(ohlc);
     } catch (err) {
       if (mySeq !== _navSeq) return;
       if (statusEl && statusEl.isConnected) {

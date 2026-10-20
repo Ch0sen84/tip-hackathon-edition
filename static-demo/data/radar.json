@@ -5,7 +5,6 @@
       "name": null,
       "families": [
         "dark_pool",
-        "synthetic_baseline",
         "options"
       ],
       "evidence": [
@@ -16,16 +15,10 @@
           "short": "Dark pool ~3.8x recent average (short history)"
         },
         {
-          "family": "synthetic_baseline",
-          "text": "Synthetic baseline estimate: 98% (static premium-size model, not real historical data) -- this is a static estimator built into this demo build, not a real trailing-history comparison.",
-          "key": false,
-          "short": "Synthetic baseline estimate: 98% (static premium-size model, not real historical data)"
-        },
-        {
           "family": "lifecycle",
-          "text": "TIP signal state NEW",
+          "text": "TIP signal state CONFIRMED",
           "key": false,
-          "short": "TIP signal state NEW"
+          "short": "TIP signal state CONFIRMED"
         },
         {
           "family": "price",
@@ -34,8 +27,8 @@
           "short": "Price +2.1% at 214.10"
         }
       ],
-      "current_read": "Dark-pool activity well above normal; stock rose 2.1%; a synthetic baseline estimate also flagged elevated premium, but it carries no decision weight.",
-      "headline": "Dark pool ~3.8x recent average (short history) \u00b7 Options flow anomaly \u00b7 Synthetic baseline estimate: 98% (static premium-size model, not real historical data)",
+      "current_read": "Dark-pool activity well above normal; stock rose 2.1%.",
+      "headline": "Dark pool ~3.8x recent average (short history) \u00b7 Options flow anomaly",
       "label": "MULTI-SOURCE",
       "categories": [
         "dark_pool",
@@ -49,11 +42,47 @@
         "chg_pct": 2.1,
         "last": 214.1
       },
-      "state": "NEW",
+      "state": "CONFIRMED",
       "confidence": "high",
       "signal_type": "multi-signal",
-      "qualifying_days_count": 0,
-      "history_states": []
+      "qualifying_days_count": 1,
+      "transition_rule": "opened_confirmed_two_independent_categories",
+      "history_states": [],
+      "eval_freshness": "current",
+      "last_evaluated_at": null,
+      "collection": {
+        "options_flow": {
+          "status": "ok",
+          "ok": true,
+          "retrieved_at": "2026-10-20T03:31:44.788306+00:00",
+          "row_count": 1,
+          "detail": null,
+          "http_status": null,
+          "source": "synthetic_fixture",
+          "dropped_rows": 0
+        },
+        "darkpool": {
+          "status": "ok",
+          "ok": true,
+          "retrieved_at": "2026-10-20T03:31:44.788306+00:00",
+          "row_count": 1,
+          "detail": null,
+          "http_status": null,
+          "source": "synthetic_fixture",
+          "dropped_rows": 0
+        },
+        "stock_state": {
+          "status": "ok",
+          "ok": true,
+          "retrieved_at": "2026-10-20T03:31:44.788306+00:00",
+          "row_count": 1,
+          "detail": null,
+          "http_status": null,
+          "source": "synthetic_fixture",
+          "dropped_rows": 0
+        }
+      },
+      "last_successful_collection_at": "2026-10-20T03:31:44.788306+00:00"
     },
     {
       "ticker": "CATX",
@@ -71,9 +100,9 @@
         },
         {
           "family": "lifecycle",
-          "text": "TIP signal state NEW",
+          "text": "TIP signal state CONFIRMED",
           "key": false,
-          "short": "TIP signal state NEW"
+          "short": "TIP signal state CONFIRMED"
         },
         {
           "family": "price",
@@ -97,11 +126,47 @@
         "chg_pct": 2.4,
         "last": 28.05
       },
-      "state": "NEW",
+      "state": "CONFIRMED",
       "confidence": "high",
       "signal_type": "multi-signal",
-      "qualifying_days_count": 0,
-      "history_states": []
+      "qualifying_days_count": 1,
+      "transition_rule": "opened_confirmed_two_independent_categories",
+      "history_states": [],
+      "eval_freshness": "current",
+      "last_evaluated_at": null,
+      "collection": {
+        "options_flow": {
+          "status": "ok",
+          "ok": true,
+          "retrieved_at": "2026-10-20T03:31:44.788306+00:00",
+          "row_count": 1,
+          "detail": null,
+          "http_status": null,
+          "source": "synthetic_fixture",
+          "dropped_rows": 0
+        },
+        "darkpool": {
+          "status": "ok",
+          "ok": true,
+          "retrieved_at": "2026-10-20T03:31:44.788306+00:00",
+          "row_count": 0,
+          "detail": null,
+          "http_status": null,
+          "source": "synthetic_fixture",
+          "dropped_rows": 0
+        },
+        "stock_state": {
+          "status": "ok",
+          "ok": true,
+          "retrieved_at": "2026-10-20T03:31:44.788306+00:00",
+          "row_count": 1,
+          "detail": null,
+          "http_status": null,
+          "source": "synthetic_fixture",
+          "dropped_rows": 0
+        }
+      },
+      "last_successful_collection_at": "2026-10-20T03:31:44.788306+00:00"
     }
   ],
   "other": [
@@ -148,27 +213,56 @@
       "state": "BUILDING",
       "confidence": "medium",
       "signal_type": "single-signal-dark-pool",
-      "qualifying_days_count": 2,
+      "qualifying_days_count": 3,
+      "transition_rule": "still_single_signal",
       "history_states": [
         "NEW",
         "BUILDING",
         "BUILDING"
-      ]
+      ],
+      "eval_freshness": "current",
+      "last_evaluated_at": null,
+      "collection": {
+        "options_flow": {
+          "status": "ok",
+          "ok": true,
+          "retrieved_at": "2026-10-20T03:31:44.789836+00:00",
+          "row_count": 0,
+          "detail": null,
+          "http_status": null,
+          "source": "synthetic_fixture",
+          "dropped_rows": 0
+        },
+        "darkpool": {
+          "status": "ok",
+          "ok": true,
+          "retrieved_at": "2026-10-20T03:31:44.789836+00:00",
+          "row_count": 1,
+          "detail": null,
+          "http_status": null,
+          "source": "synthetic_fixture",
+          "dropped_rows": 0
+        },
+        "stock_state": {
+          "status": "ok",
+          "ok": true,
+          "retrieved_at": "2026-10-20T03:31:44.789836+00:00",
+          "row_count": 1,
+          "detail": null,
+          "http_status": null,
+          "source": "synthetic_fixture",
+          "dropped_rows": 0
+        }
+      },
+      "last_successful_collection_at": "2026-10-20T03:31:44.789836+00:00"
     },
     {
       "ticker": "VOLX",
       "name": null,
       "families": [
-        "synthetic_baseline",
         "options"
       ],
       "evidence": [
-        {
-          "family": "synthetic_baseline",
-          "text": "Synthetic baseline estimate: 98% (static premium-size model, not real historical data) -- this is a static estimator built into this demo build, not a real trailing-history comparison.",
-          "key": false,
-          "short": "Synthetic baseline estimate: 98% (static premium-size model, not real historical data)"
-        },
         {
           "family": "lifecycle",
           "text": "TIP signal state BUILDING",
@@ -182,8 +276,8 @@
           "short": "Price +1.9% at 155.10"
         }
       ],
-      "current_read": "Unusual options volume; stock rose 1.9%; a synthetic baseline estimate also flagged elevated premium, but it carries no decision weight; no second independent category corroborates this yet.",
-      "headline": "Options flow anomaly \u00b7 Synthetic baseline estimate: 98% (static premium-size model, not real historical data)",
+      "current_read": "Unusual options volume; stock rose 1.9%; no second independent category corroborates this yet.",
+      "headline": "Options flow anomaly",
       "label": "OPTIONS",
       "categories": [
         "options"
@@ -199,19 +293,54 @@
       "state": "BUILDING",
       "confidence": "medium",
       "signal_type": "single-signal-options-flow",
-      "qualifying_days_count": 2,
+      "qualifying_days_count": 3,
+      "transition_rule": "still_single_signal",
       "history_states": [
         "NEW",
         "BUILDING",
         "BUILDING"
-      ]
+      ],
+      "eval_freshness": "current",
+      "last_evaluated_at": null,
+      "collection": {
+        "options_flow": {
+          "status": "ok",
+          "ok": true,
+          "retrieved_at": "2026-10-20T03:31:44.789836+00:00",
+          "row_count": 1,
+          "detail": null,
+          "http_status": null,
+          "source": "synthetic_fixture",
+          "dropped_rows": 0
+        },
+        "darkpool": {
+          "status": "ok",
+          "ok": true,
+          "retrieved_at": "2026-10-20T03:31:44.789836+00:00",
+          "row_count": 0,
+          "detail": null,
+          "http_status": null,
+          "source": "synthetic_fixture",
+          "dropped_rows": 0
+        },
+        "stock_state": {
+          "status": "ok",
+          "ok": true,
+          "retrieved_at": "2026-10-20T03:31:44.789836+00:00",
+          "row_count": 1,
+          "detail": null,
+          "http_status": null,
+          "source": "synthetic_fixture",
+          "dropped_rows": 0
+        }
+      },
+      "last_successful_collection_at": "2026-10-20T03:31:44.789836+00:00"
     },
     {
       "ticker": "QRVX",
       "name": null,
       "families": [
-        "dark_pool",
-        "synthetic_baseline"
+        "dark_pool"
       ],
       "evidence": [
         {
@@ -219,12 +348,6 @@
           "text": "Dark pool ~6.4x its recent average; short history",
           "key": true,
           "short": "Dark pool ~6.4x recent average (short history)"
-        },
-        {
-          "family": "synthetic_baseline",
-          "text": "Synthetic baseline estimate: 98% (static premium-size model, not real historical data) -- this is a static estimator built into this demo build, not a real trailing-history comparison.",
-          "key": false,
-          "short": "Synthetic baseline estimate: 98% (static premium-size model, not real historical data)"
         },
         {
           "family": "lifecycle",
@@ -239,8 +362,8 @@
           "short": "Price +0.3% at 70.40"
         }
       ],
-      "current_read": "Dark-pool activity well above normal; no corresponding price response; a synthetic baseline estimate also flagged elevated premium, but it carries no decision weight; no second independent category corroborates this yet.",
-      "headline": "Dark pool ~6.4x recent average (short history) \u00b7 Synthetic baseline estimate: 98% (static premium-size model, not real historical data)",
+      "current_read": "Dark-pool activity well above normal; no corresponding price response; no second independent category corroborates this yet.",
+      "headline": "Dark pool ~6.4x recent average (short history)",
       "label": "DARK POOL",
       "categories": [
         "dark_pool"
@@ -256,8 +379,44 @@
       "state": "NEW",
       "confidence": "medium",
       "signal_type": "single-signal-dark-pool",
-      "qualifying_days_count": 0,
-      "history_states": []
+      "qualifying_days_count": 1,
+      "transition_rule": "first_qualifying_gate",
+      "history_states": [],
+      "eval_freshness": "current",
+      "last_evaluated_at": null,
+      "collection": {
+        "options_flow": {
+          "status": "ok",
+          "ok": true,
+          "retrieved_at": "2026-10-20T03:31:44.789836+00:00",
+          "row_count": 0,
+          "detail": null,
+          "http_status": null,
+          "source": "synthetic_fixture",
+          "dropped_rows": 0
+        },
+        "darkpool": {
+          "status": "ok",
+          "ok": true,
+          "retrieved_at": "2026-10-20T03:31:44.789836+00:00",
+          "row_count": 1,
+          "detail": null,
+          "http_status": null,
+          "source": "synthetic_fixture",
+          "dropped_rows": 0
+        },
+        "stock_state": {
+          "status": "ok",
+          "ok": true,
+          "retrieved_at": "2026-10-20T03:31:44.789836+00:00",
+          "row_count": 1,
+          "detail": null,
+          "http_status": null,
+          "source": "synthetic_fixture",
+          "dropped_rows": 0
+        }
+      },
+      "last_successful_collection_at": "2026-10-20T03:31:44.789836+00:00"
     },
     {
       "ticker": "TEPID",
@@ -302,8 +461,44 @@
       "state": "NEW",
       "confidence": "medium",
       "signal_type": "single-signal-dark-pool",
-      "qualifying_days_count": 0,
-      "history_states": []
+      "qualifying_days_count": 1,
+      "transition_rule": "first_qualifying_gate",
+      "history_states": [],
+      "eval_freshness": "current",
+      "last_evaluated_at": null,
+      "collection": {
+        "options_flow": {
+          "status": "ok",
+          "ok": true,
+          "retrieved_at": "2026-10-20T03:31:44.789836+00:00",
+          "row_count": 1,
+          "detail": null,
+          "http_status": null,
+          "source": "synthetic_fixture",
+          "dropped_rows": 0
+        },
+        "darkpool": {
+          "status": "ok",
+          "ok": true,
+          "retrieved_at": "2026-10-20T03:31:44.789836+00:00",
+          "row_count": 1,
+          "detail": null,
+          "http_status": null,
+          "source": "synthetic_fixture",
+          "dropped_rows": 0
+        },
+        "stock_state": {
+          "status": "ok",
+          "ok": true,
+          "retrieved_at": "2026-10-20T03:31:44.789836+00:00",
+          "row_count": 1,
+          "detail": null,
+          "http_status": null,
+          "source": "synthetic_fixture",
+          "dropped_rows": 0
+        }
+      },
+      "last_successful_collection_at": "2026-10-20T03:31:44.789836+00:00"
     },
     {
       "ticker": "BRNX",
@@ -342,8 +537,44 @@
       "state": "NEW",
       "confidence": "medium",
       "signal_type": "single-signal-options-flow",
-      "qualifying_days_count": 0,
-      "history_states": []
+      "qualifying_days_count": 1,
+      "transition_rule": "first_qualifying_gate",
+      "history_states": [],
+      "eval_freshness": "current",
+      "last_evaluated_at": null,
+      "collection": {
+        "options_flow": {
+          "status": "ok",
+          "ok": true,
+          "retrieved_at": "2026-10-20T03:31:44.788306+00:00",
+          "row_count": 1,
+          "detail": null,
+          "http_status": null,
+          "source": "synthetic_fixture",
+          "dropped_rows": 0
+        },
+        "darkpool": {
+          "status": "ok",
+          "ok": true,
+          "retrieved_at": "2026-10-20T03:31:44.788306+00:00",
+          "row_count": 0,
+          "detail": null,
+          "http_status": null,
+          "source": "synthetic_fixture",
+          "dropped_rows": 0
+        },
+        "stock_state": {
+          "status": "ok",
+          "ok": true,
+          "retrieved_at": "2026-10-20T03:31:44.788306+00:00",
+          "row_count": 1,
+          "detail": null,
+          "http_status": null,
+          "source": "synthetic_fixture",
+          "dropped_rows": 0
+        }
+      },
+      "last_successful_collection_at": "2026-10-20T03:31:44.788306+00:00"
     },
     {
       "ticker": "CONFL",
@@ -382,8 +613,44 @@
       "state": "NEW",
       "confidence": "medium",
       "signal_type": "single-signal-options-flow",
-      "qualifying_days_count": 0,
-      "history_states": []
+      "qualifying_days_count": 1,
+      "transition_rule": "first_qualifying_gate",
+      "history_states": [],
+      "eval_freshness": "current",
+      "last_evaluated_at": null,
+      "collection": {
+        "options_flow": {
+          "status": "ok",
+          "ok": true,
+          "retrieved_at": "2026-10-20T03:31:44.788306+00:00",
+          "row_count": 1,
+          "detail": null,
+          "http_status": null,
+          "source": "synthetic_fixture",
+          "dropped_rows": 0
+        },
+        "darkpool": {
+          "status": "ok",
+          "ok": true,
+          "retrieved_at": "2026-10-20T03:31:44.788306+00:00",
+          "row_count": 0,
+          "detail": null,
+          "http_status": null,
+          "source": "synthetic_fixture",
+          "dropped_rows": 0
+        },
+        "stock_state": {
+          "status": "ok",
+          "ok": true,
+          "retrieved_at": "2026-10-20T03:31:44.788306+00:00",
+          "row_count": 1,
+          "detail": null,
+          "http_status": null,
+          "source": "synthetic_fixture",
+          "dropped_rows": 0
+        }
+      },
+      "last_successful_collection_at": "2026-10-20T03:31:44.788306+00:00"
     },
     {
       "ticker": "ZYNC",
@@ -422,11 +689,186 @@
       "state": "NEW",
       "confidence": "medium",
       "signal_type": "single-signal-options-flow",
+      "qualifying_days_count": 1,
+      "transition_rule": "first_qualifying_gate",
+      "history_states": [],
+      "eval_freshness": "current",
+      "last_evaluated_at": null,
+      "collection": {
+        "options_flow": {
+          "status": "ok",
+          "ok": true,
+          "retrieved_at": "2026-10-20T03:31:44.789836+00:00",
+          "row_count": 2,
+          "detail": null,
+          "http_status": null,
+          "source": "synthetic_fixture",
+          "dropped_rows": 0
+        },
+        "darkpool": {
+          "status": "ok",
+          "ok": true,
+          "retrieved_at": "2026-10-20T03:31:44.789836+00:00",
+          "row_count": 0,
+          "detail": null,
+          "http_status": null,
+          "source": "synthetic_fixture",
+          "dropped_rows": 0
+        },
+        "stock_state": {
+          "status": "ok",
+          "ok": true,
+          "retrieved_at": "2026-10-20T03:31:44.789836+00:00",
+          "row_count": 1,
+          "detail": null,
+          "http_status": null,
+          "source": "synthetic_fixture",
+          "dropped_rows": 0
+        }
+      },
+      "last_successful_collection_at": "2026-10-20T03:31:44.789836+00:00"
+    },
+    {
+      "ticker": "DRFT",
+      "name": null,
+      "families": [],
+      "evidence": [
+        {
+          "family": "price",
+          "text": "Price -0.2% at 55.02",
+          "key": true,
+          "short": "Price -0.2% at 55.02"
+        }
+      ],
+      "current_read": "Unusual activity; stock little changed.",
+      "headline": "Unusual activity",
+      "label": "OTHER",
+      "categories": [],
+      "index_context": false,
+      "question": null,
+      "research": [],
+      "enriched": true,
+      "price": {
+        "chg_pct": -0.2,
+        "last": 55.02
+      },
+      "state": null,
+      "not_evaluated": false,
+      "zero_gate": true,
+      "confidence": "low",
+      "signal_type": "t1-bootstrap",
       "qualifying_days_count": 0,
-      "history_states": []
+      "transition_rule": "no_qualifying_evidence_yet",
+      "history_states": [],
+      "eval_freshness": "current",
+      "last_evaluated_at": null,
+      "collection": {
+        "options_flow": {
+          "status": "ok",
+          "ok": true,
+          "retrieved_at": "2026-10-20T03:31:44.788306+00:00",
+          "row_count": 0,
+          "detail": null,
+          "http_status": null,
+          "source": "synthetic_fixture",
+          "dropped_rows": 0
+        },
+        "darkpool": {
+          "status": "ok",
+          "ok": true,
+          "retrieved_at": "2026-10-20T03:31:44.788306+00:00",
+          "row_count": 0,
+          "detail": null,
+          "http_status": null,
+          "source": "synthetic_fixture",
+          "dropped_rows": 0
+        },
+        "stock_state": {
+          "status": "ok",
+          "ok": true,
+          "retrieved_at": "2026-10-20T03:31:44.788306+00:00",
+          "row_count": 1,
+          "detail": null,
+          "http_status": null,
+          "source": "synthetic_fixture",
+          "dropped_rows": 0
+        }
+      },
+      "last_successful_collection_at": "2026-10-20T03:31:44.788306+00:00"
+    },
+    {
+      "ticker": "NADA",
+      "name": null,
+      "families": [],
+      "evidence": [
+        {
+          "family": "price",
+          "text": "Price +0.1% at 31.10",
+          "key": true,
+          "short": "Price +0.1% at 31.10"
+        }
+      ],
+      "current_read": "Unusual activity; stock little changed.",
+      "headline": "Unusual activity",
+      "label": "OTHER",
+      "categories": [],
+      "index_context": false,
+      "question": null,
+      "research": [],
+      "enriched": true,
+      "price": {
+        "chg_pct": 0.1,
+        "last": 31.1
+      },
+      "state": null,
+      "not_evaluated": false,
+      "zero_gate": true,
+      "confidence": "low",
+      "signal_type": "none",
+      "qualifying_days_count": 0,
+      "transition_rule": "no_qualifying_evidence_yet",
+      "history_states": [],
+      "eval_freshness": "current",
+      "last_evaluated_at": null,
+      "collection": {
+        "options_flow": {
+          "status": "ok",
+          "ok": true,
+          "retrieved_at": "2026-10-20T03:31:44.788306+00:00",
+          "row_count": 1,
+          "detail": null,
+          "http_status": null,
+          "source": "synthetic_fixture",
+          "dropped_rows": 0
+        },
+        "darkpool": {
+          "status": "ok",
+          "ok": true,
+          "retrieved_at": "2026-10-20T03:31:44.788306+00:00",
+          "row_count": 1,
+          "detail": null,
+          "http_status": null,
+          "source": "synthetic_fixture",
+          "dropped_rows": 0
+        },
+        "stock_state": {
+          "status": "ok",
+          "ok": true,
+          "retrieved_at": "2026-10-20T03:31:44.788306+00:00",
+          "row_count": 1,
+          "detail": null,
+          "http_status": null,
+          "source": "synthetic_fixture",
+          "dropped_rows": 0
+        }
+      },
+      "last_successful_collection_at": "2026-10-20T03:31:44.788306+00:00"
     }
   ],
   "scanned": 11,
+  "watchlist_size": 11,
+  "evaluated_count": 11,
   "scan_scope": "watchlist",
-  "last_scan_at": 1792100165.2492068
+  "last_scan_at": 1792467104.789837,
+  "served_from_cache": false
 }

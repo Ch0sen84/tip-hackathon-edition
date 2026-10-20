@@ -2176,6 +2176,8 @@ def _ticker_analysis_impl(ticker: str, refresh: bool) -> dict:
         # last_evaluated_at, which also counts failed attempts.
         "collection": scan.get("collection"),
         "collection_complete": scan.get("collection_complete", True),
+        "evidence_session": scan.get("evidence_session"),
+        "raw_counts": scan.get("raw_counts"),
         "last_successful_collection_at": _scan_last_successful_collection_at(
             scan, catalog, ticker, is_live, just_fetched=live_fetch),
     }

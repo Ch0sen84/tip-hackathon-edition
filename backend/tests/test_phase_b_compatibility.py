@@ -119,6 +119,7 @@ EXPECTED_TICKER_ANALYSIS_KEYS = {
     # Signal-integrity remediation: per-source collection status and the
     # last SUCCESSFUL collection time (distinct from last_evaluated_at).
     "collection", "collection_complete", "last_successful_collection_at",
+    "evidence_session", "raw_counts",
 }
 
 EXPECTED_RADAR_KEYS = {

@@ -20,6 +20,9 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "backend"))
 
 os.environ["TIP_MODE"] = "demo"
+# In-process TestClient host (the Phase A Host hardening otherwise rejects
+# "testserver", which silently broke these capture tools).
+os.environ.setdefault("ALLOWED_HOST", "testserver")
 os.environ["TIP_DB_PATH"] = ":memory:"
 os.environ["TIP_SETTINGS_PATH"] = str(REPO_ROOT / ".capture_settings_tmp.json")
 os.environ["TIP_FIXTURES_DIR"] = str(REPO_ROOT / "fixtures")

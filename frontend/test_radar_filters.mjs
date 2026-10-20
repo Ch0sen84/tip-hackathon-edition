@@ -84,6 +84,9 @@ async function main() {
   });
   check("every real radar entry has a non-empty state field (regression: used to be undefined)", () => {
     for (const e of allEntries) {
+      // Signal-integrity remediation: an evaluated zero-gate ticker has no
+      // open qualification episode, so its state is honestly null.
+      if (e.zero_gate) { assert.equal(e.state, null, `${e.ticker} zero-gate entry should have no episode state`); continue; }
       assert.ok(e.state, `${e.ticker} has no state`);
       assert.ok(["NEW", "BUILDING", "CONFIRMED", "STABLE", "FADING", "INVALIDATED"].includes(e.state));
     }
