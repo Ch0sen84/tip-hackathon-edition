@@ -72,12 +72,13 @@ def env(tmp_path, monkeypatch, capsys):
         return u4()
 
     def dry_run():
-        rc = cli("rollback", *dep, "--u4", u4(), "--helper-image", fd.HELPER, "--dry-run")
+        rc = cli("rollback", *dep, "--u4", u4(), "--helper-image", fd.HELPER, "--rollback-image", fd.OLD_IMAGE, "--dry-run")
         assert rc == 0, e.last_err
         return json.loads(e.last_out)["approval_token"]
 
     def approve(token):
-        return cli("rollback", *dep, "--u4", u4(), "--helper-image", fd.HELPER, "--approve", token, "--stop")
+        return cli("rollback", *dep, "--u4", u4(), "--helper-image", fd.HELPER, "--rollback-image", fd.OLD_IMAGE,
+                   "--approve", token, "--stop")
 
     def start():
         return cli("start-rollback", *dep, "--u4", u4(), "--helper-image", fd.HELPER, "--rollback-image", fd.OLD_IMAGE,
@@ -164,7 +165,8 @@ def test_standalone_accept_failure_stops_the_container(env):
     env.restored()
     assert env.start() == 0
     env.fake.accept_output = {**env.fake.accept_output, "scheduler": "enabled"}
-    assert env.cli("accept", *env.dep, "--expect-image", fd.OLD_IMAGE, "--quiet-seconds", "0") == 2
+    assert env.cli("accept", *env.dep, "--expect-volume", env.fake.volume, "--expect-image", fd.OLD_IMAGE,
+                   "--quiet-seconds", "0") == 2
     assert not running(env.fake)
 
 

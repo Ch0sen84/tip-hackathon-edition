@@ -33,6 +33,10 @@ SQLITE_MAGIC = b"SQLite format 3\x00"
 SIDECARS = ("-wal", "-shm", "-journal")
 ACTIVE_JOB_STATES = ("running", "pause_requested", "cancel_requested")
 MIGRATION_10_OBJECTS = ("collection_diagnostics", "idx_collection_diagnostics_session")
+MIGRATION_11_OBJECTS = ("coverage_reconciliations", "idx_coverage_reconciliations_session")
+MIGRATION_11_COVERAGE_COLUMNS = ("proof_started_utc", "certified_by", "certified_at_utc", "session_rows", "max_gap_s",
+                                 "gap_flag", "reverify_trigger", "rows_before_reverify", "island_from_utc",
+                                 "island_through_utc")
 
 
 def sha256_file(path):
@@ -107,6 +111,10 @@ def examine_sqlite(root, rel):
             facts["schema_versions"] = [[r[0], r[1]] for r in
                                         c.execute("select version, name from schema_version order by version")]
         facts["migration_10_objects_present"] = sorted(o for o in MIGRATION_10_OBJECTS if o in tables)
+        cov_cols = set(facts["columns"].get("session_coverage") or [])
+        facts["migration_11_objects_present"] = sorted(
+            [o for o in MIGRATION_11_OBJECTS if o in tables]
+            + [f"session_coverage.{c}" for c in MIGRATION_11_COVERAGE_COLUMNS if c in cov_cols])
         if "scheduler_state" in tables:
             row = c.execute("select mode from scheduler_state where id = 1").fetchone()
             facts["scheduler_mode"] = row[0] if row else None

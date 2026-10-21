@@ -229,6 +229,7 @@ class SnapArgs:
 def _fake_images(monkeypatch):
     monkeypatch.setattr(r3, "require_local_image_id", lambda i, w: i)
     monkeypatch.setattr(r3, "image_commit", lambda i: r3.EXPECTED_COMMIT_DEFAULT)
+    monkeypatch.setattr(r3, "image_tags", lambda i: ["tip-r3-hold:147e315"])     # runbook E8 hold tag present
 
 
 def test_snapshot_aborts_when_identity_changes_after_preflight(monkeypatch, tmp_path):

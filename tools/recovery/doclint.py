@@ -13,6 +13,12 @@ Checks
   3. Every active document that discusses rollback or U4 links the authoritative runbook.
   4. Every docs/history/ file starts with the HISTORICAL RECORD banner and its warning.
   5. A hand-off directory holds no *.patch file outside historical/, and historical/ has a WARNING.
+  6. Outside the runbook, a rebuild command (`docker compose ... build`, `up --build`,
+     `build --no-cache`, tools/build_with_version.sh) may appear only in a Markdown section that
+     links the runbook (a fresh install), and never next to upgrade wording ("upgrade", "update",
+     "rebuild", "code/dependency changes", "git pull", ...) unless that text itself points to the
+     runbook or is negated. On an existing deployment such a command runs the Release 3 migrations
+     with no U4, no acceptance and no rollback.
 Exit 0 clean, 1 findings, 64 usage.
 """
 from __future__ import annotations
@@ -43,6 +49,43 @@ ALWAYS_FORBIDDEN = {
 }
 TOPIC = re.compile(r"\brollback\b|\bU4\b|roll back", re.I)
 BANNER = "# HISTORICAL RECORD"
+REBUILD = re.compile(r"compose\b[^`\n|]*?\bbuild\b|build_with_version\.sh", re.I)
+UPGRADE_WORDS = re.compile(r"\bupgrad\w*|\bupdat\w*|\brebuild\w*|\b(code|dependency|dependencies|source)\b[^.\n]{0,20}"
+                           r"\bchang\w*|\bgit pull\b|\bnew (version|release|commit)\b|\bpick(ed)? up\b", re.I)
+FENCE = re.compile(r"^\s*(```|~~~)")
+HEADING = re.compile(r"^#{1,6}\s")
+
+
+def _sections(lines):
+    """[(first_line_index, last_line_index)] split at Markdown headings outside fenced code."""
+    starts, fenced = [0], False
+    for i, line in enumerate(lines):
+        if FENCE.match(line):
+            fenced = not fenced
+        elif not fenced and i and HEADING.match(line):
+            starts.append(i)
+    return [(a, b - 1) for a, b in zip(starts, starts[1:] + [len(lines)])]
+
+
+def lint_rebuild(rel, text):
+    """Check 6: rebuild commands only in fresh-install sections that point upgrades to the runbook."""
+    if rel.endswith(RUNBOOK):
+        return []
+    out, lines = [], text.splitlines()
+    for a, b in _sections(lines):
+        linked = any(RUNBOOK in lines[i] for i in range(a, b + 1))
+        for i in range(a, b + 1):
+            if not REBUILD.search(lines[i]):
+                continue
+            near = [lines[j] for j in range(max(a, i - 2), i + 1)]
+            upgrade = [x for x in near if UPGRADE_WORDS.search(x) and RUNBOOK not in x and not NEGATION.search(x)]
+            if not linked:
+                out.append(f"{rel}:{i + 1}: rebuild command in a section that does not point existing-deployment "
+                           f"upgrades to {RUNBOOK}")
+            elif upgrade:
+                out.append(f"{rel}:{i + 1}: rebuild command offered as upgrade advice (only {RUNBOOK} may give "
+                           "upgrade steps)")
+    return out
 
 
 def active_docs(root):
@@ -64,6 +107,8 @@ def lint_text(rel, text, require_link=True):
                 out.append(f"{rel}:{n}: names '{what}' without marking it unauthorized")
     if require_link and not rel.endswith(RUNBOOK) and TOPIC.search(text) and RUNBOOK not in text:
         out.append(f"{rel}: discusses rollback/U4 but does not link {RUNBOOK}")
+    if require_link:
+        out += lint_rebuild(rel, text)
     return out
 
 

@@ -54,6 +54,9 @@ class FakeDocker:
         self.project, self.service = project, service
         self.volume = f"{project}_tip-data"
         self.images = {OLD_IMAGE: COMMIT, HELPER: None, CANDIDATE: "c" * 40}
+        # RepoTags per image; the 147e315 image carries the runbook E8 hold tag by default
+        self.image_tags = {OLD_IMAGE: [f"{project}-{service}:latest", "tip-r3-hold:147e315"], HELPER: ["python:3.11-slim"],
+                           CANDIDATE: []}
         self.volumes = {self.volume: {"Name": self.volume, "Driver": "local", "CreatedAt": "2026-10-21T00:00:00Z",
                                       "Mountpoint": mountpoint, "Labels": {"com.docker.compose.project": project,
                                                                            "com.docker.compose.volume": "tip-data"},
@@ -103,6 +106,11 @@ class FakeDocker:
             if any(x.startswith("volume=") for x in a):
                 v = [x for x in a if x.startswith("volume=")][0].split("=", 1)[1]
                 ids = [i for i, c in self.containers.items() if any(m.get("Name") == v for m in c.get("Mounts") or [])]
+            elif any(x.startswith("ancestor=") for x in a):
+                img = [x for x in a if x.startswith("ancestor=")][0].split("=", 1)[1]
+                ids = [i for i, c in self.containers.items() if c["Image"] == img]
+                if "-a" not in a:
+                    ids = [i for i in ids if self.containers[i]["State"]["Running"]]
             else:
                 lab = dict(x.split("=", 1)[1].split("=", 1) for x in a if x.startswith("label="))
                 ids = [i for i, c in self.containers.items()
@@ -124,7 +132,10 @@ class FakeDocker:
             self.volumes.pop(a[2], None)
             return self._ok()
         if a[:2] == ["image", "inspect"]:
-            return self._ok(a[2]) if a[2] in self.images else self._ok(rc=1, err=b"No such image")
+            if a[2] not in self.images:
+                return self._ok(rc=1, err=b"No such image")
+            fmt = a[a.index("--format") + 1] if "--format" in a else ""
+            return self._ok(json.dumps(self.image_tags.get(a[2], [])) if "RepoTags" in fmt else a[2])
         if a[0] == "run":
             return self._run(a)
         if a[0] == "stop":

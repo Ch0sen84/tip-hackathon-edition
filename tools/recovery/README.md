@@ -7,7 +7,7 @@ that needs the approvals named in the runbook.
 | File | Runs where | Purpose |
 |---|---|---|
 | `r3recover.py` | Docker host (Python 3.11+, stdlib only) | Fail-closed orchestration: `preflight`, `snapshot`, `verify`, `test-restore`, `rollback`, `start-rollback`, `accept` |
-| `r3probe.py` | Inside the pinned helper image, volume mounted read-only | Writes the volume manifest: every entry's path, type, size, mode, UID/GID, symlink target and SHA-256. Also reports unsupported entries and SQLite facts (`integrity_check`, foreign keys, migration set, migration-10 objects, scheduler mode, active jobs). |
+| `r3probe.py` | Inside the pinned helper image, volume mounted read-only | Writes the volume manifest: every entry's path, type, size, mode, UID/GID, symlink target and SHA-256. Also reports unsupported entries and SQLite facts (`integrity_check`, foreign keys, migration set, migration-10 and migration-11 objects, scheduler mode, active jobs). |
 | `doclint.py` | Anywhere | Fails if an active document offers an unauthorized recovery path, or a hand-off contains an active patch |
 | `schema9_reference.json` | Read by `r3recover.py` | Every application table/index/view and column that 147e315 creates for schema states 1..9 |
 | `schema_reference.py` | Inside the 147e315 image (generation); in tests (re-derivation) | Generates `schema9_reference.json` from `app.storage.SCHEMA` + migrations 1..k |
@@ -24,6 +24,11 @@ BLOCKED); `4` CRITICAL (a container that failed acceptance could not be confirme
   - exactly one mount, a named volume with the `local` driver at `/srv/data`;
   - the volume exists (never created) and carries the project label;
   - no other container references it, **running or stopped**.
+  - `rollback` and `start-rollback` (only) also accept an ABSENT service container: the U4 volume must then exist with the U4 identity and no container at all may reference it; the approval binds to "no container", and `start-rollback` creates it.
+- **Compose inputs.** `snapshot` records the service container's Compose files, project directory and env file(s) from its `com.docker.compose.project.*` labels (with SHA-256s) as `compose_inputs`, and refuses if they are unreadable. `start-rollback` renders with exactly those (`--project-directory`, `-f …`, `--env-file`); `--compose-file`/`--env-file` must equal them, and are required only for a U4 without recorded inputs.
+- **Rollback image** is checked by `rollback` (dry run and approve) as well as `start-rollback`, before anything destructive: an ID, present, equal to U4's, `/srv/VERSION` = 147e315. `snapshot` refuses, before stopping anything, unless the deployed image carries a hold tag other than `<project>-<service>:latest` (runbook E8).
+- **Acceptance** (`accept`) requires `--expect-volume`, refuses while the expected image also runs in a container outside the project (reported, not stopped), and with `--u4` requires the U4 identity, runtime fingerprint and Compose inputs (U7). The probe presents the app's own Host/Origin (`ALLOWED_HOST`/`BIND_HOST`, `BIND_PORT`).
+- **Forensic free space** is checked by `rollback --approve` after the stop and before the token is consumed.
 - **Lock.** `snapshot`, `test-restore`, `rollback` and `start-rollback` create `<BK>/.r3recover-<project>.lock` with `O_EXCL` and never remove a lock they did not create.
 - **Backup root** (`<BK>`, and the parent of every U4 path): absolute, existing, writable, not a symlink or junction (its real path must equal the given path), not UNC/network, not a Docker storage path, and not inside the volume mountpoint. It is never created.
 - **Images** are accepted only as local `sha256:<64 hex>` IDs.
@@ -52,6 +57,7 @@ BLOCKED); `4` CRITICAL (a container that failed acceptance could not be confirme
 
 ## Tests
 - `backend/tests/test_recovery_tool_v7.py` drives the CLI against `backend/tests/r3_fake_docker.py`, a fake Docker/Compose CLI with mutation hooks. It covers the race after `compose create`, other volume users, the lock, acceptance failures (including exit 4), every runtime-fingerprint field class, the SQLite contract, source change after archive, token replay and state drift, backup roots, forensic failure and partial restore. `R3_TOOL_DIR=<extracted tools/recovery>` runs the same tests against another version of the tool, for reproduction.
+- `backend/tests/test_deploy_audit_regressions.py` covers the deployment-audit fixes (absent service container, stray candidate, U7 runtime comparison, rollback image before restore, recorded Compose inputs, forensic space, hold tag, `check_deployment_binding.sh` in Local Mode, the version-stamped build script's dirty-tree refusal, the doc lint's rebuild rule, real `docker compose config` rendering).
 - `backend/tests/test_recovery_tool.py` covers the internals:
   - identity change after the stop, an existing U4 and low disk space;
   - dry run, approval token, partial-state refusal, fault-hook gating and exit codes;
@@ -61,8 +67,12 @@ BLOCKED); `4` CRITICAL (a container that failed acceptance could not be confirme
 
   ```
   python tools/recovery/drill/drill.py --old-image <147e315 image ID> --candidate-image <candidate image ID> \
-      --helper-image <python:3.11-slim image ID> --candidate-commit <candidate commit> --workdir <new empty dir>
+      --helper-image <python:3.11-slim image ID> --candidate-commit <candidate commit> --workdir <new empty dir> \
+      [--candidate-schema 11]
   ```
+
+  The 147e315 image must carry a tag other than `r3drill-tip-hackathon:latest` (runbook E8; its usual
+  `tip-hackathon-edition-tip-hackathon:latest` tag qualifies for the drill projects).
 
   It covers the positive path and every negative case, and writes `evidence.json` (command, exit code,
   expected and observed outcome, whether the app was running). It exits 0 only if every step passes.

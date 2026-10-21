@@ -80,7 +80,20 @@ For a first run in demo mode (the default, `TIP_MODE=demo`), **no edits
 are required**: demo mode uses the bundled synthetic fixtures and needs no
 API key. Leave `UW_API_KEY=` and all other secret-shaped fields blank.
 
-### e. Build and start the app
+### e. Build and start the app (fresh install only)
+
+**Stop first if TIP is already installed on this host** (a `tip-data`
+volume or a `tip-hackathon` container already exists, e.g. `docker volume
+ls | grep tip-data`). Upgrading an existing deployment is NOT an install:
+never run the command below (or any other rebuild) against it. Building and
+starting new code there runs the Release 3 database migrations with no
+verified snapshot, no acceptance check and no rollback. The only supported
+upgrade and rollback procedure is
+[docs/RELEASE3_RECOVERY_RUNBOOK.md](docs/RELEASE3_RECOVERY_RUNBOOK.md), an
+operator procedure with release-owner approvals; an installing agent does
+not run it on its own initiative.
+
+For a fresh install (no existing volume):
 
 ```bash
 docker compose up --build
@@ -125,7 +138,13 @@ tools/check_deployment_binding.sh <compose_project_name>
 ```
 
 This fails loudly if the container ended up published on `0.0.0.0`/`::`
-(every interface) instead of the intended `BIND_HOST`.
+(every interface) instead of the intended `BIND_HOST`. It also fails when
+the zero-token **Local Mode** (step h) is in effect inside the container
+while the port is published on ANY non-loopback address (a LAN IP, or a
+port mapping without a host IP): Local Mode trusts browser-supplied
+headers, which a client on the network can forge, so it is only safe when
+the port is reachable from this machine alone. Re-run this check after
+every change to `.env` or the port mapping.
 
 ### h. Authentication: Local Mode vs. Network Mode
 
@@ -236,7 +255,7 @@ were told in chat — the user must supply it directly (e.g. by running the
 - `INVESTIGATE_TRANSPORT=mcp` (an alternate transport for that same
   feature, default is `rest`) requires the isolated `mcp_isolated` venv.
   As of this repo's current Dockerfile, that venv is **built automatically
-  as part of `docker compose up --build`** — no extra manual step is
+  as part of the image build in step e** — no extra manual step is
   needed inside Docker. (The separate manual venv setup documented in
   README.md under "Running locally (no Docker)" is only relevant if the
   user runs the backend outside Docker.)
@@ -244,9 +263,48 @@ were told in chat — the user must supply it directly (e.g. by running the
 ### j. Troubleshooting
 
 - **Port 8000 already in use**: either stop whatever else is using it, or
-  edit the port mapping in `docker-compose.yml` (e.g. change the host side
-  of the port mapping from `8000:8000` to `8080:8000`) and use that port
-  instead. Do not touch any other part of the compose file.
+  choose another host port by setting `BIND_PORT` in `.env` (e.g.
+  `BIND_PORT=8080`) and use that port instead (`http://localhost:8080/`).
+  **Never edit the `ports:` line of `docker-compose.yml`.** `BIND_PORT=8080`
+  renders the mapping as `127.0.0.1:8080:8000`: the `127.0.0.1:` host-IP
+  prefix keeps the port reachable from this machine only, and the same
+  value reaches the app inside the container, so its allowed Origin is
+  `http://127.0.0.1:8080` / `http://localhost:8080`. Two edits that look
+  equivalent are not:
+  - a bare `8080:8000` (no host IP) publishes on EVERY interface while the
+    container still believes it is loopback-bound, so the zero-token Local
+    Mode stays on and anyone on the network who forges two browser headers
+    can change settings without a token;
+  - `127.0.0.1:8080:8000` typed into `ports:` with `BIND_PORT` left at
+    8000 keeps the app's allowed Origin at port 8000, so every browser
+    action then fails with 403.
+
+  If a Compose override really must define the port, write it with the
+  host-IP prefix exactly as `127.0.0.1:8080:8000` AND set `BIND_PORT=8080`.
+  Then re-run `tools/check_deployment_binding.sh` (step g).
+- **Which `BIND_HOST` values work**: use the literal `127.0.0.1` (the
+  default) for a loopback-only install. `localhost` is rejected by Compose
+  ("invalid IP address"), and IPv6 loopback (`::1`, `[::1]`) is not
+  supported: the browser's Host/Origin never match what the app expects.
+  A specific LAN address (e.g. `192.168.1.50`) switches the app to Network
+  Mode (token required); `0.0.0.0` exposes every interface and needs
+  `ALLOW_PUBLIC_BIND=1` for the binding check to pass.
+- **A `.env` setting has no effect inside Docker**: `docker-compose.yml`
+  forwards only the variables listed in its `environment:` block. These
+  are documented in `.env.example` or read by the app but are NOT
+  forwarded, so setting them in `.env` changes nothing in the container:
+  `PUBLIC_DEMO`, `ALLOWED_HOST`, `ALLOWED_ORIGIN`, `TIP_AUTH_TOKEN_PATH`,
+  `TIP_STORAGE_GUARD_BACKGROUND_MIN_MB`, `TIP_STORAGE_GUARD_ONDEMAND_MIN_MB`,
+  `TIP_BOUNDS_RETRIES_PER_WINDOW`, `TIP_BOUNDS_RETRY_DELAY_S`, and the Release 3 collector settings
+  `TIP_COVERAGE_SETTLE_MINUTES`, `TIP_COVERAGE_GAP_MIN_MINUTES`, `TIP_COVERAGE_GAP_CONFIRM_HOURS`,
+  `TIP_EXTRA_MARKET_CLOSURES`, `TIP_SCHEDULER_BASELINE_BACKFILL` (their defaults are the safe settings). In
+  particular `PUBLIC_DEMO=1` does NOT turn a Docker deployment into a
+  public demo, and a reverse proxy cannot set `ALLOWED_HOST`/
+  `ALLOWED_ORIGIN` this way. `TIP_DB_PATH`, `TIP_DEMO_DB_PATH` and
+  `TIP_FIXTURES_DIR` are fixed by the image and volume layout. Do not add
+  them to the Compose file on an existing deployment: the Compose file and
+  the container's environment are part of the Release 3 rollback
+  fingerprint ([docs/RELEASE3_RECOVERY_RUNBOOK.md](docs/RELEASE3_RECOVERY_RUNBOOK.md)).
 - **App refuses to start / logs a `MultiWorkerConfigurationError`
   (Phase D)**: this app is single-process by design -- its UW
   concurrency guard is not safe across multiple worker processes (see
@@ -262,12 +320,13 @@ were told in chat — the user must supply it directly (e.g. by running the
   on the user's behalf without them explicitly asking for it.
 - **Docker daemon not running**: start Docker first (see step a); `docker
   compose up` will fail immediately with a connection error otherwise.
-- **Stale build / dependency changes not picked up**: force a clean
-  rebuild:
-  ```bash
-  docker compose build --no-cache
-  docker compose up
-  ```
+- **New code or dependencies not picked up on an installed app**: do NOT
+  rebuild it yourself. Moving an existing deployment to new code is an
+  upgrade, and the only supported upgrade (with its full-volume snapshot,
+  acceptance and rollback) is
+  [docs/RELEASE3_RECOVERY_RUNBOOK.md](docs/RELEASE3_RECOVERY_RUNBOOK.md),
+  run by the operator with release-owner approval. Report the situation to
+  the user instead.
 - **Anything else unclear from the running container**: check logs:
   ```bash
   docker compose logs
@@ -275,8 +334,10 @@ were told in chat — the user must supply it directly (e.g. by running the
   ```
 - **`scenarios_loaded` is 0 or doesn't match the fixture count**: confirm
   the `fixtures/` directory exists in the checkout and wasn't excluded by
-  a `.dockerignore`/build-context issue; re-run `docker compose up --build`
-  after confirming.
+  a `.dockerignore`/build-context issue (the repository's `.dockerignore`
+  keeps every `scenario_*.json`). On a fresh install with no data yet, re-run
+  step e after confirming; never on an existing deployment (see the runbook
+  above).
 
 ### k. Shutdown and uninstall
 
@@ -286,7 +347,14 @@ Clean stop (keeps the image and any named volume):
 docker compose down
 ```
 
-Full uninstall (also removes the named volume and the built image):
+**Not during an upgrade window.** While a Release 3 upgrade or rollback is
+in progress ([docs/RELEASE3_RECOVERY_RUNBOOK.md](docs/RELEASE3_RECOVERY_RUNBOOK.md)),
+never run `docker compose down`, `rm` or `up` on the deployment: the
+operator follows only the runbook.
+
+Full uninstall (also removes the named volume and the built image; this
+permanently deletes all of the app's data, including settings and the
+database):
 
 ```bash
 docker compose down -v

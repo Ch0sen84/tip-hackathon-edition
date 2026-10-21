@@ -20,7 +20,8 @@ agent, IDE, or orchestration tool.
 Full agent-executable install steps (host checks, clone, env setup, build,
 health verification, troubleshooting, uninstall) live in
 `INSTALL_AGENT.md` at the repo root — read and follow that file for a
-fresh install. In short, once in the repo root:
+fresh install. In short, for a FRESH install only (no existing `tip-data`
+volume), once in the repo root:
 
 ```bash
 cp .env.example .env     # demo mode needs no edits
@@ -28,7 +29,13 @@ docker compose up --build
 curl -s http://localhost:8000/api/health   # expect scenarios_loaded: 11
 ```
 
-Serves at `http://localhost:8000/`.
+Serves at `http://localhost:8000/`. If TIP is already installed, this is
+not the way to move it to new code: see "Upgrading" below and
+[docs/RELEASE3_RECOVERY_RUNBOOK.md](../../docs/RELEASE3_RECOVERY_RUNBOOK.md).
+
+To use another host port, set `BIND_PORT` in `.env`; never edit the
+`ports:` line (INSTALL_AGENT.md, Troubleshooting, explains why a bare
+`8080:8000` mapping is unsafe).
 
 ## Day-2 operation
 
@@ -51,10 +58,22 @@ docker compose logs -f       # follow/tail live
 
 ```bash
 docker compose restart
-# or, for a full rebuild after dependency/code changes:
-docker compose down
-docker compose up --build
 ```
+
+This restarts the existing container with its existing image; it changes
+no code. Never restart, `down`, `rm` or `up` the deployment while a
+Release 3 upgrade or rollback is in progress.
+
+### Upgrading an existing deployment
+
+Do not rebuild an installed app yourself (no `docker compose down` + rebuild,
+no `git pull` + `up`). Moving an existing deployment to new code runs the
+Release 3 database migrations; the only supported upgrade and rollback
+procedure, with a verified full-volume snapshot, acceptance checks and
+release-owner approvals A1-A4, is
+[docs/RELEASE3_RECOVERY_RUNBOOK.md](../../docs/RELEASE3_RECOVERY_RUNBOOK.md).
+It is an operator procedure: point the user to it, never run it on your own
+initiative.
 
 ### Switching Demo <-> Live mode
 

@@ -6,7 +6,12 @@ prefixed 'r3drill' and every network is internal; no production container, volum
 credential is used. Synthetic data only (seed_volume.py, fake_uw_server.py).
 
     python drill.py --old-image sha256:... --candidate-image sha256:... --helper-image sha256:...
-                    --candidate-commit <sha> --workdir <dir for U4/evidence>
+                    --candidate-commit <sha> --workdir <dir for U4/evidence> [--candidate-schema 11]
+
+The main project 'r3drill' is created from THREE Compose files (the repository file, the drill
+override and a neutral <workdir>/runtime/runtime.yml) so that U4 records them as its Compose inputs;
+the runtime-difference cases edit runtime.yml (start-rollback reuses the recorded inputs and must
+then block on the runtime fingerprint).
 
 Writes <workdir>/evidence.json and prints a summary. Exit 0 only if EVERY positive step
 succeeded and EVERY negative case exited non-zero with the application not started.
@@ -44,6 +49,10 @@ class Drill:
         self.work = Path(a.workdir).resolve()
         self.work.mkdir(parents=True, exist_ok=True)
         self.tool = Path(a.tool_dir).resolve() / "r3recover.py" if a.tool_dir else TOOL
+        self.rt_file = self.work / "runtime" / "runtime.yml"
+        self.rt_file.parent.mkdir(exist_ok=True)
+        self.rt_file.write_text(RUNTIME_NEUTRAL)
+        self.rimg = {}                                  # project -> rollback image ID (default: --old-image)
 
     # --- compose plumbing ------------------------------------------------------------------
     def cenv(self, image):
@@ -53,6 +62,8 @@ class Drill:
         if not project.startswith("r3drill"):          # never operate on a non-disposable project
             raise SystemExit(f"refusing to run Compose for non-drill project {project!r}")
         cmd = ["docker", "compose", "-p", project, "-f", BASE_COMPOSE, "-f", OVERRIDE]
+        if project == "r3drill":
+            cmd += ["-f", self.rt_file]
         for x in extra:
             cmd += ["-f", x]
         cmd += ["--env-file", ENVF, *args]
@@ -102,11 +113,23 @@ class Drill:
         self.compose(project, image or self.a.old_image, "down", "-v", "--remove-orphans", extra=extra)
 
     # --- tool invocation + evidence -------------------------------------------------------------
+    def with_defaults(self, args):
+        """Arguments the current tool requires on every call of a subcommand: rollback takes the
+        rollback image (checked before anything is changed), accept the deployment's volume."""
+        args = [str(x) for x in args]
+        proj = args[args.index("--project") + 1] if "--project" in args else None
+        if args and args[0] == "rollback" and "--rollback-image" not in args:
+            args += ["--rollback-image", self.rimg.get(proj, self.a.old_image)]
+        if args and args[0] == "accept" and "--expect-volume" not in args and proj:
+            args += ["--expect-volume", self.volume(proj)]
+        return args
+
     def r3(self, *args, env=None):
-        r = sh([sys.executable, self.tool, *args], env=env, cwd=self.work)
+        r = sh([sys.executable, self.tool, *self.with_defaults(args)], env=env, cwd=self.work)
         return r.returncode, r.stdout.decode(), r.stderr.decode()
 
     def step(self, kind, name, args, expect_rc, project, env=None, note="", must=None):
+        args = self.with_defaults(args)
         rc, out, err = self.r3(*args, env=env)
         running = self.app_running(project) if project else None
         ok = (rc == expect_rc) if kind == "positive" else (rc != 0 and rc == expect_rc and not running)
@@ -203,14 +226,15 @@ class Drill:
         # candidate upgrade + candidate writes (observations, job, diagnostics, failed provider requests)
         self.compose(P, CAND, "up", "-d", "--no-build", "--pull", "never", "--force-recreate", SERVICE, check=True)
         self.wait_health(P)
-        self.step("positive", "P5 candidate acceptance (schema 10, scheduler disabled, 0 provider requests)",
-                  ["accept", *dep, "--expect-image", CAND, "--expect-commit", a.candidate_commit, "--expect-schema", "10",
-                   "--quiet-seconds", "3"], 0, P)
+        self.step("positive", f"P5 candidate acceptance with --u4 (schema {a.candidate_schema}, U4 runtime and Compose "
+                  "inputs, scheduler disabled, 0 provider requests)",
+                  ["accept", *dep, "--expect-volume", vol, "--u4", u4, "--expect-image", CAND, "--expect-commit",
+                   a.candidate_commit, "--expect-schema", str(a.candidate_schema), "--quiet-seconds", "3"], 0, P)
         act = sh(["docker", "exec", self.container(P), "python", "-c", CANDIDATE_ACTIVITY], timeout=600)
         activity = json.loads(act.stdout.decode().strip().splitlines()[-1]) if act.returncode == 0 else {"error": act.stderr.decode()[-300:]}
         cand_counts = self.counts(vol)
         self.fact("P6 candidate wrote observations, coverage, jobs and diagnostics and made failed provider requests",
-                  cand_counts["schema"] == 10 and cand_counts["darkpool"] > u4_counts["darkpool"] and cand_counts["jobs"] > u4_counts["jobs"]
+                  cand_counts["schema"] == a.candidate_schema and cand_counts["darkpool"] > u4_counts["darkpool"] and cand_counts["jobs"] > u4_counts["jobs"]
                   and (cand_counts["diagnostics"] or 0) > 0 and activity.get("failed_provider_requests", 0) > 0,
                   {"u4": u4_counts, "candidate": cand_counts, "activity": activity})
 
@@ -265,7 +289,8 @@ class Drill:
         self.step("negative", "N3 correctly checksummed, test-restored U4 from the WRONG deployment",
                   ["rollback", *dep, "--u4", u4b, "--helper-image", H, "--approve", f"RESTORE:{u4b.name}:{vol}"], 2, P,
                   note="BLOCKED: U4 belongs to a different deployment")
-        self.fact("N3 left the candidate volume untouched", self.counts(vol)["schema"] == 10, "schema still 10 (no restore)")
+        self.fact("N3 left the candidate volume untouched", self.counts(vol)["schema"] == a.candidate_schema,
+                  f"schema still {a.candidate_schema} (no restore)")
         self.down(PB)
 
         # ---------------- PARTIAL / INTERRUPTED RESTORE ----------------
@@ -276,7 +301,8 @@ class Drill:
         self.fact("N14 restore state recorded as BLOCKED_PARTIAL", state == "BLOCKED_PARTIAL", state)
         self.step("negative", "N14b start-rollback refused while PARTIAL",
                   ["start-rollback", *dep, "--u4", u4, "--helper-image", H, "--rollback-image", OLD, "--compose-file", BASE_COMPOSE,
-                   "--compose-file", OVERRIDE, "--env-file", ENVF], 2, P, env=self.cenv(OLD), note="BLOCKED: state BLOCKED_PARTIAL",
+                   "--compose-file", OVERRIDE, "--compose-file", self.rt_file, "--env-file", ENVF], 2, P, env=self.cenv(OLD),
+                  note="BLOCKED: state BLOCKED_PARTIAL",
                   must="BLOCKED_PARTIAL")
 
         # ---------------- APPROVAL IS ONE-TIME AND STATE-BOUND ----------------
@@ -317,7 +343,8 @@ class Drill:
             ("N19d wrong owner", "chown 0:0 /v/keep/sub/owned.txt"),
         ]
         start_args = ["start-rollback", *dep, "--u4", u4, "--helper-image", H, "--rollback-image", OLD,
-                      "--compose-file", BASE_COMPOSE, "--compose-file", OVERRIDE, "--env-file", ENVF]
+                      "--compose-file", BASE_COMPOSE, "--compose-file", OVERRIDE, "--compose-file", self.rt_file,
+                      "--env-file", ENVF]
         for name, cmd in tamper:
             self.mutate(vol, cmd)
             self.step("negative", name, start_args, 2, P, env=self.cenv(OLD), note="BLOCKED: volume no longer matches U4; not started",
@@ -344,19 +371,18 @@ class Drill:
         self.fact("N25 docker start never ran on the created container", self.started_at(P).startswith("0001-01-01"),
                   self.started_at(P))
         self.rerestore(P, dep, u4)
-        rt = self.work / "runtime"
-        rt.mkdir(exist_ok=True)
         runtime_cases = [
             ("N26a runtime differs: command", "config.Cmd", "command: [\"uvicorn\", \"app.main:app\", \"--host\", \"0.0.0.0\", \"--port\", \"8000\", \"--log-level\", \"warning\"]"),
             ("N26b runtime differs: healthcheck", "config.Healthcheck", "healthcheck:\n      test: [\"CMD\", \"true\"]\n      interval: 30s"),
             ("N26c runtime differs: working_dir", "config.WorkingDir", "working_dir: /srv"),
         ]
         for i, (name, field, body) in enumerate(runtime_cases):
-            f = rt / f"runtime{i}.yml"
-            f.write_text(f"services:\n  tip-hackathon:\n    {body}\n")
-            args = [*start_args[:start_args.index("--env-file")], "--compose-file", f, *start_args[start_args.index("--env-file"):]]
-            self.step("negative", name, args, 2, P, env=self.cenv(OLD), note="BLOCKED: runtime differs from the recorded deployment",
+            # edit a Compose file U4 recorded (start-rollback must reuse the recorded inputs, so a changed
+            # file is the realistic way the runtime can differ) and require the fingerprint block
+            self.rt_file.write_text(f"services:\n  tip-hackathon:\n    {body}\n")
+            self.step("negative", name, start_args, 2, P, env=self.cenv(OLD), note="BLOCKED: runtime differs from the recorded deployment",
                       must=field)
+            self.rt_file.write_text(RUNTIME_NEUTRAL)
             self.fact(f"{name.split()[0]} docker start never ran", self.started_at(P).startswith("0001-01-01"), self.started_at(P))
             self.rerestore(P, dep, u4)
         self.step("negative", "N27 acceptance fails after start", start_args, 2, P,
@@ -373,8 +399,9 @@ class Drill:
                   ["accept", *dep, "--expect-image", OLD, "--quiet-seconds", "5"], 0, None)
         self.fact("P10 rollback container runs the pinned image", sh(["docker", "inspect", self.container(P), "--format", "{{.Image}}"]).stdout.decode().strip() == OLD, OLD)
         self.step("negative", "N28 standalone acceptance failure stops the running application",
-                  ["accept", *dep, "--expect-image", OLD, "--expect-schema", "10", "--quiet-seconds", "1"], 2, P,
-                  note="BLOCKED: schema 1-9 != 1-10; the container was stopped and confirmed stopped", must="acceptance failed")
+                  ["accept", *dep, "--expect-image", OLD, "--expect-schema", str(self.a.candidate_schema), "--quiet-seconds", "1"],
+                  2, P, note=f"BLOCKED: schema 1-9 != 1-{self.a.candidate_schema}; the container was stopped and confirmed stopped",
+                  must="acceptance failed")
 
         # ---------------- DISCOVERY / QUIESCENCE NEGATIVES ----------------
         self.step("negative", "N-vol misspelled --expect-volume (nothing created)", ["preflight", *dep, "--expect-volume", "r3drill_tip-dta"], 2, None,
@@ -386,7 +413,7 @@ class Drill:
         for name, proj, files, kw in variants:
             self.down(proj, extra=files)
             self.deploy(proj, extra=files, start=kw.get("start", False), seed=kw.get("seed", ()), image=kw.get("image"))
-            if kw.get("image"):                    # N5: the candidate migrated the volume to schema 10; put the
+            if kw.get("image"):                    # N5: the candidate migrated the volume to its schema; put the
                 self.compose(proj, kw["image"], "stop", SERVICE, extra=files, check=True)   # 147e315 image back
                 self.compose(proj, self.a.old_image, "create", "--no-build", "--pull", "never", "--force-recreate",
                              SERVICE, extra=files, check=True)                             # (never started)
@@ -430,8 +457,9 @@ class Drill:
             ("N10b ambiguous: two service containers", "r3drill-dup", [], {"scale": True, "note": "BLOCKED: expected exactly one container"}),
             ("N11 bind mount instead of a named volume", "r3drill-bind", [bind], {"note": "BLOCKED: bind mounts refused"}),
             ("N12 unexpected additional persistent mount", "r3drill-extra", [extra], {"note": "BLOCKED: additional mounts"}),
-            ("N5 wrong schema (volume already at schema 10)", "r3drill-schema10", [],
-             {"start": True, "snapshot": True, "image": self.a.candidate_image, "note": "BLOCKED: schema 1-10 != 1-9"}),
+            (f"N5 wrong schema (volume already at the candidate schema {self.a.candidate_schema})", "r3drill-schema10", [],
+             {"start": True, "snapshot": True, "image": self.a.candidate_image,
+              "note": f"BLOCKED: schema 1-{self.a.candidate_schema} != 1-9"}),
             ("N6 persisted scheduler enabled", "r3drill-sched", [],
              {"seed": ("--scheduler", "enabled"), "snapshot": True, "note": "BLOCKED: scheduler 'enabled'"}),
             ("N7 unexpected active baseline job", "r3drill-job", [],
@@ -549,6 +577,7 @@ class Drill:
         u4 = Path(json.loads(out)["u4_dir"])
         self.r3("test-restore", "--u4", u4, "--helper-image", H)
         pdep = ["--project", P, "--service", SERVICE]
+        self.rimg[P] = tid
         self.r3("rollback", *pdep, "--u4", u4, "--helper-image", H, "--approve", self.fresh_token(pdep, u4))
         self.compose(P, a.candidate_image, "create", "--no-build", "--pull", "never", "--force-recreate", SERVICE, check=True)
         sh(["docker", "rmi", tag], check=True)
@@ -563,6 +592,8 @@ class Drill:
         self.fact("N20b no image pull/build event occurred", gone and "pull" not in ev and "build" not in ev, ev.strip() or "no image events")
         self.down(P, image=a.candidate_image)
 
+
+RUNTIME_NEUTRAL = "services:\n  tip-hackathon: {}\n"
 
 CANDIDATE_ACTIVITY = r"""
 import json, time, urllib.request, urllib.error
@@ -606,6 +637,8 @@ def main():
     for k in ("--old-image", "--candidate-image", "--helper-image", "--candidate-commit", "--workdir"):
         p.add_argument(k, required=True)
     p.add_argument("--tool-dir", help="tools/recovery directory of the tool under test (default: this checkout)")
+    p.add_argument("--candidate-schema", type=int, default=11,
+                   help="the candidate's schema version (Release 3: 11 = migrations 10 and 11)")
     a = p.parse_args()
     ev = Drill(a).run()
     out = Path(a.workdir) / "evidence.json"

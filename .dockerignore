@@ -1,0 +1,56 @@
+# Build context for the Dockerfile, which COPYs only backend/, frontend/, fixtures/ and
+# mcp_isolated/. Everything below stays OUT of the image: local state, secrets, private data,
+# host virtualenvs, caches and tests. Mirrors .gitignore, plus test and tooling trees.
+# (Release 3 audit F7: without this file, a local run's backend/data -- settings.json with
+# saved keys, .auth_token, databases -- and private recorded captures went into image layers.)
+
+# VCS, editor and OS files
+.git
+.gitignore
+.idea
+.vscode
+**/.DS_Store
+
+# secrets and local configuration (the app reads its settings from the /srv/data volume)
+.env
+.env.*
+!.env.example
+**/.capture_settings_tmp*.json
+
+# local application state: settings, auth/pairing tokens, databases and their backups
+data
+backend/data
+**/*.db
+**/*.db-journal
+**/*.db-wal
+**/*.db-shm
+**/*.bak
+**/*.sqlite
+**/*.sqlite3
+
+# private Unusual Whales captures (not redistributed; see fixtures/recorded_uw/README.md)
+fixtures/recorded_uw/*.json.gz
+
+# host virtualenvs: the image builds mcp_isolated/venv itself; a host venv would carry
+# interpreter symlinks pointing at the host
+**/venv
+**/.venv
+mcp_isolated/venv
+
+# caches, logs, node modules
+**/__pycache__
+**/*.pyc
+**/.pytest_cache
+**/.mypy_cache
+**/.ruff_cache
+**/node_modules
+**/*.log
+
+# tests, test pages and tooling that the running app never uses
+backend/tests
+backend/pytest.ini
+frontend/test_*
+.verification_screenshots
+static-demo
+tools
+docs

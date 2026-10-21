@@ -14,11 +14,16 @@ Subcommands
   test-restore   restore U4 into a NEW disposable volume and require an exact match
   rollback       --dry-run (plan + one-time approval token, no change) | --approve TOKEN
                  (forensic copy, full restore into the existing volume, exact verification)
-  start-rollback create the pinned 147e315 container via Compose (no build, no pull),
-                 check image/config/mounts/volume BEFORE starting, start, then accept;
-                 a failed acceptance stops the container again
+  start-rollback create the pinned 147e315 container via Compose (no build, no pull) from the
+                 Compose inputs recorded in U4, check image/config/mounts/volume BEFORE starting,
+                 start, then accept; a failed acceptance stops the container again
   accept         post-start acceptance (version, schema, scheduler, zero provider requests);
-                 a failed acceptance stops the container
+                 with --u4 also the U4 runtime/Compose inputs (U7); a failed acceptance stops
+                 the container
+
+rollback and start-rollback also work when the service container no longer exists (e.g. after a
+`docker compose down`): the U4 volume must then exist with the U4 identity and no container may
+reference it; start-rollback creates the container.
 
 Exit codes: 0 success; 2 BLOCKED (a mandatory check failed: stop, do not improvise);
 3 internal error (treat as BLOCKED); 4 CRITICAL (a container that failed acceptance could
@@ -198,13 +203,57 @@ def fingerprint_diff(a, b, prefix=""):
     return out
 
 
-def discover(project, service, expect_volume=None):
+def _volume_identity(project, vname):
+    res = run(["docker", "volume", "inspect", vname], check=False)       # never 'create'
+    if res.returncode != 0:
+        raise Blocked(f"volume {vname!r} does not exist (refusing to create one)")
+    v = json.loads(res.stdout.decode())[0]
+    if v.get("Driver") != "local":
+        raise Blocked(f"volume {vname} driver {v.get('Driver')!r} is not 'local'")
+    vlabels = v.get("Labels") or {}
+    if vlabels.get("com.docker.compose.project") != project:
+        raise Blocked(f"volume {vname} is not labelled as belonging to compose project {project!r}")
+    return {"name": vname, "driver": v["Driver"], "created_at": v.get("CreatedAt"),
+            "mountpoint": v.get("Mountpoint"), "labels": vlabels, "destination": DATA_MOUNT}
+
+
+def _refuse_other_volume_users(vname, own_id):
+    users = run(["docker", "ps", "-a", "-q", "--no-trunc", "--filter", f"volume={vname}"]).stdout.decode().split()
+    others = []
+    for uid in users:
+        if uid == own_id:
+            continue
+        o = docker_json("inspect", uid)[0]
+        others.append(f"{o['Name'].lstrip('/')} ({o['State']['Status']})")
+    if others:
+        raise Blocked(f"other containers reference volume {vname} (running or stopped): {others}; "
+                      "only the service container may reference it during recovery")
+
+
+def is_running(ident):
+    c = ident.get("container")
+    return bool(c and (c["running"] or c["restarting"]))
+
+
+def discover(project, service, expect_volume=None, absent_ok_volume=None):
     """Exactly one Compose service container with exactly one named local volume at /srv/data,
     no other persistent mounts, and NO other container (running, restarting or stopped) that
-    references the volume. Never creates anything."""
+    references the volume. Never creates anything.
+
+    absent_ok_volume (rollback and start-rollback only): the service container may be ABSENT
+    (e.g. removed by `docker compose down` after a failed candidate). Then the named volume must
+    exist, be local, carry the project label and be referenced by no container at all; the
+    identity has container None, image_id None and runtime None. The caller compares the volume
+    identity with U4 (stable_identity), and start-rollback creates the container from U4's
+    recorded Compose inputs."""
     ids = run(["docker", "ps", "-a", "-q", "--no-trunc",
                "--filter", f"label=com.docker.compose.project={project}",
                "--filter", f"label=com.docker.compose.service={service}"]).stdout.decode().split()
+    if not ids and absent_ok_volume:
+        vol = _volume_identity(project, absent_ok_volume)
+        _refuse_other_volume_users(absent_ok_volume, None)
+        return {"project": project, "service": service, "container": None, "image_id": None,
+                "compose_labels": {}, "volume": vol, "other_volume_users": [], "runtime": None}
     if len(ids) != 1:
         raise Blocked(f"expected exactly one container for compose project={project!r} service={service!r}, "
                       f"found {len(ids)}")
@@ -227,36 +276,94 @@ def discover(project, service, expect_volume=None):
     vname = m["Name"]
     if expect_volume is not None and vname != expect_volume:
         raise Blocked(f"service mounts volume {vname!r}, not the expected {expect_volume!r}")
-    res = run(["docker", "volume", "inspect", vname], check=False)       # never 'create'
-    if res.returncode != 0:
-        raise Blocked(f"volume {vname!r} does not exist (refusing to create one)")
-    v = json.loads(res.stdout.decode())[0]
-    if v.get("Driver") != "local":
-        raise Blocked(f"volume {vname} driver {v.get('Driver')!r} is not 'local'")
-    vlabels = v.get("Labels") or {}
-    if vlabels.get("com.docker.compose.project") != project:
-        raise Blocked(f"volume {vname} is not labelled as belonging to compose project {project!r}")
-    users = run(["docker", "ps", "-a", "-q", "--no-trunc", "--filter", f"volume={vname}"]).stdout.decode().split()
-    others = []
-    for uid in users:
-        if uid == c["Id"]:
-            continue
-        o = docker_json("inspect", uid)[0]
-        others.append(f"{o['Name'].lstrip('/')} ({o['State']['Status']})")
-    if others:
-        raise Blocked(f"other containers reference volume {vname} (running or stopped): {others}; "
-                      "only the service container may reference it during recovery")
+    vol = _volume_identity(project, vname)
+    _refuse_other_volume_users(vname, c["Id"])
     return {
         "project": project, "service": service,
         "container": {"id": c["Id"], "name": c["Name"].lstrip("/"), "status": c["State"]["Status"],
                       "running": bool(c["State"].get("Running")), "restarting": bool(c["State"].get("Restarting"))},
         "image_id": c["Image"],
         "compose_labels": {k: v for k, v in labels.items() if k.startswith("com.docker.compose.")},
-        "volume": {"name": vname, "driver": v["Driver"], "created_at": v.get("CreatedAt"),
-                   "mountpoint": v.get("Mountpoint"), "labels": vlabels, "destination": DATA_MOUNT},
+        "volume": vol,
         "other_volume_users": [],
         "runtime": runtime_fingerprint(c),
     }
+
+
+# --- Compose inputs the service container was created with ----------------------------------------
+LABEL_CONFIG_FILES = "com.docker.compose.project.config_files"
+LABEL_WORKING_DIR = "com.docker.compose.project.working_dir"
+LABEL_ENV_FILE = "com.docker.compose.project.environment_file"
+
+
+def _np(p):
+    return os.path.normcase(os.path.normpath(str(p)))
+
+
+def compose_inputs(ident):
+    """The Compose files, project directory and env file(s) the service container was created with,
+    read from its Compose labels, plus a SHA-256 of every file (values are never stored). Returns
+    None when the labels are absent (very old Compose): start-rollback then needs --compose-file.
+    When no env file label exists, Compose loaded <working_dir>/.env implicitly (if it existed)."""
+    labels = ident.get("compose_labels") or {}
+    files = [f for f in (labels.get(LABEL_CONFIG_FILES) or "").split(",") if f]
+    if not files:
+        return None
+    wd = labels.get(LABEL_WORKING_DIR) or str(Path(files[0]).parent)
+    files = [f if os.path.isabs(f) else str(Path(wd) / f) for f in files]
+    envs = [f if os.path.isabs(f) else str(Path(wd) / f)
+            for f in (labels.get(LABEL_ENV_FILE) or "").split(",") if f]
+    default_env = None if envs else str(Path(wd) / ".env")
+    paths = files + (envs or [default_env])
+    return {"config_files": files, "working_dir": wd, "env_files": envs, "default_env_file": default_env,
+            "sha256": {p: (sha256_file(p) if os.path.isfile(p) else None) for p in paths}}
+
+
+def compose_input_problems(ci):
+    """Recorded inputs that a re-render could not reproduce: a missing Compose or env file, or an
+    implicit .env that existed at U4 but is gone now (or appeared since)."""
+    problems = [f"missing Compose file {p}" for p in ci["config_files"] if not os.path.isfile(p)]
+    problems += [f"missing env file {p}" for p in ci["env_files"] if not os.path.isfile(p)]
+    d = ci["default_env_file"]
+    if d is not None and (ci["sha256"].get(d) is not None) != os.path.isfile(d):
+        problems.append(f"implicit env file {d} {'is missing' if ci['sha256'].get(d) else 'did not exist at U4 but exists now'}")
+    return problems
+
+
+def same_compose_labels(a, b):
+    """Two containers were created from the same Compose files, project directory and env file(s)."""
+    la, lb = a.get("compose_labels") or {}, b.get("compose_labels") or {}
+    out = []
+    for k in (LABEL_CONFIG_FILES, LABEL_WORKING_DIR, LABEL_ENV_FILE):
+        x = [_np(p) for p in (la.get(k) or "").split(",") if p]
+        y = [_np(p) for p in (lb.get(k) or "").split(",") if p]
+        if x != y:
+            out.append(f"{k}: {la.get(k)!r} != {lb.get(k)!r}")
+    return out
+
+
+# --- rollback image retention -------------------------------------------------------------------------
+def image_tags(image_id):
+    res = run(["docker", "image", "inspect", image_id, "--format", "{{json .RepoTags}}"], check=False)
+    try:
+        tags = json.loads(res.stdout.decode().strip() or "null") if res.returncode == 0 else None
+    except ValueError:
+        tags = None
+    return [t for t in tags if isinstance(t, str)] if isinstance(tags, list) else None
+
+
+def _bare_tag(t):
+    for p in ("docker.io/library/", "docker.io/"):
+        if t.startswith(p):
+            return t[len(p):]
+    return t
+
+
+def hold_tags(image_id, project, service):
+    """Tags on the image other than the Compose default <project>-<service>:latest, which the
+    candidate build moves. Without one, the image becomes dangling after U6 and a prune deletes it."""
+    moving = f"{project}-{service}:latest"
+    return [t for t in (image_tags(image_id) or []) if _bare_tag(t) != moving]
 
 
 def stable_identity(ident):
@@ -425,6 +532,8 @@ def semantic_check(manifest, *, expect_schema_versions=SCHEMA9_VERSIONS):
             errs.append(f"{rel}: {f['foreign_key_violations']} foreign key violations")
         if f.get("migration_10_objects_present"):
             errs.append(f"{rel}: migration-10 objects present {f['migration_10_objects_present']}")
+        if f.get("migration_11_objects_present"):
+            errs.append(f"{rel}: migration-11 objects present {f['migration_11_objects_present'][:4]}")
         k = _schema_state(f, rel, errs)
         if kind == "primary":
             if f.get("schema_versions") != SCHEMA9_MIGRATIONS:
@@ -526,6 +635,21 @@ def _snapshot(a, helper, root, pre):
     commit = image_commit(pre["image_id"])
     if commit != a.expect_commit:
         raise Blocked(f"deployed image commit {commit} != expected {a.expect_commit}")
+    # E8, checked BEFORE anything is stopped: the rollback image must survive the candidate build
+    # (which moves <project>-<service>:latest) and any prune, so it needs a hold tag of its own.
+    held = hold_tags(pre["image_id"], a.project, a.service)
+    if not held:
+        raise Blocked(f"the deployed image {pre['image_id']} has no hold tag; after the candidate build it would be "
+                      f"untagged and a prune would delete the only rollback image. Add it first (runbook E8): "
+                      f"docker tag {pre['image_id']} tip-r3-hold:147e315")
+    # the Compose inputs R3 must reuse; refuse a U4 whose recreation inputs are unreadable here
+    ci = compose_inputs(pre)
+    if ci is not None:
+        missing = [p for p in ci["config_files"] + ci["env_files"] if ci["sha256"].get(p) is None]
+        if missing:
+            raise Blocked(f"the Compose inputs this container was created with are not readable on this host: "
+                          f"{missing}; start-rollback could not recreate it. Run the tool on the Docker host, "
+                          "from where the Compose directory is reachable.")
     if pre["container"]["running"] or pre["container"]["restarting"]:
         if not a.stop:
             raise Blocked("application container is running; pass --stop to stop it before the snapshot")
@@ -573,6 +697,7 @@ def _snapshot(a, helper, root, pre):
     manifest = {
         "format": FORMAT, "u4_id": u4_id, "created_utc": utcnow(), "deployment_host": platform.node(),
         "identity": post, "expected_commit": a.expect_commit, "image_commit": commit,
+        "compose_inputs": ci, "rollback_image_hold_tags": held,
         "helper_image": helper, "stopped_state": post["container"]["status"], "backup_root": str(root),
         "archive": {"file": "volume.tar", "abs_path": str((u4 / "volume.tar").resolve()),
                     "sha256": sha256_file(u4 / "volume.tar"), "bytes": (u4 / "volume.tar").stat().st_size},
@@ -649,14 +774,15 @@ class Authorization:
         self.binding = binding
 
 
-def _binding(u4, m, cur):
-    """Everything an approval is bound to; recomputed before every destructive step."""
+def _binding(u4, m, cur, rollback_image=None):
+    """Everything an approval is bound to; recomputed before every destructive step. An absent
+    service container binds as container_id None: one created after the dry run voids the token."""
     trp = Path(u4) / "test_restore.json"
     return {"u4_id": m["u4_id"], "manifest_sha256": manifest_sha(u4), "archive_sha256": sha256_file(Path(u4) / "volume.tar"),
             "test_restore_sha256": sha256_file(trp) if trp.is_file() else None,
             "project": cur["project"], "service": cur["service"], "volume": cur["volume"]["name"],
-            "volume_created_at": cur["volume"]["created_at"], "container_id": cur["container"]["id"],
-            "image_id": cur["image_id"]}
+            "volume_created_at": cur["volume"]["created_at"], "container_id": (cur.get("container") or {}).get("id"),
+            "image_id": cur["image_id"], "rollback_image": rollback_image}
 
 
 def _token(b, nonce):
@@ -728,11 +854,40 @@ def _rollback_checks(a):
     if helper != m["helper_image"]:
         raise Blocked(f"helper image {helper} != U4 helper image {m['helper_image']}")
     semantic_check(m["volume_manifest"], expect_schema_versions=SCHEMA9_VERSIONS)
-    cur = discover(a.project, a.service)
+    # the rollback image is checked BEFORE anything destructive: a restore without it would leave a
+    # volume that nothing may start
+    rimg = _check_rollback_image(a.rollback_image, m)
+    cur = discover(a.project, a.service, absent_ok_volume=m["identity"]["volume"]["name"])
     if stable_identity(cur) != stable_identity(m["identity"]):
         raise Blocked("this U4 belongs to a different deployment (project/service/volume identity mismatch)")
     validate_u4_path(u4p, cur)
+    cur["rollback_image_check"] = rimg
     return m, helper, cur
+
+
+def _check_rollback_image(rollback_image, m):
+    expected = m["identity"]["image_id"]
+    require_local_image_id(rollback_image, "rollback image")        # refuses tags/names and absent images
+    if rollback_image != expected:
+        raise Blocked(f"--rollback-image {rollback_image} != the image recorded in U4 {expected}")
+    if image_commit(expected) != m["expected_commit"]:
+        raise Blocked("rollback image /srv/VERSION does not carry the expected 147e315 commit")
+    tags = image_tags(expected)
+    if not tags:
+        log(f"WARNING: the rollback image {expected[:19]} has no tag; a prune would delete it (runbook E8)")
+    return {"id": expected, "commit": m["expected_commit"], "tags": tags}
+
+
+def _forensic_space(helper, vol, root):
+    """The forensic copy needs room for the CURRENT (candidate) volume; checked before the token is
+    consumed, so a full disk never burns an approval or leaves a half-written copy."""
+    cur = probe_volume(helper, vol)
+    need = int(sum(e.get("size", 0) for e in cur["entries"].values()) * 1.1) + (200 << 20)
+    free = shutil.disk_usage(root).free
+    if free < need:
+        raise Blocked(f"insufficient free space for the forensic copy in {root}: {free} < {need}; nothing was "
+                      "changed and the approval token was not used")
+    return need
 
 
 def cmd_rollback(a):
@@ -744,11 +899,15 @@ def cmd_rollback(a):
 def _rollback(a, u4p):
     m, helper, cur = _rollback_checks(a)
     vol = cur["volume"]["name"]
-    running = cur["container"]["running"] or cur["container"]["restarting"]
+    running = is_running(cur)
+    rimg = getattr(a, "rollback_image", None)
     if a.dry_run:                                # never consumes or grants: only proposes a one-time token
-        plan = _new_plan(u4p, _binding(u4p, m, cur))
+        plan = _new_plan(u4p, _binding(u4p, m, cur, rimg))
         print(json.dumps({"dry_run": True, "u4_id": m["u4_id"], "volume": vol,
                           "would_stop_running_container": cur["container"]["name"] if running else None,
+                          "service_container": (cur["container"] or {}).get("name") or
+                              "ABSENT (start-rollback creates it from the U4-recorded Compose inputs)",
+                          "rollback_image": cur.get("rollback_image_check"),
                           "forensic_copy_to": str(u4p.parent), "archive_sha256": m["archive"]["sha256"],
                           "approval_token": plan["token"], "token_expires_utc":
                               _dt.datetime.fromtimestamp(plan["expires_epoch"], _dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -760,9 +919,16 @@ def _rollback(a, u4p):
         return EXIT_OK
     if running and not a.stop:
         raise Blocked("the candidate container is running; pass --stop with --approve to stop it")
-    auth = _consume_token(u4p, a.approve, _binding(u4p, m, cur))
+    u4_volume = cur["volume"]["name"]
+    plan, _ = _load_plan(u4p, a.approve)          # validate (not consume) before anything is stopped
+    _check_binding(plan, _binding(u4p, m, cur, rimg))
     if running:
         run(["docker", "stop", "--time", "60", cur["container"]["id"]])
+        cur = discover(a.project, a.service, absent_ok_volume=u4_volume)
+        if is_running(cur):
+            raise Blocked("the candidate container did not stop; refusing to restore")
+    _forensic_space(helper, vol, u4p.parent)
+    auth = _consume_token(u4p, a.approve, _binding(u4p, m, cur, rimg))
     # forensic copy of the failed volume (separate directory, never used for restore)
     fx = u4p.parent / f"forensic-{m['u4_id']}-{stamp()}-{secrets.token_hex(2)}"
     fx.mkdir(mode=0o700)
@@ -771,10 +937,10 @@ def _rollback(a, u4p):
     (fx / "SHA256SUMS").write_text(f"{sha256_file(fx / 'volume-post-upgrade.tar')}  volume-post-upgrade.tar\n")
     # revalidate immediately before the destructive step
     m2 = verify_u4(u4p)
-    now = discover(a.project, a.service)
-    if now["container"]["running"] or now["container"]["restarting"]:
+    now = discover(a.project, a.service, absent_ok_volume=u4_volume)
+    if is_running(now):
         raise Blocked("the service container is running again; refusing to restore")
-    _check_binding({"binding": auth.binding}, _binding(u4p, m2, now))
+    _check_binding({"binding": auth.binding}, _binding(u4p, m2, now, rimg))
     fault = _drill_fault(now)
     _write_state(u4p, "IN_PROGRESS", volume=vol, token=auth.token, forensic=str(fx))
     res = _extract(helper, vol, u4p, fault)
@@ -787,10 +953,52 @@ def _rollback(a, u4p):
         _write_state(u4p, "BLOCKED_PARTIAL", volume=vol, reason="verification failed", diffs=diffs[:20])
         raise Blocked(f"restored volume differs from U4 (PARTIAL; keep stopped, re-restore): {diffs[:10]}")
     _write_state(u4p, "RESTORED_VERIFIED", volume=vol, forensic=str(fx), manifest_sha256=manifest_sha(u4p),
-                 container_id=now["container"]["id"])
+                 container_id=(now["container"] or {}).get("id"))
     print(json.dumps({"restored": True, "u4_id": m["u4_id"], "volume": vol, "forensic": str(fx)}, indent=1))
     log("restored and verified. Nothing was started. Next: start-rollback.")
     return EXIT_OK
+
+
+def rollback_compose_inputs(a, m):
+    """The Compose files, project directory and env file(s) R3 renders with. A U4 that recorded the
+    service container's Compose inputs is recreated with EXACTLY those (an operator-given
+    --compose-file / --env-file must equal them). Only a U4 without recorded inputs falls back to the
+    operator's --compose-file list."""
+    ci = m.get("compose_inputs")
+    if ci is None:
+        if not a.compose_file:
+            raise Blocked("this U4 records no Compose inputs (the container had no Compose config-file label); "
+                          "pass --compose-file (and --env-file if one was used) explicitly")
+        return {"working_dir": None, "config_files": list(a.compose_file), "env_files": [a.env_file] if a.env_file else []}
+    files, envs = ci["config_files"], ci["env_files"] or []
+    if a.compose_file and [_np(f) for f in a.compose_file] != [_np(f) for f in files]:
+        raise Blocked(f"--compose-file {a.compose_file} differs from the Compose files the U4 container was created "
+                      f"with {files}; omit --compose-file to use the recorded ones")
+    if a.env_file:
+        expected = envs or [ci["default_env_file"]]
+        if [_np(a.env_file)] != [_np(f) for f in expected] or not os.path.isfile(a.env_file):
+            raise Blocked(f"--env-file {a.env_file} is not the env file the U4 container was created with "
+                          f"({expected}); omit --env-file to use the recorded one")
+    problems = compose_input_problems(ci)
+    if problems:
+        raise Blocked(f"the Compose inputs recorded in U4 cannot be reproduced: {problems}. Restore them exactly "
+                      "(no other file may be substituted) or escalate")
+    changed = [p for p, h in ci["sha256"].items() if h and os.path.isfile(p) and sha256_file(p) != h]
+    if changed:
+        log(f"note: {changed} changed since U4; the runtime-fingerprint check decides whether the result matches")
+    return {"working_dir": ci["working_dir"], "config_files": files, "env_files": envs}
+
+
+def rollback_compose_command(project, inputs, override):
+    base = ["docker", "compose", "-p", project]
+    if inputs["working_dir"]:
+        base += ["--project-directory", inputs["working_dir"]]
+    for f in inputs["config_files"]:
+        base += ["-f", f]
+    base += ["-f", str(override)]
+    for e in inputs["env_files"]:
+        base += ["--env-file", e]
+    return base
 
 
 def cmd_start_rollback(a):
@@ -816,15 +1024,12 @@ def _start_rollback(a, u4p):
     if helper != m["helper_image"]:
         raise Blocked(f"helper image {helper} != U4 helper image {m['helper_image']}")
     expected_image = m["identity"]["image_id"]
-    require_local_image_id(a.rollback_image, "rollback image")       # refuses tags/names and absent images first
-    if a.rollback_image != expected_image:
-        raise Blocked(f"--rollback-image {a.rollback_image} != the image recorded in U4 {expected_image}")
-    if image_commit(expected_image) != m["expected_commit"]:
-        raise Blocked("rollback image /srv/VERSION does not carry the expected 147e315 commit")
-    cur = discover(a.project, a.service)
+    _check_rollback_image(a.rollback_image, m)
+    inputs = rollback_compose_inputs(a, m)
+    cur = discover(a.project, a.service, absent_ok_volume=m["identity"]["volume"]["name"])
     if stable_identity(cur) != stable_identity(m["identity"]):
         raise Blocked("deployment identity does not match the U4")
-    if cur["container"]["running"] or cur["container"]["restarting"]:
+    if is_running(cur):
         raise Blocked("a service container is running; it must be stopped")
     validate_u4_path(u4p, cur)
     diffs = compare(m["volume_manifest"], probe_volume(helper, cur["volume"]["name"]))
@@ -836,12 +1041,7 @@ def _start_rollback(a, u4p):
     override = rdir / "rollback.override.yml"
     override.write_text(f"services:\n  {a.service}:\n    image: {expected_image}\n    pull_policy: never\n"
                         f"    build: !reset null\n")
-    base = ["docker", "compose", "-p", a.project]
-    for f in a.compose_file:
-        base += ["-f", f]
-    base += ["-f", str(override)]
-    if a.env_file:
-        base += ["--env-file", a.env_file]
+    base = rollback_compose_command(a.project, inputs, override)
     cfg = json.loads(run(base + ["config", "--format", "json"]).stdout.decode())
     svc = cfg["services"][a.service]
     if svc.get("image") != expected_image or "build" in svc or svc.get("pull_policy") != "never":
@@ -883,8 +1083,12 @@ ACCEPT_SNIPPET = r"""
 import json, sqlite3, sys, time, urllib.request
 import os
 B = "http://127.0.0.1:8000"
-O = "http://%s:%s" % (os.environ.get("BIND_HOST", "127.0.0.1"), os.environ.get("BIND_PORT", "8000"))
-H = {"Origin": O, "Sec-Fetch-Site": "same-origin"}   # the app only trusts its own published origin
+HN = os.environ.get("ALLOWED_HOST") or os.environ.get("BIND_HOST", "127.0.0.1")
+P = os.environ.get("BIND_PORT", "8000")
+O = os.environ.get("ALLOWED_ORIGIN") or "http://%s:%s" % (HN, P)
+# the app only trusts its own published host and origin (TrustedHost + Origin check), so the probe
+# presents those even though it connects to the in-container loopback listener
+H = {"Host": "%s:%s" % (HN, P), "Origin": O, "Sec-Fetch-Site": "same-origin"}
 def g(p, h):
     with urllib.request.urlopen(urllib.request.Request(B + p, headers=h), timeout=20) as r:
         return json.loads(r.read())
@@ -960,11 +1164,14 @@ def _stop_and_confirm(cid):
                        "STOP IT BY HAND and escalate; the application is NOT in a safe state.")
 
 
-def _accept_or_stop(project, service, cid, expected_image, expected_commit, expect_schema, quiet_seconds, fault=None):
+def _accept_or_stop(project, service, cid, expected_image, expected_commit, expect_schema, quiet_seconds, fault=None,
+                    prechecks=None):
     """Acceptance; on ANY failure the exact container is stopped and confirmed stopped."""
     try:
         if fault == "fail_acceptance":
             raise Blocked("drill fault: acceptance forced to fail")
+        if prechecks:
+            prechecks()
         _accept(cid, expected_image, expected_commit, expect_schema, quiet_seconds)
     except BaseException as exc:
         _stop_and_confirm(cid)                      # raises Critical if it cannot be confirmed stopped
@@ -974,12 +1181,41 @@ def _accept_or_stop(project, service, cid, expected_image, expected_commit, expe
     return EXIT_OK
 
 
+def _stray_containers(image_id, own_id):
+    """Running containers of the expected image other than the service container: e.g. a candidate
+    started under another Compose project (U6 run without -p) on a new, empty volume."""
+    ids = run(["docker", "ps", "-q", "--no-trunc", "--filter", f"ancestor={image_id}"]).stdout.decode().split()
+    return [f"{docker_json('inspect', i)[0]['Name'].lstrip('/')} ({i[:12]})" for i in ids if i != own_id]
+
+
+def _accept_prechecks(a, cur):
+    def check():
+        strays = _stray_containers(a.expect_image, cur["container"]["id"])
+        if strays:
+            raise Blocked(f"the image {a.expect_image[:19]} also runs OUTSIDE {a.project}/{a.service}: {strays}. "
+                          f"U6 was not run against the deployment's Compose project (-p {a.project}); that container "
+                          "uses another volume. It is not stopped by this tool: stop it by its ID with approval, escalate")
+        if a.u4:
+            u4p = validate_u4_path(a.u4)
+            m = verify_u4(u4p)
+            if stable_identity(cur) != stable_identity(m["identity"]):
+                raise Blocked("the accepted container does not use the U4 volume/project/service identity")
+            diffs = fingerprint_diff(m["identity"]["runtime"], cur["runtime"])
+            if diffs:
+                raise Blocked(f"runtime differs from the U4 container (the rollback could not recreate it): {diffs[:20]}")
+            labels = same_compose_labels(m["identity"], cur)
+            if labels:
+                raise Blocked(f"the candidate was created from different Compose inputs than the U4 container: {labels}")
+            require_local_image_id(m["identity"]["image_id"], "rollback image (recorded in U4)")
+    return check
+
+
 def cmd_accept(a):
     require_local_image_id(a.expect_image, "expected image")
-    cur = discover(a.project, a.service)
+    cur = discover(a.project, a.service, a.expect_volume)
     schema = list(range(1, a.expect_schema + 1))
     return _accept_or_stop(a.project, a.service, cur["container"]["id"], a.expect_image, a.expect_commit, schema,
-                           a.quiet_seconds, fault=_drill_fault(cur))
+                           a.quiet_seconds, fault=_drill_fault(cur), prechecks=_accept_prechecks(a, cur))
 
 
 def build_parser():
@@ -1003,6 +1239,8 @@ def build_parser():
     sp = sub.add_parser("test-restore"); sp.add_argument("--u4", required=True); sp.add_argument("--helper-image", required=True)
     sp = sub.add_parser("rollback"); dep(sp, vol=False)
     sp.add_argument("--u4", required=True); sp.add_argument("--helper-image", required=True)
+    sp.add_argument("--rollback-image", required=True,
+                    help="the U4 image ID; checked (present, = U4, 147e315) before anything is changed")
     sp.add_argument("--stop", action="store_true", help="with --approve: stop a running candidate first")
     g = sp.add_mutually_exclusive_group(required=True)
     g.add_argument("--dry-run", action="store_true")
@@ -1010,10 +1248,13 @@ def build_parser():
     sp = sub.add_parser("start-rollback"); dep(sp, vol=False)
     sp.add_argument("--u4", required=True); sp.add_argument("--helper-image", required=True)
     sp.add_argument("--rollback-image", required=True)
-    sp.add_argument("--compose-file", required=True, action="append")
-    sp.add_argument("--env-file")
+    sp.add_argument("--compose-file", action="append",
+                    help="only for a U4 without recorded Compose inputs; otherwise it must equal the recorded files")
+    sp.add_argument("--env-file", help="optional; must equal the env file recorded in U4")
     sp.add_argument("--quiet-seconds", type=float, default=10.0)
     sp = sub.add_parser("accept"); dep(sp, vol=False)
+    sp.add_argument("--expect-volume", required=True, help="the deployment's volume (the U4 volume)")
+    sp.add_argument("--u4", help="also require the runtime, Compose inputs and volume of the U4 container (U7)")
     sp.add_argument("--expect-image", required=True)
     sp.add_argument("--expect-commit", default=EXPECTED_COMMIT_DEFAULT)
     sp.add_argument("--expect-schema", type=int, default=9)
