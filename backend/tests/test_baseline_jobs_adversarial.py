@@ -123,6 +123,8 @@ def test_generative_jobs_respect_budget_isolation_and_policy(live, monkeypatch, 
             store.recover_after_restart()
             assert store.get(job_id)["status"] == "paused" and logical(uw) == before, f"H ran after restart [{tag}]"
         assert client.post(f"/api/baseline/jobs/{job_id}/resume").status_code == 200, tag
+    live.get_baseline_job_runner().join(60)                 # never assert while the job thread still runs
+    assert not live.get_baseline_job_runner().is_running(), f"job still running [{tag}]"
     monkeypatch.setattr(cat, "upsert_session_coverage", real_up)
     j = store.get(job_id)
     entry = j["progress"]["ABCD"]

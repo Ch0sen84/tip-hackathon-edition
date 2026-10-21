@@ -174,3 +174,18 @@ def _block_external_network(monkeypatch):
     monkeypatch.setattr(_socket.socket, "connect_ex", guarded_connect_ex)
     monkeypatch.setattr(_socket, "getaddrinfo", guarded_getaddrinfo)
     yield
+
+
+# --- Background job-thread isolation (Release 3 test-harness hardening) ---
+# A baseline-job runner thread that outlives its test resolves the module
+# globals get_catalog()/get_adapter() on its next step and would write into
+# the NEXT test's database through that test's provider fake (reproduced
+# deterministically). The `live` fixture stops its job threads at teardown;
+# this guard turns any remaining leak into an explicit failure of the test
+# that would otherwise be silently contaminated.
+@pytest.fixture(autouse=True)
+def _no_leaked_baseline_job_threads():
+    import threading as _threading
+    leaked = [t.name for t in _threading.enumerate() if t.name.startswith("baseline-job-") and t.is_alive()]
+    assert not leaked, f"baseline job thread(s) leaked from an earlier test: {leaked}"
+    yield

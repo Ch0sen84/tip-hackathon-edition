@@ -24,8 +24,31 @@ def build_uw(history_sessions=26, **kw):
     return PaginatedUW(darkpool=rows, static={"stock-state": STATE, "flow-alerts": ok([])}, **kw)
 
 
+JOB_STOP_TIMEOUT_S = 60
+
+
+def stop_job_threads(m) -> None:
+    """Cancel any active job of THIS test and wait until its runner thread has
+    really stopped. Fails loudly instead of letting a job thread outlive the
+    test (a leaked runner resolves the module globals get_catalog() /
+    get_adapter() on its next step and would write into the NEXT test's DB)."""
+    runner = m._baseline_job_runner
+    store = m._baseline_job_store
+    if store is not None:
+        job = store.latest()
+        if job and job["status"] in ("running", "pause_requested"):
+            store.transition(job["id"], ("running", "pause_requested"), "cancel_requested")
+    if runner is not None:
+        runner.join(JOB_STOP_TIMEOUT_S)
+        assert not runner.is_running(), "baseline job thread did not stop within the test"
+
+
 @pytest.fixture
-def live(app_main, monkeypatch):
+def live(app_main, monkeypatch, tmp_path):
+    """Live-mode app with an ISOLATED FILE-BACKED database per test (production
+    semantics: one SQLite connection per call). The suite default ':memory:'
+    keeps ONE connection shared by every thread, which is not a supported
+    concurrency model for a background job thread plus test-thread reads."""
     holder = {}
 
     def use(uw, watchlist=("ABCD",)):
@@ -33,17 +56,22 @@ def live(app_main, monkeypatch):
         holder["adapter"] = uw.adapter(list(watchlist))
         return uw
 
+    monkeypatch.setattr(app_main.settings, "db_path", str(tmp_path / "live_jobs.db"))
+    monkeypatch.setattr(app_main, "_catalog", None)
+    monkeypatch.setattr(app_main, "_store", None)
     monkeypatch.setattr(app_main, "get_adapter", lambda: holder["adapter"])
     monkeypatch.setattr(app_main, "_utcnow", lambda: AS_OF)
     monkeypatch.setattr(app_main, "_baseline_job_store", None)
     monkeypatch.setattr(app_main, "_baseline_job_runner", None)
     app_main.use_uw = use
-    return app_main
+    yield app_main
+    stop_job_threads(app_main)          # cleanup only after the background worker has stopped
 
 
 def run_job(m, client, **body):
     job = client.post("/api/baseline/jobs", json={"tickers": ["ABCD"], "step_pages": 20, **body}).json()["job"]
-    m.get_baseline_job_runner().join(60)
+    m.get_baseline_job_runner().join(JOB_STOP_TIMEOUT_S)
+    assert not m.get_baseline_job_runner().is_running(), "job did not finish within the timeout"
     return m.get_baseline_job_store().get(job["id"])
 
 
@@ -169,10 +197,7 @@ def test_job_and_interactive_refreshes_never_write_one_tickers_coverage_concurre
     # File-backed DB, as in production: one connection per call. (The suite's
     # in-memory catalog shares ONE sqlite connection across threads, which is
     # not a supported concurrency model for this test.)
-    monkeypatch.setattr(live.settings, "db_path", str(tmp_path / "live.db"))
-    monkeypatch.setattr(live, "_catalog", None)
-    monkeypatch.setattr(live, "_store", None)
-    live.use_uw(build_uw())
+    live.use_uw(build_uw())             # the live fixture is already file-backed
     client = TestClient(live.app)
     active, peak, guard = {"n": 0}, {"n": 0}, threading.Lock()
     real = session_collection.update_session_coverage
