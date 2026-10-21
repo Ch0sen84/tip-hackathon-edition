@@ -157,7 +157,11 @@ rather than mixing partial data, until it is restored. Tested in `tests/test_ret
 | 5 liquid tickers, retention keep = 90 | 4–8 GB | live DB plateaus at **12–23 GB**; archives grow ~1.1–2.2 GB/year |
 | Evaluations at 26 refreshes/day × 5 SPY-scale tickers (scheduler enabled) | | +~22 GB/year until evaluation payloads become references |
 
-**Migration and rollback:**
+**Migration and rollback (Release 2 record):**
+- **Historical, not operational guidance.** These notes describe the Release 2 (migration 9) upgrade only. For Release 3
+  the only supported rollback is the full-volume restore of the deployment's verified U4 snapshot in
+  [RELEASE_MIGRATION_ROLLBACK.md](RELEASE_MIGRATION_ROLLBACK.md). Code-only rollback and the DB-only `.bak` are not
+  supported there.
 - Migration 9 is additive (`session_value_curves`, `baseline_jobs`). The automatic pre-migration `.bak` is taken
   as for 7–8.
 - Code rollback to the reviewed release (`2d7a415` / `92a2fdf`) on a schema-9 volume was verified in Docker: it
