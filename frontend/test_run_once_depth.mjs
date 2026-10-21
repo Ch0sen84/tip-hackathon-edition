@@ -128,7 +128,7 @@ console.log("\n=== End-to-end over the REAL decoupled POST /api/scheduler/run-on
   await check_async("Discover Once (depth=discovery_only) succeeds while mode stays 'disabled'", async () => {
     const res = await fetch(`${BASE}/api/scheduler/run-once`, {
       method: "POST", headers: { "Content-Type": "application/json", "X-TIP-Auth": token },
-      body: JSON.stringify({ depth: "discovery_only" }),
+      body: JSON.stringify({ depth: "discovery_only", confirm: true }),
     });
     assert.equal(res.status, 200);
     const body = await res.json();
@@ -143,7 +143,7 @@ console.log("\n=== End-to-end over the REAL decoupled POST /api/scheduler/run-on
   await check_async("Discover & Evaluate Once (depth=discovery_plus_evaluation) succeeds while mode stays 'disabled'", async () => {
     const res = await fetch(`${BASE}/api/scheduler/run-once`, {
       method: "POST", headers: { "Content-Type": "application/json", "X-TIP-Auth": token },
-      body: JSON.stringify({ depth: "discovery_plus_evaluation" }),
+      body: JSON.stringify({ depth: "discovery_plus_evaluation", confirm: true }),
     });
     assert.equal(res.status, 200);
     const body = await res.json();
@@ -184,11 +184,11 @@ console.log("\n=== End-to-end over the REAL decoupled POST /api/scheduler/run-on
     const [res1, res2] = await Promise.all([
       fetch(`${BASE}/api/scheduler/run-once`, {
         method: "POST", headers: { "Content-Type": "application/json", "X-TIP-Auth": token },
-        body: JSON.stringify({ depth: "discovery_plus_evaluation" }),
+        body: JSON.stringify({ depth: "discovery_plus_evaluation", confirm: true }),
       }),
       fetch(`${BASE}/api/scheduler/run-once`, {
         method: "POST", headers: { "Content-Type": "application/json", "X-TIP-Auth": token },
-        body: JSON.stringify({ depth: "discovery_only" }),
+        body: JSON.stringify({ depth: "discovery_only", confirm: true }),
       }),
     ]);
     const statuses = [res1.status, res2.status].sort();

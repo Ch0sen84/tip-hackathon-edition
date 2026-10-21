@@ -65,6 +65,7 @@ global.document = {
 };
 global.history = { replaceState() {}, pushState() {} };
 global.location = { pathname: "/", search: "", hash: "" };
+globalThis.__TIP_TEST_API_BASE__ = BASE; // SEC-1: the app no longer takes its API base from ?api=
 global.window = { addEventListener() {}, TIP_NAV_HANDLERS: null };
 global.ResizeObserver = class { observe() {} };
 global.LightweightCharts = {

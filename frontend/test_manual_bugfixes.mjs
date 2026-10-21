@@ -185,7 +185,7 @@ async function main() {
   // Override API_BASE indirectly isn't possible (const in module scope of
   // app.live.js, read at module-eval time from location.search) -- set
   // location.search before loading. Re-load with query param instead.
-  global.location.search = `?api=${BASE}`;
+  globalThis.__TIP_TEST_API_BASE__ = BASE;
   const liveB = loadReal(
     [
       fileURLToPath(new URL("./app.core.js", import.meta.url)),

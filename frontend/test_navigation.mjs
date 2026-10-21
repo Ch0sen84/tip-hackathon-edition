@@ -149,7 +149,7 @@ async function seedAuthToken() {
 
 async function main() {
   await seedAuthToken();
-  global.location.search = `?api=${BASE}`;
+  globalThis.__TIP_TEST_API_BASE__ = BASE;
   const app = loadReal(
     [
       fileURLToPath(new URL("./app.core.js", import.meta.url)),

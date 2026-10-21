@@ -690,7 +690,7 @@ function renderSchedulerControls(status) {
     <div class="muted" style="font-size:12px;margin-top:4px">
       Last run: ${esc(status.last_run_finished_at && typeof formatTimestampFull === "function" ? formatTimestampFull(status.last_run_finished_at) : (status.last_run_finished_at || "never"))} &middot;
       Next run: ${esc(status.next_run_at && typeof formatTimestampFull === "function" ? formatTimestampFull(status.next_run_at) : (status.next_run_at || "n/a"))} &middot;
-      Candidates evaluated last cycle: ${status.last_cycle_candidates_evaluated ?? "n/a"} &middot;
+      Candidates evaluated last cycle: ${esc(String(status.last_cycle_candidates_evaluated ?? "n/a"))} &middot;
       Freshness window: ${Math.round((status.freshness_window_s || 0) / 60)}m &middot;
       Top-N configured: ${esc(String(topN))}
     </div>
@@ -818,7 +818,10 @@ function renderWhySurfacedBlock(candidate) {
 }
 
 function renderMarketWideCandidateRow(candidate) {
-  const badgeClass = `freshness-badge freshness-${candidate.freshness}`;
+  // class names come from an allowlist, never from data
+  const freshClass = Object.prototype.hasOwnProperty.call(FRESHNESS_LABELS, candidate.freshness)
+    ? candidate.freshness : "unknown";
+  const badgeClass = `freshness-badge freshness-${freshClass}`;
   const evalState = candidate.evaluation
     ? `${esc(candidate.evaluation.state || "n/a")} (${esc(candidate.evaluation.confidence || "n/a")})`
     : "no evaluation yet";
@@ -875,7 +878,8 @@ function renderMarketWideSummary(data, status) {
   const discovered = data.candidate_count_in_snapshot ?? (data.candidates || []).length;
   const shown = (data.candidates || []).length;
   const evaluated = (data.candidates || []).filter((c) => c.freshness === "current" || c.freshness === "stale").length;
-  const awaiting = Math.max(0, shown - evaluated);
+  const failed = (data.candidates || []).filter((c) => c.freshness === "collection_failed").length;
+  const awaiting = Math.max(0, shown - evaluated - failed);
   // UX round (2026-10-16 round 5), item 3: was a raw ISO-with-microseconds
   // string shown straight from the API response -- the one shared
   // frontend/timefmt.js formatter now renders it the same human-readable
@@ -895,9 +899,10 @@ function renderMarketWideSummary(data, status) {
     : "The scheduler is Enabled -- it keeps discovering and evaluating candidates automatically.";
   return `
     <div class="summary-strip" style="display:flex;gap:16px;flex-wrap:wrap;align-items:baseline">
-      <span><strong>${discovered}</strong> discovered <span class="muted">(this scan)</span></span>
-      <span><strong>${evaluated}</strong> evaluated <span class="muted">(of ${shown} shown)</span></span>
-      <span><strong>${awaiting}</strong> awaiting evaluation</span>
+      <span><strong>${esc(String(discovered))}</strong> discovered <span class="muted">(this scan)</span></span>
+      <span><strong>${esc(String(evaluated))}</strong> evaluated <span class="muted">(of ${esc(String(shown))} shown)</span></span>
+      <span><strong>${esc(String(awaiting))}</strong> awaiting evaluation</span>
+      ${failed ? `<span><strong>${esc(String(failed))}</strong> attempted, collection failed</span>` : ""}
       <span class="muted">${esc(asOf)}</span>
     </div>
     <div class="muted" style="font-size:12px;margin-top:3px">${esc(modeNote)}</div>
@@ -924,6 +929,11 @@ function switchView(view) {
   document.querySelectorAll(".nav-item").forEach((b) => b.classList.toggle("active", b.dataset.view === view));
   document.querySelectorAll(".view").forEach((v) => v.classList.toggle("active", v.id === `view-${view}`));
   TIP_STATE.currentView = view;
+  // FE-F6: a view that shows time-sensitive state re-reads it when it becomes active again
+  const handlers = typeof window !== "undefined" ? window.TIP_NAV_HANDLERS : null;
+  if (handlers && typeof handlers.onViewActivated === "function") {
+    try { handlers.onViewActivated(view); } catch (e) { /* a refresh hook must never break navigation */ }
+  }
 }
 
 // --- basic formatting helpers ----------------------------------------------
@@ -1162,7 +1172,7 @@ function radarSummaryCounts(data) {
 
 function renderRadarStatus(data) {
   const c = radarSummaryCounts(data);
-  return `watchlist: ${c.watchlistCount} ticker(s) \u00b7 ${c.evaluatedCount} evaluated \u00b7 ${c.qualifyingCount} qualifying \u00b7 ${c.otherNoteworthyCount} other noteworthy \u00b7 last scanned ${formatAgo(data.last_scan_at)}`;
+  return `watchlist: ${esc(String(c.watchlistCount))} ticker(s) \u00b7 ${esc(String(c.evaluatedCount))} evaluated \u00b7 ${esc(String(c.qualifyingCount))} qualifying \u00b7 ${esc(String(c.otherNoteworthyCount))} other noteworthy \u00b7 last scanned ${esc(formatAgo(data.last_scan_at))}`;
 }
 
 function renderActivitySummary(data) {
@@ -1299,7 +1309,7 @@ function renderSegmentProgression(segments, { maxVisible = 5 } = {}) {
     const isCurrent = i === visible.length - 1;
     return `<span class="hc-step state-${esc(seg.state)}">${esc(formatSegmentLabel(seg, isCurrent))}</span>${i < visible.length - 1 ? '<span class="hc-arrow">\u2192</span>' : ""}`;
   }).join("");
-  return `<div class="history-chip" title="Collapsed from ${segments.reduce((n, s) => n + s.scanCount, 0)} real recorded scan(s)">${moreChip}${steps}</div>`;
+  return `<div class="history-chip" title="Collapsed from ${esc(String(segments.reduce((n, s) => n + s.scanCount, 0)))} real recorded scan(s)">${moreChip}${steps}</div>`;
 }
 
 // Radar card chip: unchanged behavior for <2 raw entries (renders nothing
@@ -2502,8 +2512,8 @@ function renderEvidenceDaySummaryTable(byDay) {
   const rows = byDay.map((d) => `
     <tr>
       <td>${esc(d.date)}</td>
-      <td>${d.flowCount ? `${d.flowCount}${d.flowValue ? ` (${esc(fmtMoney(d.flowValue))})` : ""}` : "\u2014"}</td>
-      <td>${d.dpCount ? `${d.dpCount}${d.dpValue ? ` (${esc(fmtMoney(d.dpValue))})` : ""}` : "\u2014"}</td>
+      <td>${d.flowCount ? `${esc(String(d.flowCount))}${d.flowValue ? ` (${esc(fmtMoney(d.flowValue))})` : ""}` : "\u2014"}</td>
+      <td>${d.dpCount ? `${esc(String(d.dpCount))}${d.dpValue ? ` (${esc(fmtMoney(d.dpValue))})` : ""}` : "\u2014"}</td>
     </tr>`).join("");
   return `
     <table class="evidence-summary-table">
@@ -2559,14 +2569,14 @@ function renderEvidencePanel(allEvents, excludedCount, idPrefix = "") {
     <details class="evidence-detail-panel">
       <summary class="muted">Individual observations (${allEvents.length}) \u2014 filter, sort, paginated</summary>
       <div class="evidence-controls">
-        <select id="${idPrefix}evFilterType">
+        <select id="${esc(idPrefix)}evFilterType">
           <option value="">All types</option>
           <option value="flow_alert">Flow alerts</option>
           <option value="darkpool_trade">Dark-pool trades</option>
         </select>
-        <input type="date" id="${idPrefix}evFilterDate" title="Filter to one date" />
-        <input type="number" id="${idPrefix}evFilterMinValue" placeholder="Min value ($)" title="Minimum premium/value" />
-        <select id="${idPrefix}evSort">
+        <input type="date" id="${esc(idPrefix)}evFilterDate" title="Filter to one date" />
+        <input type="number" id="${esc(idPrefix)}evFilterMinValue" placeholder="Min value ($)" title="Minimum premium/value" />
+        <select id="${esc(idPrefix)}evSort">
           <option value="time_desc">Newest first</option>
           <option value="time_asc">Oldest first</option>
           <option value="value_desc">Largest value first</option>
@@ -2574,12 +2584,12 @@ function renderEvidencePanel(allEvents, excludedCount, idPrefix = "") {
       </div>
       <table class="chart-markers-table">
         <thead><tr><th>Time</th><th>Kind</th><th>Label</th><th>Price</th><th>Value</th></tr></thead>
-        <tbody id="${idPrefix}evTableBody"></tbody>
+        <tbody id="${esc(idPrefix)}evTableBody"></tbody>
       </table>
       <div class="evidence-pagination">
-        <button id="${idPrefix}evPrevPage" class="btn-sm">\u2190 Prev</button>
-        <span id="${idPrefix}evPageInfo" class="muted"></span>
-        <button id="${idPrefix}evNextPage" class="btn-sm">Next \u2192</button>
+        <button id="${esc(idPrefix)}evPrevPage" class="btn-sm">\u2190 Prev</button>
+        <span id="${esc(idPrefix)}evPageInfo" class="muted"></span>
+        <button id="${esc(idPrefix)}evNextPage" class="btn-sm">Next \u2192</button>
       </div>
     </details>`;
 }
@@ -4060,7 +4070,7 @@ function renderTickerDetail(d) {
       <div class="tags">
         <span class="tag">confidence: ${esc(d.confidence)}</span>
         <span class="tag">${esc(d.signal_type)}</span>
-        <span class="tag" title="Distinct NYSE trading sessions with qualifying evidence in the current qualification episode.">qualifying sessions (episode): ${d.qualifying_days_count}</span>
+        <span class="tag" title="Distinct NYSE trading sessions with qualifying evidence in the current qualification episode.">qualifying sessions (episode): ${esc(String(d.qualifying_days_count ?? ""))}</span>
         ${d.evidence_session ? `<span class="tag" title="The NYSE trading session the evaluated evidence belongs to.">evidence session: ${esc(d.evidence_session)}</span>` : ""}
       </div>
       <div class="read primary-headline" id="tickerPrimaryHeadline">${esc(primaryHeadline)}</div>
@@ -4642,13 +4652,14 @@ function renderWatchlistEditor(d, opts = {}) {
     <details class="settings-card watchlist-editor-compact" id="watchlistEditorCard"${openAttr}>
       <summary class="watchlist-editor-summary">
         <strong>My Watchlist</strong>
-        <span class="muted">${count}/${watchlist.max_size} tickers${count ? " \u2014 " + esc(preview) : " (" + preview + ")"}${isDemo ? " \u00b7 saved for Live Mode" : ""}</span>
+        <span class="muted">${esc(String(count))}/${esc(String(watchlist.max_size))} tickers${count ? " \u2014 " + esc(preview) : " (" + esc(preview) + ")"}${isDemo ? " \u00b7 saved for Live Mode" : ""}</span>
         <span class="btn-link watchlist-editor-toggle">edit</span>
       </summary>
       <div class="watchlist-editor-body">
         ${demoNote}
-        <p class="muted">Each ticker in this watchlist costs ~3 real UW API calls per Market Radar scan
-          (flow alerts, dark-pool trades, stock state) -- limit ${watchlist.max_size} symbols.
+        <p class="muted">Each ticker in this watchlist costs up to ${esc(String((d.request_budget && d.request_budget.per_ticker_scan_requests) || 9))}
+          real Unusual Whales requests per Refresh Data (dark-pool and options-flow session pages plus stock state;
+          a request can be re-attempted after a transient error) -- limit ${esc(String(watchlist.max_size))} symbols.
           This is watchlist-based scanning only; switch to the "Market Discovery" mode above for
           market-wide screener-based discovery instead.</p>
         <div class="watchlist-chips" id="watchlistChips">

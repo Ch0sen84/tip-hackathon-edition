@@ -208,7 +208,7 @@ console.log("\n=== End-to-end over the REAL /api/scheduler/* + /api/radar/market
     const res = await fetch(`${BASE}/api/scheduler/mode`, {
       method: "POST",
       headers: { "Content-Type": "application/json", "X-TIP-Auth": token },
-      body: JSON.stringify({ mode: "dry_run" }),
+      body: JSON.stringify({ mode: "dry_run", confirm: "dry_run" }),
     });
     assert.equal(res.status, 200);
     const body = await res.json();
