@@ -214,7 +214,7 @@ console.log("\n=== P2: Refresh response re-renders Last Evaluated without reload
   core.renderRadarLists(after, {}, async () => {});
   check("the completion handler performs one refresh POST then the cache-only radar GET, never a second POST evaluation", () => {
     const handler = liveSrc.match(/async function refreshWatchlistData\(\) \{([\s\S]*?)\n\}/)?.[1] || "";
-    assert.equal((handler.match(/apiPost\("\/api\/radar\/refresh"/g) || []).length, 1);
+    assert.equal((handler.match(/apiPost(?:Confirmed)?\("\/api\/radar\/refresh"/g) || []).length, 1);   // F2-3: server-confirmed
     assert.equal((handler.match(/apiGet\("\/api\/radar"/g) || []).length, 1);
   });
   check("re-rendering the completed cached payload replaces 'Not evaluated' immediately, with no page reload", () => {

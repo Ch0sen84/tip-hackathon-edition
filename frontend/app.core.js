@@ -666,7 +666,8 @@ function renderSchedulerControls(status) {
     )
     .join("");
   const pauseNote = status.pause_reason
-    ? `<div class="muted" style="color:#b45309">Paused: ${esc(status.pause_reason)}</div>`
+    // J2-4: a failed cycle is reported as such (it retries on schedule); only a real pause says "Paused"
+    ? `<div class="muted" style="color:#b45309">${/^last cycle failed/.test(String(status.pause_reason)) ? "" : "Paused: "}${esc(status.pause_reason)}</div>`
     : "";
   // UX remediation item 4 (2026-10-16): the old "Run Once now" button
   // (disabled whenever mode === "disabled") is REMOVED entirely here --

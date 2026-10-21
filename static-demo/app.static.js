@@ -113,9 +113,9 @@ async function loadInvestigateSection(ticker, navSeq) {
       <p class="ai-disabled-note">Public demo: this always shows a pre-written simulated transcript
         captured from a real run of the local app's bounded AI-investigation feature -- no live AI
         or MCP call happens on this page. The downloadable local edition can run a bounded, read-only
-        investigation against UW's real MCP server plus your own AI provider key when live; the full
-        LLM-directed tool-selection/synthesis workflow has not yet been verified end-to-end with a real
-        provider -- see the GitHub README's documented status.</p>
+        investigation against UW's real MCP server plus your own AI provider key when live; that workflow was
+        independently verified with a real provider (a real NVDA run) -- see the GitHub README's
+        verification writeup.</p>
       <button class="btn" id="runInvestigateBtn">Investigate ${esc(ticker)} with AI (simulated)</button>
       <div id="investigateBody" style="margin-top:10px"></div>
     </div>`;

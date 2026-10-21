@@ -112,9 +112,9 @@ function load() {
     .replace(/initTickerCombo\([\s\S]*?\}\);\n/, "")
     .replace(/\(async function bootstrap[\s\S]*?\}\)\(\);\n?/, "");
   (0, eval)(`${coreSrc}\n${liveSrc}\nglobalThis.__x = {
-    apiPost: typeof apiPost === "function" ? apiPost : undefined, apiPostConfirmed: typeof apiPostConfirmed === "function" ? apiPostConfirmed : undefined, runOneTimeDepthAction: typeof runOneTimeDepthAction === "function" ? runOneTimeDepthAction : undefined, loadRadar: typeof loadRadar === "function" ? loadRadar : undefined, runDiscoveryScan: typeof runDiscoveryScan === "function" ? runDiscoveryScan : undefined, resetDiscoveryState: typeof resetDiscoveryState === "function" ? resetDiscoveryState : undefined, evaluateDiscoveryCandidate: typeof evaluateDiscoveryCandidate === "function" ? evaluateDiscoveryCandidate : undefined, loadTickerDetail: typeof loadTickerDetail === "function" ? loadTickerDetail : undefined, loadOhlcChart: typeof loadOhlcChart === "function" ? loadOhlcChart : undefined, runInvestigate: typeof runInvestigate === "function" ? runInvestigate : undefined, initWatchlistEditor: typeof initWatchlistEditor === "function" ? initWatchlistEditor : undefined, renderMarketWideSummary: typeof renderMarketWideSummary === "function" ? renderMarketWideSummary : undefined, renderBaselineDatasetCell: typeof renderBaselineDatasetCell === "function" ? renderBaselineDatasetCell : undefined, renderWatchlistEditor: typeof renderWatchlistEditor === "function" ? renderWatchlistEditor : undefined, renderRadarStatus: typeof renderRadarStatus === "function" ? renderRadarStatus : undefined, switchView: typeof switchView === "function" ? switchView : undefined,
+    apiPost: typeof apiPost === "function" ? apiPost : undefined, apiPostConfirmed: typeof apiPostConfirmed === "function" ? apiPostConfirmed : undefined, runOneTimeDepthAction: typeof runOneTimeDepthAction === "function" ? runOneTimeDepthAction : undefined, loadRadar: typeof loadRadar === "function" ? loadRadar : undefined, runDiscoveryScan: typeof runDiscoveryScan === "function" ? runDiscoveryScan : undefined, resetDiscoveryState: typeof resetDiscoveryState === "function" ? resetDiscoveryState : undefined, evaluateDiscoveryCandidate: typeof evaluateDiscoveryCandidate === "function" ? evaluateDiscoveryCandidate : undefined, loadTickerDetail: typeof loadTickerDetail === "function" ? loadTickerDetail : undefined, loadOhlcChart: typeof loadOhlcChart === "function" ? loadOhlcChart : undefined, runInvestigate: typeof runInvestigate === "function" ? runInvestigate : undefined, initWatchlistEditor: typeof initWatchlistEditor === "function" ? initWatchlistEditor : undefined, renderMarketWideSummary: typeof renderMarketWideSummary === "function" ? renderMarketWideSummary : undefined, renderBaselineDatasetCell: typeof renderBaselineDatasetCell === "function" ? renderBaselineDatasetCell : undefined, renderWatchlistEditor: typeof renderWatchlistEditor === "function" ? renderWatchlistEditor : undefined, renderRadarStatus: typeof renderRadarStatus === "function" ? renderRadarStatus : undefined, switchView: typeof switchView === "function" ? switchView : undefined, refreshWatchlistData: typeof refreshWatchlistData === "function" ? refreshWatchlistData : undefined,
     discoveryStates: () => _discoveryStates, navSeq: () => _navSeq, lastDiscovery: () => _lastDiscoveryData,
-    setMode: (m) => { _currentMode = m; }, setBudget: (b) => { _requestBudget = b; },
+    setMode: (m) => { _currentMode = m; },
   };`);
   return globalThis.__x;
 }
@@ -129,7 +129,7 @@ async function main() {
   const x = load();
 
   console.log("\n=== FE-F1: the server's 428 confirmation contract ===");
-  const RUN_ONCE_428 = { confirmation_required: true, action: "scheduler_run_once", consequence: "1 market screener request. Send confirm=true to proceed." };
+  const RUN_ONCE_428 = { confirmation_required: true, action: "scheduler_run_once", consequence: "Runs once now: 1 market screener request to Unusual Whales (discovery only, nothing is evaluated)." };
   const stubRunOnce = () => {
     rules.push({ match: (m, p) => m === "POST" && p === "/api/scheduler/run-once",
       respond: (b) => (b && b.confirm ? { json: { ran: true, mode: "disabled", depth: b.depth, candidates_evaluated: 0 } }
@@ -238,13 +238,29 @@ async function main() {
     assert.equal(ok, true);
   });
 
-  console.log("\n=== FE-F1/F12: Live refreshes state the server's budget first ===");
-  await check("in Live, a declined budget dialog sends no refresh", async () => {
-    reset(); x.setMode("live"); x.setBudget({ per_ticker_scan_requests: 9, attempts_per_request: 3 }); confirmAnswer = false;
+  console.log("\n=== FE-F1/F12 / F2-3: Live refreshes are confirmed by the SERVER's budget ===");
+  await check("a declined server confirmation sends nothing further and leaves the candidate un-evaluated", async () => {
+    reset(); confirmAnswer = false;
+    rules.push({ match: (m, p) => m === "POST" && p === "/api/ticker/FLUX/refresh",
+      respond: (b) => (b && b.confirm ? { json: { ticker: "FLUX" } }
+        : { status: 428, json: { detail: { confirmation_required: true, action: "live_refresh",
+            consequence: "Refreshes FLUX from Unusual Whales now: up to 9 requests (9 per ticker x 1).", confirm_with: true } } }) });
     await x.evaluateDiscoveryCandidate("FLUX");
-    x.setMode("demo");
-    assert.equal(posts("/api/ticker/FLUX/refresh").length, 0);
-    assert.ok(confirmPrompts[0].includes("up to 9 Unusual Whales requests"), confirmPrompts[0]);
+    const sent = posts("/api/ticker/FLUX/refresh");
+    assert.equal(sent.length, 1, "only the unconfirmed probe may be sent");
+    assert.ok(confirmPrompts[0].includes("up to 9 requests"), confirmPrompts[0]);
+    assert.equal(x.discoveryStates().FLUX, "candidate");
+    assert.match(el("discoveryStatus").textContent, /not evaluated -- nothing was sent/);
+  });
+  await check("an accepted server confirmation re-sends once with confirm=true", async () => {
+    reset(); confirmAnswer = true;
+    rules.push({ match: (m, p) => m === "POST" && p === "/api/radar/refresh",
+      respond: (b) => (b && b.confirm ? { json: {} }
+        : { status: 428, json: { detail: { confirmation_required: true, consequence: "Refreshes the watchlist" } } }) });
+    await x.refreshWatchlistData();
+    const sent = posts("/api/radar/refresh");
+    assert.equal(sent.length, 2);
+    assert.equal(sent[1].body.confirm, true);
   });
 
   console.log("\n=== FE-F11: chart range race ===");

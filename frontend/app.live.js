@@ -252,7 +252,9 @@ async function ensureAuthToken() {
 }
 
 async function apiGet(path) {
-  const res = await fetch(`${API_BASE}${path}`);
+  // S2-5: Network Mode requires the access token for reads too (Local Mode accepts same-origin reads)
+  const res = await fetch(`${API_BASE}${path}`, { headers: _authHeaders() });
+  if (res.status === 401) _throwAuthError(path);
   if (!res.ok) throw new Error(`${path} -> HTTP ${res.status}`);
   return res.json();
 }
@@ -343,19 +345,9 @@ async function apiPostConfirmed(path, body, confirmValue = true) {
   }
 }
 
-// FE-F1/F12: single-ticker and watchlist refreshes in Live Mode spend real provider requests. They are
-// bounded server-side; the UI states the budget the server reports before sending. Demo Mode reads
-// synthetic data and costs nothing, so it is not interrupted.
-let _requestBudget = null;
-let _watchlistTickers = [];
-function _confirmLiveSpend(what, tickers) {
-  if (_currentMode !== "live") return true;
-  const per = (_requestBudget && _requestBudget.per_ticker_scan_requests) || 9;
-  const attempts = (_requestBudget && _requestBudget.attempts_per_request) || 3;
-  const n = Math.max(1, tickers || 1);
-  return _askConfirm(`${what}: up to ${per * n} Unusual Whales requests (${per} per ticker x ${n}; each may be ` +
-    `re-attempted up to ${attempts - 1} time(s) after a transient error). The new evaluation is saved.\n\nProceed?`);
-}
+// FE-F1/F12 / F2-3: Live refreshes (one ticker, the watchlist, "Evaluate in TIP") are confirmed by the
+// SERVER's 428 answer, which states the request budget -- a tab with a stale idea of the mode can never skip
+// it. Demo Mode reads synthetic data, so the server does not ask.
 
 async function apiPut(path, body) {
   const res = await fetch(`${API_BASE}${path}`, {
@@ -608,6 +600,7 @@ function wireLoadChartDataButton(ticker, range, mySeq) {
   btn.addEventListener("click", async () => {
     if (_chartLoadInFlight) return;
     _chartLoadInFlight = true;
+    const myRangeSeq = _chartRangeSeq;   // F2-6: a range picked meanwhile wins over this late answer
     btn.disabled = true;
     if (statusEl) statusEl.textContent = "Loading chart data from UW...";
     try {
@@ -615,7 +608,7 @@ function wireLoadChartDataButton(ticker, range, mySeq) {
         `/api/ticker/${encodeURIComponent(ticker)}/ohlc/refresh?range=${encodeURIComponent(range)}`,
         {}
       );
-      if (mySeq !== _navSeq) return; // user navigated away while this was in flight
+      if (mySeq !== _navSeq || myRangeSeq !== _chartRangeSeq) return; // navigated away / picked another range
       mountCandlestickChart("ohlcChartContainer", ohlc, { showLoadButton: true });
       wireLoadChartDataButton(ticker, range, mySeq); // re-wire the button on the freshly-rendered DOM
       const newStatusEl = document.getElementById("loadChartDataStatus");
@@ -665,6 +658,7 @@ function wireLoadMoreChartDataButton(ticker, range, mySeq) {
   btn.addEventListener("click", async () => {
     if (_chartLoadInFlight) return;
     _chartLoadInFlight = true;
+    const myRangeSeq = _chartRangeSeq;   // F2-6: a range picked meanwhile wins over this late answer
     btn.disabled = true;
     if (statusEl) statusEl.textContent = `Fetching real ${range} data from UW...`;
     try {
@@ -672,7 +666,7 @@ function wireLoadMoreChartDataButton(ticker, range, mySeq) {
         `/api/ticker/${encodeURIComponent(ticker)}/ohlc/refresh?range=${encodeURIComponent(range)}`,
         {}
       );
-      if (mySeq !== _navSeq) return; // user navigated away while this was in flight
+      if (mySeq !== _navSeq || myRangeSeq !== _chartRangeSeq) return; // navigated away / picked another range
       mountCandlestickChart("ohlcChartContainer", ohlc, { showLoadButton: true });
       const noteEl = document.getElementById("chartRangeNote");
       if (noteEl) {
@@ -741,6 +735,7 @@ function wireRefreshLastBarButton(ticker, range, mySeq) {
   btn.addEventListener("click", async () => {
     if (_chartLoadInFlight) return;
     _chartLoadInFlight = true;
+    const myRangeSeq = _chartRangeSeq;   // F2-6: a range picked meanwhile wins over this late answer
     btn.disabled = true;
     if (statusEl) statusEl.textContent = "Refreshing the most recent bar from UW...";
     try {
@@ -751,7 +746,7 @@ function wireRefreshLastBarButton(ticker, range, mySeq) {
         `/api/ticker/${encodeURIComponent(ticker)}/ohlc/refresh?limit=${REFRESH_LAST_BAR_LIMIT}`,
         {}
       );
-      if (mySeq !== _navSeq) return; // user navigated away while this was in flight
+      if (mySeq !== _navSeq || myRangeSeq !== _chartRangeSeq) return; // navigated away / picked another range
       // The scoped refresh intentionally returns only a FEW bars (not
       // the full range the chart is showing) -- re-request the real
       // cache-only range read so the chart re-renders with the full
@@ -796,7 +791,7 @@ async function loadTickerDetail(ticker, { refresh = false } = {}) {
   let loaded = false;
   try {
     const d = refresh
-      ? await apiPost(`/api/ticker/${encodeURIComponent(ticker)}/refresh`, {})
+      ? await apiPostConfirmed(`/api/ticker/${encodeURIComponent(ticker)}/refresh`, {})
       : await apiGet(`/api/ticker/${encodeURIComponent(ticker)}`);
     loaded = true;
     if (mySeq !== _navSeq) return loaded; // superseded by a newer ticker/mode switch
@@ -804,7 +799,6 @@ async function loadTickerDetail(ticker, { refresh = false } = {}) {
     const refreshBtn = document.getElementById("tickerRefreshBtn");
     if (refreshBtn) {
       refreshBtn.addEventListener("click", async () => {
-        if (!_confirmLiveSpend(`Refresh ${ticker}`, 1)) return;
         refreshBtn.disabled = true;
         try {
           await loadTickerDetail(ticker, { refresh: true });
@@ -828,6 +822,10 @@ async function loadTickerDetail(ticker, { refresh = false } = {}) {
     await loadInvestigateSection(ticker, mySeq);
   } catch (err) {
     if (mySeq !== _navSeq) return loaded;
+    if (!loaded && err.declined) {
+      await loadTickerDetail(ticker);                // nothing was sent: show the cached view again
+      return null;
+    }
     if (!loaded) el.innerHTML = `<div class="empty">Error loading ${esc(ticker)}: ${esc(err.message)}</div>`;
   }
   return loaded;
@@ -876,7 +874,11 @@ function modeLabelFor(simulated, transport, confirmed = true) {
 let _investigateInFlight = false;
 
 async function runInvestigate(ticker, navSeq, modeLabel) {
-  if (_investigateInFlight) return;
+  if (_investigateInFlight) {
+    const body = document.getElementById("investigateBody");
+    if (body) body.innerHTML = `<div class="empty">A previous investigation is still running -- try again when it finishes.</div>`;
+    return;
+  }
   _investigateInFlight = true;
   const runBtn = document.getElementById("runInvestigateBtn");
   if (runBtn) runBtn.disabled = true;
@@ -902,9 +904,10 @@ async function _runInvestigate(ticker, navSeq, modeLabel) {
     // standalone fetch) so this paid, state-changing call gets the same
     // X-TIP-Auth header + 401 handling as every other mutating call --
     // see apiPost's docstring above.
-    const d = await apiPost(`/api/investigate/${encodeURIComponent(ticker)}`, {});
+    // S2-2: the two-click arm above IS the explicit confirmation of the stated cost
+    const d = await apiPost(`/api/investigate/${encodeURIComponent(ticker)}`, { confirm: true });
     if (mySeq !== _navSeq) return; // user moved on before this resolved -- never render a stale ticker's result
-    body.innerHTML = renderInvestigateResult(d, ticker, modeLabel || modeLabelFor(d.simulated, d.transport));
+    body.innerHTML = renderInvestigateResult(d, ticker, d.transport ? modeLabelFor(d.simulated, d.transport) : modeLabel);
   } catch (err) {
     if (mySeq !== _navSeq) return;
     body.innerHTML = `<div class="empty">Investigation failed: ${esc(err.message)}</div>`;
@@ -1023,7 +1026,11 @@ let _discoveryScanInFlight = false;
 let _discoverySeq = 0;
 
 async function runDiscoveryScan() {
-  if (_discoveryScanInFlight) return; // FE-F10: a second submit while one is in flight sends nothing
+  if (_discoveryScanInFlight) {          // FE-F10: a second submit while one is in flight sends nothing
+    const st = document.getElementById("discoveryStatus");
+    if (st) st.textContent = "A previous scan is still finishing -- try again in a moment.";   // F2-4
+    return;
+  }
   const statusEl = document.getElementById("discoveryStatus");
   const listEl = document.getElementById("discoveryCandidateList");
   const scanBtn = document.getElementById("discoveryScanBtn");
@@ -1105,7 +1112,6 @@ function rerenderDiscoveryList() {
 // it. On success, navigates to Ticker Analysis so the user sees the
 // real computed gates/state immediately.
 async function evaluateDiscoveryCandidate(ticker) {
-  if (!_confirmLiveSpend(`Evaluate ${ticker} in TIP`, 1)) return;
   const mySeq = _discoverySeq;
   _discoveryStates[ticker] = "evaluating";
   rerenderDiscoveryList();
@@ -1116,11 +1122,10 @@ async function evaluateDiscoveryCandidate(ticker) {
     const ok = await navigateToTicker(ticker, (t) => loadTickerDetail(t, { refresh: true }));
     if (mySeq !== _discoverySeq) return; // discovery was reset (mode switch) meanwhile
     // FE-F7: only a refresh that actually succeeded is "evaluated"; the panel shows the failure reason
-    _discoveryStates[ticker] = ok === false ? "candidate" : "evaluated";
-    if (ok === false) {
-      const statusEl = document.getElementById("discoveryStatus");
-      if (statusEl) statusEl.textContent = `Evaluation failed for ${ticker} -- see Ticker Analysis for the reason.`;
-    }
+    _discoveryStates[ticker] = ok === true || ok === undefined ? "evaluated" : "candidate";
+    const statusEl = document.getElementById("discoveryStatus");
+    if (ok === false && statusEl) statusEl.textContent = `Evaluation failed for ${ticker} -- see Ticker Analysis for the reason.`;
+    if (ok === null && statusEl) statusEl.textContent = `${ticker} not evaluated -- nothing was sent.`;
   } catch (err) {
     _discoveryStates[ticker] = "candidate";
     alert(`Evaluation failed for ${ticker}: ${err.message}`);
@@ -1138,8 +1143,6 @@ async function loadSettings() {
   try {
     const d = await apiGet("/api/settings");
     _currentMode = d.mode || "demo";
-    _requestBudget = d.request_budget || null;
-    _watchlistTickers = (d.watchlist && d.watchlist.tickers) || [];
     renderModePill(d.mode, d.public_demo);
     const { publicDemo } = renderSettingsView(d);
     document.getElementById("btnModeDemo").addEventListener("click", () => setMode("demo"));
@@ -1219,8 +1222,12 @@ function scheduleBaselinePoll(ov) {
 function wireBaselinePanel(ov) {
   const status = document.getElementById("baselineStatus");
   const act = async (fn) => {
-    try { await fn(); } catch (err) { if (status) status.textContent = err.message; }
-    await loadBaselinePanel();
+    let message = "";
+    try { await fn(); } catch (err) { message = err.message; }
+    await loadBaselinePanel();                       // replaces the card (and its status line) ...
+    const fresh = document.getElementById("baselineStatus");
+    if (fresh && message) fresh.textContent = message; // ... so the outcome is written afterwards (F2-2)
+    else if (status && message) status.textContent = message;
   };
   document.querySelectorAll("[data-baseline-start]").forEach((btn) => {
     btn.addEventListener("click", () => act(() => apiPostConfirmed("/api/baseline/jobs", { tickers: [btn.dataset.baselineStart] })));
@@ -1281,6 +1288,10 @@ function wireUpdatesSection(d) {
 // every add/remove -- reads the current chips from the DOM (already the
 // source of truth after each render) rather than tracking a separate
 // JS-side array, so there's exactly one place the current list lives.
+let _wlIntended = null;
+let _wlChain = Promise.resolve();
+let _wlPending = 0;
+
 function initWatchlistEditor() {
   const addBtn = document.getElementById("watchlistAddBtn");
   const addInput = document.getElementById("watchlistAddInput");
@@ -1288,38 +1299,37 @@ function initWatchlistEditor() {
   const statusEl = document.getElementById("watchlistStatus");
   if (!addBtn || !chipsEl) return; // public demo build has no watchlist editor at all
 
-  // FE-F8: while a save is in flight the chips on screen are not yet the list being saved. Edits made in
-  // that window build on the latest INTENDED list, and saves run one after another, so a quick second
-  // add never overwrites the first.
-  let intended = null;
-  let chain = Promise.resolve();
-  let pending = 0;
+  // FE-F8 / F2-1: while a save is in flight the chips on screen are not yet the list being saved. Edits made
+  // in that window build on the latest INTENDED list, and saves run one after another. The queue lives at
+  // page level (_wl*), so it survives the editor being re-rendered after a save.
+  const status = () => document.getElementById("watchlistStatus") || statusEl;
 
   function currentTickers() {
-    if (intended) return intended.slice();
-    return Array.from(chipsEl.querySelectorAll("[data-ticker]")).map((el) => el.dataset.ticker);
+    if (_wlIntended) return _wlIntended.slice();
+    const chips = document.getElementById("watchlistChips") || chipsEl;
+    return Array.from(chips.querySelectorAll("[data-ticker]")).map((el) => el.dataset.ticker);
   }
 
   function saveWatchlist(tickers) {
-    intended = tickers.slice();
-    pending += 1;
-    statusEl.textContent = "Saving...";
-    chain = chain.then(async () => {
+    _wlIntended = tickers.slice();
+    _wlPending += 1;
+    status().textContent = "Saving...";
+    _wlChain = _wlChain.then(async () => {
       try {
         await apiPut("/api/settings/watchlist", { watchlist: tickers });
-        if (pending === 1) {
-          statusEl.textContent = "";
+        if (_wlPending === 1) {
+          status().textContent = "";
           await loadSettings(); // re-render chips from the server's normalized/persisted list
         }
       } catch (err) {
-        intended = null; // fall back to what the server last confirmed
-        statusEl.textContent = `Error: ${err.message}`;
+        _wlIntended = null; // fall back to what the server last confirmed
+        status().textContent = `Error: ${err.message}`;
       } finally {
-        pending -= 1;
-        if (pending === 0) intended = null;
+        _wlPending -= 1;
+        if (_wlPending === 0) _wlIntended = null;
       }
     });
-    return chain;
+    return _wlChain;
   }
 
   addBtn.addEventListener("click", () => {
@@ -1636,7 +1646,14 @@ async function runOneTimeDepthAction(depth) {
   try {
     const result = await apiPostConfirmed("/api/scheduler/run-once", { depth });
     const modeLabel = typeof schedulerModeShortLabel === "function" ? schedulerModeShortLabel(result.mode) : result.mode;
-    if (depth === "discovery_only") {
+    const label = depth === "discovery_only" ? "Discover Once" : "Discover & Evaluate Once";
+    if (result.ran === false) {
+      isError = true;
+      finalMessage = `${label} did not run: ${result.reason || "refused"}. Recurring mode unchanged (still ${modeLabel}).`;
+    } else if (result.pause_reason) {
+      isError = true;
+      finalMessage = `${label} ran but did not complete: ${result.pause_reason}.`;
+    } else if (depth === "discovery_only") {
       finalMessage = `Discover Once complete -- candidates discovered and cataloged. Recurring mode unchanged (still ${modeLabel}).`;
     } else {
       const n = result.candidates_evaluated ?? 0;
@@ -1694,15 +1711,13 @@ document.getElementById("refreshRadar").addEventListener("click", loadRadar);
 let _watchlistRefreshInFlight = false;
 async function refreshWatchlistData() {
   if (_watchlistRefreshInFlight) return; // belt-and-suspenders client-side guard; server-side lock is authoritative
-  const nTickers = (_lastRadarData && Number.isFinite(_lastRadarData.scanned) && _lastRadarData.scanned) || _watchlistTickers.length || 1;
-  if (!_confirmLiveSpend("Refresh Data for the watchlist", nTickers)) return;
   const btn = document.getElementById("refreshWatchlistDataBtn");
   const statusEl = document.getElementById("refreshWatchlistDataStatus");
   _watchlistRefreshInFlight = true;
   if (btn) { btn.disabled = true; btn.textContent = "Refreshing..."; }
   if (statusEl) statusEl.textContent = "Fetching fresh data from Unusual Whales...";
   try {
-    await apiPost("/api/radar/refresh", {});
+    await apiPostConfirmed("/api/radar/refresh", {});
     // The POST has already performed and persisted exactly one evaluation
     // per watchlist ticker. Re-read through the existing cache-only GET so
     // Last Evaluated comes from the committed catalog rows; this is not a
@@ -1723,7 +1738,7 @@ async function refreshWatchlistData() {
     // The server's duplicate-refresh 409 and any other failure both
     // surface here with a real, specific message -- never a silent
     // no-op on a double-click.
-    if (statusEl) statusEl.textContent = `Refresh failed: ${err.message}`;
+    if (statusEl) statusEl.textContent = err.declined ? "Not refreshed -- nothing was sent." : `Refresh failed: ${err.message}`;
   } finally {
     _watchlistRefreshInFlight = false;
     if (btn) { btn.disabled = false; btn.textContent = "Refresh Data"; }
@@ -1808,6 +1823,7 @@ window.TIP_NAV_HANDLERS = {
   // panel (job status) are local reads -- re-read them when the view is opened again instead of showing
   // the state from when the page first loaded. No provider request is made by either read.
   onViewActivated: (view) => {
+    if (view === "radar" && _lastRadarData) loadRadar();          // F2-5: cache-only GET, no provider request
     if (view === "marketwide" && _marketWideLoaded) loadMarketWideRadar();
     if (view === "settings" && document.getElementById("baselineCard")) loadBaselinePanel();
   },
