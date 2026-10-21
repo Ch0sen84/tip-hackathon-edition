@@ -51,7 +51,7 @@ def _write_secret_file(path: Path, value: str) -> None:
     local users), fsynced, then atomically renamed into place."""
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = path.with_suffix(path.suffix + ".tmp")
-    fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    fd = _open_private_tmp(tmp_path)
     with os.fdopen(fd, "w", encoding="utf-8") as f:
         f.write(value)
         f.flush()
@@ -61,6 +61,17 @@ def _write_secret_file(path: Path, value: str) -> None:
         os.chmod(path, 0o600)
     except OSError:
         pass  # best-effort on platforms/filesystems that don't support chmod
+
+
+def _open_private_tmp(tmp_path: Path) -> int:
+    """S2-7: a stale temp file (crash leftover, possibly 0644, possibly a planted symlink) is removed and the
+    new one is created exclusively -- never reused, never followed."""
+    try:
+        os.unlink(tmp_path)
+    except FileNotFoundError:
+        pass
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    return os.open(tmp_path, flags, 0o600)
 
 
 def _same_secret(expected: str, candidate: str) -> bool:
@@ -179,7 +190,7 @@ def default_token_path(settings_path: "str | os.PathLike") -> str:
 # when it doesn't, never a replacement that weakens the loopback case.
 PAIRING_CODE_FILENAME = ".pairing_code"
 PAIRING_CODE_TTL_S = 15 * 60  # rotates automatically after 15 minutes
-PAIRING_CODE_MAX_FAILED_ATTEMPTS = 20  # defense-in-depth on top of 64 bits of entropy
+PAIRING_CODE_MAX_FAILED_ATTEMPTS = 20  # historical constant (tests); failures are only counted -- see consume() (S2-1)
 
 
 class PairingCodeStore:
@@ -200,12 +211,16 @@ class PairingCodeStore:
         self._code: Optional[str] = None
         self._expires_at: float = 0.0
         self._failed_attempts = 0
-        self.on_rotate = None              # callable(code): announces a rotated code (main.py logs it)
+        # S2-1: wrong guesses never lock pairing out and never rotate the code. Behind Docker Desktop every
+        # client (the operator's browser and any LAN peer) arrives from the same gateway address, so neither
+        # a global nor a per-address limit could tell them apart; 64 bits of entropy make online guessing
+        # infeasible on their own. Failures are only counted (observability).
+        self.on_rotate = None              # callable(code, reason): announces a new code (main.py logs it)
 
     def _write(self, code: str) -> None:
         _write_secret_file(Path(self.code_path), code)
 
-    def _generate_locked(self) -> str:
+    def _generate_locked(self, reason: str = "startup") -> str:
         import time
 
         # 16 hex chars = 64 bits of entropy -- short enough to type/paste
@@ -218,7 +233,7 @@ class PairingCodeStore:
         self._write(code)
         if self.on_rotate is not None:
             try:
-                self.on_rotate(code)
+                self.on_rotate(code, reason)
             except Exception:  # noqa: BLE001 -- announcing a code must never break pairing
                 pass
         return code
@@ -233,10 +248,10 @@ class PairingCodeStore:
 
         with self._lock:
             if force_new or self._code is None or time.monotonic() > self._expires_at:
-                return self._generate_locked()
+                return self._generate_locked("startup" if force_new else "expired")
             return self._code
 
-    def consume(self, candidate: Optional[str]) -> bool:
+    def consume(self, candidate: Optional[str], client: Optional[str] = None) -> bool:
         """One-time-use check: on a correct, still-valid code, rotates to
         a brand-new code (so the SAME code can never be replayed/reused)
         and returns True. Every other case (wrong code, expired, too
@@ -249,19 +264,12 @@ class PairingCodeStore:
         with self._lock:
             if self._code is None or time.monotonic() > self._expires_at:
                 # SEC-4: an expired code is replaced (and announced) instead of leaving pairing broken
-                self._generate_locked()
+                self._generate_locked("expired")
                 return False
-            if not candidate:
-                self._failed_attempts += 1
-            elif _same_secret(self._code, candidate):
-                self._generate_locked()  # one-time use: rotate immediately on success
+            if candidate and _same_secret(self._code, candidate):
+                self._generate_locked("used")      # one-time use: rotate immediately on success
                 return True
-            else:
-                self._failed_attempts += 1
-            if self._failed_attempts >= PAIRING_CODE_MAX_FAILED_ATTEMPTS:
-                # SEC-3: too many wrong guesses rotate the code (announced in the log and the code file)
-                # instead of locking pairing out until the next restart
-                self._generate_locked()
+            self._failed_attempts += 1             # counted only: never a lockout, never a rotation (S2-1)
             return False
 
     def reset_cache(self) -> None:

@@ -132,7 +132,7 @@ def test_d3_routes_refuse_budgets_below_one_without_a_request(live):
     uw = live.use_uw(build_uw())
     client = TestClient(live.app)
     for mp in (0, -5):
-        assert client.post(f"/api/ticker/ABCD/baseline/backfill?max_pages={mp}").status_code == 400
+        assert client.post(f"/api/ticker/ABCD/baseline/backfill?confirm=true&max_pages={mp}").status_code == 400
     assert client.post("/api/baseline/jobs", json={"confirm": True, "tickers": ["ABCD"], "max_pages_per_ticker": 0}).status_code == 400
     assert not [u for u, _ in uw.calls if "/api/darkpool/" in u or "flow-alerts" in u]
     assert live.get_baseline_job_store().latest() is None
@@ -159,7 +159,7 @@ def test_d4_d6_pages_and_attempts_of_a_failing_step_are_charged(live, monkeypatc
     assert j["status"] == "paused" and "internal error" in j["last_error"]
     assert j["pages_used"] == 10 and j["progress"]["ABCD"]["reserved_pages"] == 10     # charged before requests
     assert j["progress"]["ABCD"]["http_attempts"] == provider() == 3                     # D6
-    client.post(f"/api/baseline/jobs/{job['id']}/resume")
+    client.post(f"/api/baseline/jobs/{job['id']}/resume", json={"confirm": True})
     live.get_baseline_job_runner().join(30)
     j = store.get(job["id"])
     assert j["pages_used"] <= 20 and provider() <= 20                                   # D4 (was 23)

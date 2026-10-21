@@ -80,7 +80,7 @@ def test_live_mode_scan_after_real_refresh_shows_its_own_timestamp_not_demo(app_
     mock_session.get.return_value = MagicMock(status_code=200, ok=True, text="{}", headers={},
                                                 json=MagicMock(return_value={"data": []}))
     client = TestClient(app_main.app)
-    refresh_resp = client.post("/api/radar/refresh")
+    refresh_resp = client.post("/api/radar/refresh", json={"confirm": True})
     assert refresh_resp.status_code == 200
     live_scan_at = refresh_resp.json()["last_scan_at"]
     assert live_scan_at is not None
@@ -110,7 +110,7 @@ def test_cache_only_live_read_never_writes_a_new_timestamp_w2a_still_holds(app_m
     mock_session.get.return_value = MagicMock(status_code=200, ok=True, text="{}", headers={},
                                                 json=MagicMock(return_value={"data": []}))
     client = TestClient(app_main.app)
-    client.post("/api/radar/refresh")
+    client.post("/api/radar/refresh", json={"confirm": True})
     recorded = app_main._settings_store.get_all()["last_scan_at_live"]
     calls_after_refresh = mock_session.get.call_count
 

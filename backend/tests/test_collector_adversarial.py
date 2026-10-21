@@ -241,7 +241,9 @@ def test_generative_walks_hold_the_coverage_invariants(tmp_path, monkeypatch, da
 
 @pytest.mark.parametrize("dataset", ["darkpool", "options_flow"])
 @pytest.mark.parametrize("seed", range(0, 40))
-def test_generative_clean_provider_always_completes_exactly(tmp_path, monkeypatch, dataset, seed):
+def test_generative_clean_provider_always_completes_exactly(tmp_path, monkeypatch, dataset, seed, no_gap_policy):
+    # (no_gap_policy: these random bursty sessions test pagination exactness, not plausibility; they are
+    #  walked at one fixed clock, so a suspected gap could never reach its confirmation time)
     """No faults: any sequence of budgets 1..25 eventually completes the session
     with exactly the provider's rows (no skip at any interruption point), unless
     one timestamp holds more than a page (then never complete)."""

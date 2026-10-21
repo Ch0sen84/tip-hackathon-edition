@@ -114,7 +114,7 @@ def test_resume_after_restart_keeps_per_dataset_targets(live):
     store.recover_after_restart()
     assert store.get(job["id"])["status"] == "paused"
     client = TestClient(live.app)
-    assert client.post(f"/api/baseline/jobs/{job['id']}/resume").status_code == 200
+    assert client.post(f"/api/baseline/jobs/{job['id']}/resume", json={"confirm": True}).status_code == 200
     live.get_baseline_job_runner().join(60)
     final = store.get(job["id"])
     assert final["status"] == "completed"

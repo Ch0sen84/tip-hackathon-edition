@@ -746,13 +746,20 @@ def backup_db_file(db_path: str) -> Optional[str]:
     if free < need:
         raise RuntimeError(f"insufficient free space for the pre-migration backup of {src.name}: "
                            f"{free} bytes free, {need} needed -- refusing to migrate without a backup")
+    _sweep_stale_partials(src)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
-    backup_path = src.with_name(f"{src.name}.pre-migration-{stamp}.bak")
+    pid = os.getpid()
+    backup_path = src.with_name(f"{src.name}.pre-migration-{stamp}-{pid}.bak")
     n = 1
     while backup_path.exists():  # never overwrite an earlier backup
-        backup_path = src.with_name(f"{src.name}.pre-migration-{stamp}-{n}.bak")
+        backup_path = src.with_name(f"{src.name}.pre-migration-{stamp}-{pid}-{n}.bak")
         n += 1
     partial = backup_path.with_name(backup_path.name + ".partial")
+    try:
+        # P2-8: claimed exclusively, so two processes can never write the same partial
+        os.close(os.open(partial, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
+    except FileExistsError:
+        raise RuntimeError(f"backup name collision for {partial.name}; retry the start")
     try:
         src_conn = sqlite3.connect(str(src))
         try:
@@ -771,6 +778,54 @@ def backup_db_file(db_path: str) -> Optional[str]:
             pass
         raise
     return str(backup_path)
+
+
+PARTIAL_STALE_AFTER_S = 3600
+
+
+def _pid_alive(pid: int) -> bool:
+    """Whether a process with this id exists. Never signals anything (os.kill(pid, 0) is only used on POSIX;
+    on Windows it would send CTRL_C_EVENT, so the process is queried instead)."""
+    if pid <= 0:
+        return False
+    if os.name == "posix":
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        return True
+    try:
+        import ctypes
+        k32 = ctypes.windll.kernel32
+        h = k32.OpenProcess(0x1000, False, pid)          # PROCESS_QUERY_LIMITED_INFORMATION
+        if not h:
+            return False
+        try:
+            code = ctypes.c_ulong()
+            return bool(k32.GetExitCodeProcess(h, ctypes.byref(code))) and code.value == 259   # STILL_ACTIVE
+        finally:
+            k32.CloseHandle(h)
+    except Exception:  # noqa: BLE001 -- unknown: assume alive (never delete a possibly in-use file)
+        return True
+
+
+def _sweep_stale_partials(src: Path) -> None:
+    """P2-7: a `.bak.partial` left by a process killed mid-backup is never a backup (only a completed rename
+    is). Its writer's pid is in the name: a partial whose writer is gone (or is this process, which holds the
+    migration lock), or any partial older than an hour, is removed."""
+    import re
+    import time as _time
+    for p in src.parent.glob(f"{src.name}.pre-migration-*.bak.partial"):
+        try:
+            m = re.search(r"-(\d+)(?:-\d+)?\.bak\.partial$", p.name)
+            pid = int(m.group(1)) if m else -1
+            if (pid == os.getpid() or (m and not _pid_alive(pid))
+                    or _time.time() - p.stat().st_mtime > PARTIAL_STALE_AFTER_S):
+                p.unlink()
+        except OSError:
+            pass
 
 
 def _schema_versions_of(path: Path) -> Optional[list]:

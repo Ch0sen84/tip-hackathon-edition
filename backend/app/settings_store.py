@@ -119,6 +119,10 @@ def _fsync_dir(path: Path) -> None:
         os.close(fd)
 
 
+class SettingsUnavailableError(RuntimeError):
+    """The settings file exists but could not be read (I/O error). Nothing is moved or overwritten."""
+
+
 class SettingsStore:
     """Thread-safe (within one process) JSON file store. One instance is
     created in main.py; tests may point a fresh instance at a tmp_path file
@@ -128,32 +132,65 @@ class SettingsStore:
         self.path = Path(path)
         self._lock = Lock()
         self.recovery_notice: Optional[str] = None
+        # P2-1: a quarantine notice outlives a restart until the operator removes the marker / the copies
+        marker = self._notice_marker()
+        if marker.exists() and self.preserved_copies():
+            try:
+                self.recovery_notice = marker.read_text(encoding="utf-8")[:500]
+            except OSError:
+                pass
+
+    def _notice_marker(self) -> Path:
+        return self.path.with_name(self.path.name + ".recovery-notice")
 
     def _quarantine(self, why: str) -> None:
         """A settings file that cannot be read is MOVED aside, never overwritten: the saved keys stay
         recoverable from the copy and the problem is surfaced (GET /api/settings -> settings_warning)."""
-        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        aside = self.path.with_name(f"{self.path.name}.corrupt-{stamp}")
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+        aside = self.path.with_name(f"{self.path.name}.corrupt-{stamp}-{os.getpid()}")
+        n = 1
+        while aside.exists():                     # P2-1: never overwrite an earlier preserved copy
+            aside = self.path.with_name(f"{self.path.name}.corrupt-{stamp}-{os.getpid()}-{n}")
+            n += 1
         try:
             os.replace(self.path, aside)
+            try:
+                os.chmod(aside, 0o600)            # the copy can hold credentials
+            except OSError:
+                pass
             self.recovery_notice = (f"settings file was unreadable ({why}); it was preserved as {aside.name} "
-                                    "and defaults are in use -- re-enter credentials or restore that file")
+                                    "and defaults are in use -- re-enter credentials or restore that file. "
+                                    "The preserved copy may still contain API keys; delete it once recovered")
         except OSError as exc:
             self.recovery_notice = f"settings file is unreadable ({why}) and could not be moved aside: {exc}"
+        try:
+            self._notice_marker().write_text(self.recovery_notice, encoding="utf-8")
+        except OSError:
+            pass
         _log.error("settings: %s", self.recovery_notice)
 
     def _read(self) -> dict:
         if not self.path.exists():
             return _defaults()
-        try:
-            with open(self.path, "r", encoding="utf-8") as f:
-                raw = json.load(f)
-            if not isinstance(raw, dict):
-                raise ValueError(f"top-level JSON is {type(raw).__name__}, not an object")
-        except FileNotFoundError:
-            return _defaults()
-        except (OSError, ValueError, UnicodeDecodeError) as exc:   # JSONDecodeError is a ValueError
-            self._quarantine(f"{type(exc).__name__}: {str(exc)[:120]}")
+        raw = None
+        for attempt in range(3):
+            try:
+                with open(self.path, "r", encoding="utf-8") as f:
+                    raw = json.load(f)
+                break
+            except FileNotFoundError:
+                return _defaults()
+            except (ValueError, UnicodeDecodeError) as exc:      # content is corrupt (JSONDecodeError too)
+                self._quarantine(f"{type(exc).__name__}: {str(exc)[:120]}")
+                return _defaults()
+            except OSError as exc:
+                # S2-6: an I/O error (antivirus or backup lock, EMFILE) says nothing about the content. Never
+                # move a possibly valid file aside or fall back to defaults that a later write would persist.
+                if attempt == 2:
+                    raise SettingsUnavailableError(f"settings file temporarily unreadable: {type(exc).__name__}")
+                time.sleep(0.1 * (attempt + 1))
+        if not isinstance(raw, dict):
+            self._quarantine(f"ValueError: top-level JSON is {type(raw).__name__}, not an object")
             return _defaults()
         data = _defaults()
         for key in _FIELDS:
@@ -166,8 +203,13 @@ class SettingsStore:
     def _write(self, data: dict) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         tmp_path = self.path.with_suffix(self.path.suffix + ".tmp")
-        # 0600 from creation (no window in which the keys are world-readable), fsync before the rename
-        fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        # 0600 from creation (no window in which the keys are world-readable), fsync before the rename;
+        # S2-7: a stale tmp is removed and the new one created exclusively, never followed if a symlink
+        try:
+            os.unlink(tmp_path)
+        except FileNotFoundError:
+            pass
+        fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump({k: data.get(k) for k in _FIELDS}, f)
             f.flush()
@@ -178,6 +220,29 @@ class SettingsStore:
         except OSError:
             pass  # best-effort on platforms/filesystems that don't support chmod
         _fsync_dir(self.path.parent)
+
+    def preserved_copies(self) -> list:
+        """Names of quarantined settings copies (they may still hold API keys -- S2-6)."""
+        return sorted(p.name for p in self.path.parent.glob(f"{self.path.name}.corrupt-*"))
+
+    def purge_preserved_copies(self) -> list:
+        """S2-6: removing a credential also removes the app's own unreadable copies of the settings file,
+        which may still contain it (they cannot be parsed, so the key cannot be cut out of them). Returns
+        the names removed; the recovery notice ends with them."""
+        removed = []
+        for name in self.preserved_copies():
+            try:
+                (self.path.parent / name).unlink()
+                removed.append(name)
+            except OSError:
+                pass
+        if removed and not self.preserved_copies():
+            self.recovery_notice = None
+            try:
+                self._notice_marker().unlink()
+            except OSError:
+                pass
+        return removed
 
     def get_all(self) -> dict:
         with self._lock:

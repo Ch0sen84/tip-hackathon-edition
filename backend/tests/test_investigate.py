@@ -276,7 +276,7 @@ def test_route_demo_mode_returns_simulated_and_never_touches_real_calls(app_main
 
     client = TestClient(app_main.app)
     client.post("/api/settings/ai-key", json={"provider": "anthropic", "api_key": "sk-fake-not-real"})
-    resp = client.post("/api/investigate/ZYNC")
+    resp = client.post("/api/investigate/ZYNC", json={"confirm": True})
     assert resp.status_code == 200
     body = resp.json()
     assert body["simulated"] is True
@@ -292,7 +292,7 @@ def test_route_public_demo_always_simulated_regardless_of_mode(app_main, monkeyp
     monkeypatch.setattr(app_main.settings, "public_demo", True)
 
     client = TestClient(app_main.app)
-    resp = client.post("/api/investigate/QRVX")
+    resp = client.post("/api/investigate/QRVX", json={"confirm": True})
     assert resp.status_code == 200
     assert resp.json()["simulated"] is True
     assert real_calls["n"] == 0
@@ -300,7 +300,7 @@ def test_route_public_demo_always_simulated_regardless_of_mode(app_main, monkeyp
 
 def test_route_invalid_ticker_returns_400(app_main):
     client = TestClient(app_main.app)
-    resp = client.post("/api/investigate/not-a-ticker!!")
+    resp = client.post("/api/investigate/not-a-ticker!!", json={"confirm": True})
     assert resp.status_code == 400
 
 
@@ -309,7 +309,7 @@ def test_route_live_mode_without_ai_key_returns_clear_4xx(app_main):
     client.post("/api/settings/uw-key", json={"api_key": "uwtest_FAKEFAKEFAKE1234"})
     app_main._settings_store.record_verified_uw_key("uwtest_FAKEFAKEFAKE1234")
     client.post("/api/settings/mode", json={"mode": "live"})
-    resp = client.post("/api/investigate/ZYNC")
+    resp = client.post("/api/investigate/ZYNC", json={"confirm": True})
     assert resp.status_code == 400
     assert "AI provider key" in resp.json()["detail"]
 
@@ -353,7 +353,7 @@ def test_route_live_mode_happy_path_uses_mocked_mcp_equivalent_and_llm(app_main,
     monkeypatch.setattr(orch, "execute_tool", lambda tool, ticker, args, client: {"tool": tool, "ok": True, "data": {}, "error": None})
     monkeypatch.setattr(orch, "synthesize", lambda *a, **k: GOOD_SYNTHESIS)
 
-    resp = client.post("/api/investigate/ZYNC")
+    resp = client.post("/api/investigate/ZYNC", json={"confirm": True})
     assert resp.status_code == 200
     body = resp.json()
     assert body["simulated"] is False

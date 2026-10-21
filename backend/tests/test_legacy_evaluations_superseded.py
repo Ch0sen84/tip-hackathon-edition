@@ -74,7 +74,7 @@ def test_scheduler_freshness_treats_legacy_only_history_as_unevaluated(live_app)
 def test_a_real_evaluation_replaces_the_legacy_read_and_legacy_rows_are_kept(live_app):
     m = live_app
     client = TestClient(m.app)
-    fresh = client.post("/api/ticker/SPY/refresh").json()
+    fresh = client.post("/api/ticker/SPY/refresh", json={"confirm": True}).json()
     assert fresh["transition_rule"] != "legacy_v1_rule"
     cached = client.get("/api/ticker/SPY").json()
     assert cached["served_from_cache"] is True and cached.get("not_evaluated") is not True
@@ -87,6 +87,6 @@ def test_a_real_evaluation_replaces_the_legacy_read_and_legacy_rows_are_kept(liv
 
 def test_legacy_rows_never_annotate_new_lifecycle_history(live_app):
     m = live_app
-    TestClient(m.app).post("/api/ticker/SPY/refresh")
+    TestClient(m.app).post("/api/ticker/SPY/refresh", json={"confirm": True})
     rules = m.get_catalog().list_signal_evaluation_rules("SPY")
     assert rules and all(r["transition_rule"] != "legacy_v1_rule" for r in rules)

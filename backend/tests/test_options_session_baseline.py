@@ -56,11 +56,11 @@ def live(app_main, monkeypatch):
 
 
 def refresh(m, ticker="ABCD"):
-    return TestClient(m.app).post(f"/api/ticker/{ticker}/refresh").json()
+    return TestClient(m.app).post(f"/api/ticker/{ticker}/refresh", json={"confirm": True}).json()
 
 
 def backfill(m, ticker="ABCD"):
-    return TestClient(m.app).post(f"/api/ticker/{ticker}/baseline/backfill?max_pages=200").json()
+    return TestClient(m.app).post(f"/api/ticker/{ticker}/baseline/backfill?confirm=true&max_pages=200").json()
 
 
 def test_recorded_real_scans_no_longer_pass_by_default(tmp_path):

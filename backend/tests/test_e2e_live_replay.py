@@ -64,7 +64,7 @@ def live(app_main, replay, monkeypatch, tmp_path):
 
 def test_recorded_data_traverses_every_layer_and_nothing_is_overstated(live):
     m, client, url, state = live
-    radar = client.post("/api/radar/refresh").json()
+    radar = client.post("/api/radar/refresh", json={"confirm": True}).json()
     entries = {e["ticker"]: e for e in radar["highest"] + radar["other"]}
     assert set(entries) == set(WATCH)
     assert radar["highest"] == []                                         # nothing qualifies
@@ -108,7 +108,7 @@ def test_recorded_data_traverses_every_layer_and_nothing_is_overstated(live):
 
 def test_backfill_on_recorded_data_cannot_manufacture_a_baseline(live):
     m, client, url, state = live
-    body = client.post("/api/ticker/SPY/baseline/backfill?max_pages=40").json()
+    body = client.post("/api/ticker/SPY/baseline/backfill?confirm=true&max_pages=40").json()
     for dataset in ("darkpool", "options_flow"):
         b = body["datasets"][dataset]["baseline"]
         assert b["status"] == "insufficient" and b["eligible_sessions"] < 20, b
@@ -116,7 +116,7 @@ def test_backfill_on_recorded_data_cannot_manufacture_a_baseline(live):
         # cutoff -> those sessions are "unavailable", never counted as empty
         touched = body["backfill"][dataset]["sessions_touched"]
         assert any(t["coverage"] == "unavailable" and t["reason"] == "provider_history_cutoff" for t in touched), touched
-    after = client.post("/api/ticker/SPY/refresh").json()
+    after = client.post("/api/ticker/SPY/refresh", json={"confirm": True}).json()
     assert after["confidence"] == "insufficient"
 
 
@@ -138,7 +138,7 @@ def test_injected_provider_faults_over_http_are_never_negative_evidence(live, fa
         requests.post(f"{url}/__control/fail?path=flow-alerts&status=503", timeout=5)
     else:
         requests.post(f"{url}/__control/malformed?path=flow-alerts", timeout=5)
-    body = client.post("/api/ticker/SPY/refresh").json()
+    body = client.post("/api/ticker/SPY/refresh", json={"confirm": True}).json()
     assert body["collection"]["options_flow"]["status"] == expected
     assert body["gates"]["options_flow_anomaly"]["status"] == "unavailable"
     assert body["confidence"] == "insufficient"
@@ -151,7 +151,7 @@ def test_injected_provider_faults_over_http_are_never_negative_evidence(live, fa
 
 def test_unknown_ticker_is_an_empty_answer_not_fabricated_evidence(live):
     m, client, url, state = live
-    body = client.post("/api/ticker/ZZZZ/refresh").json()
+    body = client.post("/api/ticker/ZZZZ/refresh", json={"confirm": True}).json()
     # flow/dark-pool answered with zero rows (a real, empty answer) ...
     assert body["collection"]["options_flow"]["status"] == "ok"
     assert body["collection"]["darkpool"]["status"] == "ok"

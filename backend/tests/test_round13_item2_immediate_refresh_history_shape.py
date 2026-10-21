@@ -52,7 +52,7 @@ def test_immediate_refresh_and_subsequent_cached_get_agree_on_transition_rule_fo
     client = TestClient(app_main.app)
 
     # (a) The immediate POST /refresh response -- no reload involved.
-    refresh_resp = client.post(f"/api/ticker/{ticker}/refresh")
+    refresh_resp = client.post(f"/api/ticker/{ticker}/refresh", json={"confirm": True})
     assert refresh_resp.status_code == 200, refresh_resp.text
     refresh_body = refresh_resp.json()
     assert refresh_body["served_from_cache"] is False
@@ -109,12 +109,12 @@ def test_second_zero_gate_evaluation_also_gets_enriched_on_the_immediate_refresh
     )
     client = TestClient(app_main.app)
 
-    first = client.post(f"/api/ticker/{ticker}/refresh").json()
+    first = client.post(f"/api/ticker/{ticker}/refresh", json={"confirm": True}).json()
     assert first["transition_rule"] == "held_insufficient_evidence"
     assert first["state"] is None
 
     # A second scan without baselines still opens nothing.
-    second = client.post(f"/api/ticker/{ticker}/refresh").json()
+    second = client.post(f"/api/ticker/{ticker}/refresh", json={"confirm": True}).json()
     assert second["transition_rule"] == "held_insufficient_evidence", (
         f"expected the insufficient-evidence reason, got {second['transition_rule']!r}"
     )

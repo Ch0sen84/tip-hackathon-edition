@@ -122,7 +122,7 @@ def test_generative_jobs_respect_budget_isolation_and_policy(live, monkeypatch, 
             before = logical(uw)
             store.recover_after_restart()
             assert store.get(job_id)["status"] == "paused" and logical(uw) == before, f"H ran after restart [{tag}]"
-        assert client.post(f"/api/baseline/jobs/{job_id}/resume").status_code == 200, tag
+        assert client.post(f"/api/baseline/jobs/{job_id}/resume", json={"confirm": True}).status_code == 200, tag
     live.get_baseline_job_runner().join(60)                 # never assert while the job thread still runs
     assert not live.get_baseline_job_runner().is_running(), f"job still running [{tag}]"
     monkeypatch.setattr(cat, "upsert_session_coverage", real_up)
@@ -178,7 +178,7 @@ def test_resume_with_one_page_left_never_overspends(live, cap, both_unfinished):
     store.recover_after_restart()
     assert logical(uw) == 0
     client = TestClient(live.app)
-    assert client.post(f"/api/baseline/jobs/{job['id']}/resume").status_code == 200
+    assert client.post(f"/api/baseline/jobs/{job['id']}/resume", json={"confirm": True}).status_code == 200
     live.get_baseline_job_runner().join(60)
     j = store.get(job["id"])
     assert logical(uw) == 1 and j["pages_used"] == cap

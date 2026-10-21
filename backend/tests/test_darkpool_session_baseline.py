@@ -58,12 +58,14 @@ def test_backfill_route_populates_complete_prior_sessions_through_the_collector(
     client = TestClient(live.app)
     before = client.get("/api/ticker/ABCD/baseline").json()
     assert before["datasets"]["darkpool"]["complete_prior_sessions"] == 0
-    body = client.post("/api/ticker/ABCD/baseline/backfill?max_pages=200").json()
+    body = client.post("/api/ticker/ABCD/baseline/backfill?confirm=true&max_pages=200").json()
     # Verified UW contract: a date-scoped, bounded window answered with a short
     # (even empty) page is exhausted -- so the 5 constructed-empty older
     # sessions are provably complete with zero prints. They precede the
     # ticker's first observed activity, so the baseline excludes them.
-    assert body["datasets"]["darkpool"]["complete_prior_sessions"] == 30
+    assert body["datasets"]["darkpool"]["certified_prior_sessions"] == 30
+    # C2-5: the reported count is what the baseline will USE (the 5 pre-listing sessions are excluded)
+    assert body["datasets"]["darkpool"]["complete_prior_sessions"] == 25
     b = body["datasets"]["darkpool"]["baseline"]
     assert b["excluded_before_first_activity"] == 5
 
@@ -72,17 +74,17 @@ def test_coverage_already_current_makes_no_request(live):
     uw = build_uw()
     live.use_uw(uw)
     client = TestClient(live.app)
-    client.post("/api/ticker/ABCD/refresh")
+    client.post("/api/ticker/ABCD/refresh", json={"confirm": True})
     n = sum(1 for u, _ in uw.calls if "/api/darkpool/" in u)
-    client.post("/api/ticker/ABCD/refresh")          # same instant: nothing new to cover
+    client.post("/api/ticker/ABCD/refresh", json={"confirm": True})          # same instant: nothing new to cover
     assert sum(1 for u, _ in uw.calls if "/api/darkpool/" in u) == n
 
 
 def test_refresh_after_backfill_evaluates_a_real_pass(live):
     live.use_uw(build_uw(evidence_premium=100_000.0))
     client = TestClient(live.app)
-    client.post("/api/ticker/ABCD/baseline/backfill?max_pages=200")
-    body = client.post("/api/ticker/ABCD/refresh").json()
+    client.post("/api/ticker/ABCD/baseline/backfill?confirm=true&max_pages=200")
+    body = client.post("/api/ticker/ABCD/refresh", json={"confirm": True}).json()
     dp = body["gates"]["dark_pool_anomaly"]
     assert dp["status"] == "pass", dp
     b = dp["metrics"]["baseline"]
@@ -97,8 +99,8 @@ def test_refresh_after_backfill_evaluates_a_real_pass(live):
 def test_normal_activity_fails_rather_than_passing(live):
     live.use_uw(build_uw(evidence_premium=10_000.0))
     client = TestClient(live.app)
-    client.post("/api/ticker/ABCD/baseline/backfill?max_pages=200")
-    dp = client.post("/api/ticker/ABCD/refresh").json()["gates"]["dark_pool_anomaly"]
+    client.post("/api/ticker/ABCD/baseline/backfill?confirm=true&max_pages=200")
+    dp = client.post("/api/ticker/ABCD/refresh", json={"confirm": True}).json()["gates"]["dark_pool_anomaly"]
     assert dp["status"] == "fail"
     assert dp["metrics"]["baseline"]["ratio"] == pytest.approx(1.0, rel=0.05)
 
@@ -106,8 +108,8 @@ def test_normal_activity_fails_rather_than_passing(live):
 def test_too_few_prior_sessions_is_insufficient_not_fail(live):
     live.use_uw(build_uw(history_sessions=5))
     client = TestClient(live.app)
-    client.post("/api/ticker/ABCD/baseline/backfill?max_pages=200")
-    body = client.post("/api/ticker/ABCD/refresh").json()
+    client.post("/api/ticker/ABCD/baseline/backfill?confirm=true&max_pages=200")
+    body = client.post("/api/ticker/ABCD/refresh", json={"confirm": True}).json()
     dp = body["gates"]["dark_pool_anomaly"]
     assert dp["status"] == "insufficient"
     assert "insufficient history" in dp["metrics"]["baseline"]["reason"]
@@ -115,7 +117,7 @@ def test_too_few_prior_sessions_is_insufficient_not_fail(live):
 
 def test_without_any_backfill_a_single_refresh_is_insufficient(live):
     live.use_uw(build_uw())
-    body = TestClient(live.app).post("/api/ticker/ABCD/refresh").json()
+    body = TestClient(live.app).post("/api/ticker/ABCD/refresh", json={"confirm": True}).json()
     assert body["gates"]["dark_pool_anomaly"]["status"] == "insufficient"
     assert body["confidence"] in ("insufficient", "low")
 
@@ -147,8 +149,8 @@ def test_future_sessions_are_never_used_as_history(live, monkeypatch):
     uw = build_uw(evidence_premium=100_000.0)
     live.use_uw(uw)
     client = TestClient(live.app)
-    client.post("/api/ticker/ABCD/baseline/backfill?max_pages=200")
-    client.post("/api/ticker/ABCD/refresh")          # establishes evidence-session coverage
+    client.post("/api/ticker/ABCD/baseline/backfill?confirm=true&max_pages=200")
+    client.post("/api/ticker/ABCD/refresh", json={"confirm": True})          # establishes evidence-session coverage
     cat = live.get_catalog()
     cat.upsert_session_coverage("darkpool", "ABCD", "2026-10-19", "complete",
                                 "2026-10-19T13:30:00+00:00", "2026-10-19T20:00:00+00:00", 1, 1)
@@ -164,8 +166,8 @@ def test_canceled_prints_are_excluded_and_tracking_id_dedupes(live):
                                         end=datetime(2026, 10, 16, 10, 5).time())]
     live.use_uw(build_uw(evidence_premium=10_000.0, extra=canceled))
     client = TestClient(live.app)
-    client.post("/api/ticker/ABCD/baseline/backfill?max_pages=200")
-    dp = client.post("/api/ticker/ABCD/refresh").json()["gates"]["dark_pool_anomaly"]
+    client.post("/api/ticker/ABCD/baseline/backfill?confirm=true&max_pages=200")
+    dp = client.post("/api/ticker/ABCD/refresh", json={"confirm": True}).json()["gates"]["dark_pool_anomaly"]
     assert dp["status"] == "fail"   # the $50M canceled prints did not count
     cat = live.get_catalog()
     reformatted = [{**r, "premium": str(float(r["premium"]))} for r in session_prints("ABCD", EVIDENCE, 10_000.0)]
@@ -178,14 +180,14 @@ def test_provider_failure_during_collection_is_unavailable_and_keeps_coverage(li
     uw = build_uw()
     live.use_uw(uw)
     client = TestClient(live.app)
-    client.post("/api/ticker/ABCD/baseline/backfill?max_pages=200")
-    client.post("/api/ticker/ABCD/refresh")
+    client.post("/api/ticker/ABCD/baseline/backfill?confirm=true&max_pages=200")
+    client.post("/api/ticker/ABCD/refresh", json={"confirm": True})
     cov_before = live.get_catalog().get_session_coverage("darkpool", "ABCD", "2026-10-16")
     uw.fail["/api/darkpool/"] = FakeResponse(503, {"error": "upstream"})
     # five minutes later there is new data to collect, and UW fails
     from datetime import timedelta
     monkeypatch.setattr(live, "_utcnow", lambda: AS_OF + timedelta(minutes=5))
-    body = client.post("/api/ticker/ABCD/refresh").json()
+    body = client.post("/api/ticker/ABCD/refresh", json={"confirm": True}).json()
     assert body["gates"]["dark_pool_anomaly"]["status"] == "unavailable"
     assert body["transition_rule"] == "held_incomplete_collection"
     cov_after = live.get_catalog().get_session_coverage("darkpool", "ABCD", "2026-10-16")
@@ -202,7 +204,7 @@ def test_pagination_cursor_not_honored_is_unknown_not_complete(live):
                                  for r in session_prints("ABCD", d, 10_000.0, every_minutes=0.5)],
                        static={"stock-state": STATE, "flow-alerts": ok([])})
     live.use_uw(uw)
-    body = TestClient(live.app).post("/api/ticker/ABCD/baseline/backfill?max_pages=50").json()
+    body = TestClient(live.app).post("/api/ticker/ABCD/baseline/backfill?confirm=true&max_pages=50").json()
     cov = {c["session_date"]: c for c in body["datasets"]["darkpool"]["coverage"]}
     for d in prior_sessions(EVIDENCE, 3):
         c = cov[d.isoformat()]
@@ -212,7 +214,7 @@ def test_pagination_cursor_not_honored_is_unknown_not_complete(live):
 def test_demo_mode_has_no_session_baseline(app_main):
     body = TestClient(app_main.app).get("/api/ticker/FLUX/baseline").json()
     assert body["mode"] == "demo" and body["datasets"] == {}
-    assert TestClient(app_main.app).post("/api/ticker/FLUX/baseline/backfill").status_code == 400
+    assert TestClient(app_main.app).post("/api/ticker/FLUX/baseline/backfill?confirm=true").status_code == 400
 
 
 def test_recorded_real_capture_cannot_establish_a_baseline(tmp_path):

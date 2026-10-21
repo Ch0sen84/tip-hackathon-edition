@@ -88,7 +88,7 @@ def test_pltr_recorded_payload_no_longer_falsely_invalidates(app_main, monkeypat
     store.record_scan("PLTR", True, "NEW", scan_date="2026-10-15")
     store.record_scan("PLTR", True, "BUILDING", scan_date="2026-10-16")
 
-    body = TestClient(app_main.app).post("/api/ticker/PLTR/refresh").json()
+    body = TestClient(app_main.app).post("/api/ticker/PLTR/refresh", json={"confirm": True}).json()
 
     assert body["stock_state"]["change_percent"] == pytest.approx(-3.456, abs=0.01)
     assert body["gates"]["price_confirmation"]["metrics"]["direction_heuristic"] == "bearish-lean"

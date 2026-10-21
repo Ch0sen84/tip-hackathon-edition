@@ -107,7 +107,7 @@ def test_radar_discover_rejected_without_auth(app_main):
 
 def test_investigate_rejected_without_auth(app_main):
     client = _client_without_auth(app_main)
-    resp = client.post("/api/investigate/FLUX")
+    resp = client.post("/api/investigate/FLUX", json={"confirm": True})
     assert resp.status_code == 401
 
 
@@ -137,7 +137,7 @@ def test_investigate_succeeds_with_valid_token_in_demo_mode(app_main):
     get_simulated_transcript) -- safe to exercise end-to-end with a valid
     token without any real network/paid call."""
     client = TestClient(app_main.app)
-    resp = client.post("/api/investigate/FLUX")
+    resp = client.post("/api/investigate/FLUX", json={"confirm": True})
     assert resp.status_code == 200
     body = resp.json()
     assert body.get("simulated") is True

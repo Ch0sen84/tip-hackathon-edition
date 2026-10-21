@@ -134,7 +134,7 @@ def test_live_investigate_makes_no_adapter_call_and_saves_no_evaluation_even_whe
         raise app_main.LLMCallError("AI provider down")
 
     monkeypatch.setattr(app_main.ai_orchestrator, "investigate", _fail)
-    res = client.post("/api/investigate/AMD")
+    res = client.post("/api/investigate/AMD", json={"confirm": True})
     assert res.status_code == 502
     with app_main.get_catalog()._conn() as conn:
         n = conn.execute("SELECT COUNT(*) FROM signal_evaluations WHERE ticker = 'AMD'").fetchone()[0]
@@ -148,7 +148,7 @@ def test_a_second_concurrent_investigation_of_the_same_ticker_is_refused(app_mai
     lock = app_main._investigate_lock("AMD")
     assert lock.acquire(blocking=False)
     try:
-        assert client.post("/api/investigate/AMD").status_code == 409
+        assert client.post("/api/investigate/AMD", json={"confirm": True}).status_code == 409
     finally:
         lock.release()
 
@@ -188,8 +188,82 @@ def test_key_fingerprints_are_withheld_from_an_unauthorized_network_mode_reader(
     monkeypatch.setattr(app_main, "LOCAL_MODE_ACTIVE", False)
     anon = TestClient(app_main.app)
     anon.headers.pop("X-TIP-Auth", None)
-    body = anon.get("/api/settings").json()
-    assert body["uw"]["last4"] is None and body["uw"]["configured"] is True
+    assert anon.get("/api/settings").status_code == 401          # S2-5: Network Mode reads need the token
+    assert client.get("/api/settings").json()["uw"]["last4"] == "WXYZ"   # the token holder still sees it
+
+
+def test_network_mode_reads_need_the_token_except_health_and_pairing(app_main, monkeypatch):
+    monkeypatch.setattr(app_main, "LOCAL_MODE_ACTIVE", False)
+    anon = TestClient(app_main.app)
+    anon.headers.pop("X-TIP-Auth", None)
+    for path in ("/api/radar", "/api/ticker/FLUX", "/api/ticker/FLUX/ohlc", "/api/settings/watchlist",
+                 "/api/investigate/availability", "/api/scenarios", "/api/mode", "/api/settings/version"):
+        assert anon.get(path).status_code == 401, path
+    assert anon.get("/api/health").status_code == 200
+    assert anon.get("/api/auth/mode").status_code == 200
+    authed = TestClient(app_main.app)
+    assert authed.get("/api/radar").status_code == 200
+    # Local Mode is unchanged: same-origin browser reads need no token
+    monkeypatch.setattr(app_main, "LOCAL_MODE_ACTIVE", True)
+    assert anon.get("/api/radar").status_code == 200
+
+
+def test_confirm_fields_are_strict_booleans(app_main, monkeypatch):
+    """S2-3: "yes", "1", 1 or "on" never count as a confirmation."""
+    client = TestClient(app_main.app)
+    runner = app_main.get_scheduler_runner()
+    ran = []
+    monkeypatch.setattr(runner, "run_once_with_depth", lambda depth: ran.append(depth) or {"ran": True})
+    for v in ("yes", "1", 1, "on", "true", "t"):
+        r = client.post("/api/scheduler/run-once", json={"depth": "discovery_only", "confirm": v})
+        assert r.status_code == 422, (v, r.status_code)
+    assert ran == []
+
+
+def test_resume_states_the_remaining_budget_before_spending(app_main, monkeypatch):
+    from tests.test_baseline_jobs import AS_OF, build_uw
+
+    uw = build_uw()
+    adapter = uw.adapter(["ABCD"])
+    monkeypatch.setattr(app_main, "get_adapter", lambda: adapter)
+    monkeypatch.setattr(app_main, "_utcnow", lambda: AS_OF)
+    store = app_main.get_baseline_job_store()
+    job = store.create(["ABCD"], max_pages_per_ticker=40, step_pages=10, requested_by="test")
+    store.transition(job["id"], ("running",), "paused")
+    client = TestClient(app_main.app)
+    r = client.post(f"/api/baseline/jobs/{job['id']}/resume")
+    assert r.status_code == 428 and r.json()["detail"]["remaining_pages"] == 40
+    assert uw.calls == [] and store.get(job["id"])["status"] == "paused"
+
+
+def test_backfill_route_requires_confirmation(app_main, monkeypatch):
+    from tests.test_baseline_jobs import AS_OF, build_uw
+
+    uw = build_uw()
+    adapter = uw.adapter(["ABCD"])
+    monkeypatch.setattr(app_main, "get_adapter", lambda: adapter)
+    monkeypatch.setattr(app_main, "_utcnow", lambda: AS_OF)
+    r = TestClient(app_main.app).post("/api/ticker/ABCD/baseline/backfill?max_pages=999")
+    assert r.status_code == 428 and r.json()["detail"]["max_pages"] == app_main.BACKFILL_MAX_PAGES_PER_REQUEST
+    assert uw.calls == []
+
+
+def test_live_investigate_requires_confirmation(app_main, monkeypatch):
+    _live_with_keys(app_main)
+    called = []
+    monkeypatch.setattr(app_main, "_investigate_run", lambda *a: called.append(a) or {})
+    r = TestClient(app_main.app).post("/api/investigate/AMD")
+    assert r.status_code == 428 and "billed" in r.json()["detail"]["consequence"]
+    assert called == []
+
+
+def test_static_files_are_an_exact_allowlist(app_main):
+    client = TestClient(app_main.app)
+    if client.get("/index.html").status_code != 200:
+        pytest.skip("frontend directory not mounted in this environment")
+    for p in ("/APP.LIVE.JS", "/Test_navigation.MJS", "/app.live.js.", "/app.live.js::$DATA", "/test_lib_auth.mjs"):
+        assert client.get(p).status_code == 404, p
+    assert client.get("/styles.css").status_code == 200
 
 
 def test_update_check_is_a_post_now(app_main):
@@ -215,19 +289,20 @@ def test_settings_report_the_per_ticker_request_budget(app_main, monkeypatch):
 
 
 # --- SEC-3/4/5: pairing codes ------------------------------------------------------------------------
-def test_pairing_code_rotates_after_too_many_wrong_guesses_and_announces_it(tmp_path):
+def test_another_clients_wrong_guesses_never_lock_out_or_rotate_the_operators_code(tmp_path):
+    """S2-1 (replaces the SEC-3 rotate-on-failure fix): failures are limited per client and never rotate."""
     from app import auth
 
     store = auth.PairingCodeStore(tmp_path / "pairing_code")
     announced = []
-    store.on_rotate = announced.append
-    first = store.current_code(force_new=True)
-    for _ in range(auth.PAIRING_CODE_MAX_FAILED_ATTEMPTS):
-        assert store.consume("wrong") is False
-    second = store.current_code()
-    assert second != first and announced[-1] == second
-    assert (tmp_path / "pairing_code").read_text(encoding="utf-8") == second
-    assert store.consume(second) is True                # pairing works again without a restart
+    store.on_rotate = lambda code, reason: announced.append((code, reason))
+    code = store.current_code(force_new=True)
+    for _ in range(10 * auth.PAIRING_CODE_MAX_FAILED_ATTEMPTS):
+        assert store.consume("wrong", client="172.17.0.1") is False
+    assert store.current_code() == code and announced == [(code, "startup")]   # no rotation, nothing logged
+    # behind Docker Desktop the operator arrives from the SAME gateway address as the guesser: still pairs
+    assert store.consume(code, client="172.17.0.1") is True
+    assert announced[-1][1] == "used" and announced[-1][0] != code
 
 
 def test_an_expired_pairing_code_is_replaced_and_non_ascii_input_never_raises(tmp_path, monkeypatch):
@@ -235,14 +310,28 @@ def test_an_expired_pairing_code_is_replaced_and_non_ascii_input_never_raises(tm
 
     store = auth.PairingCodeStore(tmp_path / "pairing_code", ttl_s=60)
     announced = []
-    store.on_rotate = announced.append
+    store.on_rotate = lambda code, reason: announced.append((code, reason))
     old = store.current_code(force_new=True)
     assert store.consume("ééé") is False   # SEC-5: compared as bytes, no TypeError
     import time as _time
     t = _time.monotonic() + 3600
     monkeypatch.setattr(_time, "monotonic", lambda: t)
     assert store.consume(old) is False
-    assert announced and announced[-1] != old
+    assert announced[-1][1] == "expired" and announced[-1][0] != old
+
+
+def test_secret_files_never_reuse_or_follow_a_stale_temp_file(tmp_path):
+    """S2-7: a crash-leftover temp file (world-readable) is replaced, not written through."""
+    import os
+
+    from app import auth
+
+    target = tmp_path / "token"
+    stale = tmp_path / "token.tmp"
+    stale.write_text("stale")
+    os.chmod(stale, 0o644)
+    auth._write_secret_file(target, "secret-value")
+    assert target.read_text(encoding="utf-8") == "secret-value" and not stale.exists()
 
 
 # --- PE-P5: a corrupt settings file is preserved and reported, never silently wiped ------------------
@@ -257,6 +346,20 @@ def test_corrupt_settings_file_is_quarantined_and_reported(tmp_path):
     assert store.recovery_notice and "settings.json.corrupt-" in store.recovery_notice
     aside = list(tmp_path.glob("settings.json.corrupt-*"))
     assert len(aside) == 1 and aside[0].read_bytes() == b"\xff\xfe{ not json"
+
+
+def test_deleting_a_key_also_removes_preserved_copies_that_may_contain_it(app_main):
+    from pathlib import Path
+
+    client = TestClient(app_main.app)
+    assert client.post("/api/settings/uw-key", json={"api_key": "uwtest_FAKE_0000_WXYZ"}).status_code == 200
+    path = Path(app_main._settings_store.path)
+    path.write_text('{"uw_api_key": "uwtest_FAKE_0000_WXYZ", ', encoding="utf-8")    # truncated: quarantined
+    app_main._settings_store.get_all()
+    assert app_main._settings_store.preserved_copies()
+    body = client.delete("/api/settings/uw-key").json()
+    assert body["removed_preserved_copies"] and app_main._settings_store.preserved_copies() == []
+    assert not any("WXYZ" in p.read_text(errors="ignore") for p in path.parent.glob(path.name + "*") if p.is_file())
 
 
 def test_settings_route_surfaces_the_recovery_notice(app_main, monkeypatch):
@@ -315,3 +418,23 @@ def test_a_stale_open_decision_never_creates_a_second_open_episode(tmp_path):
         open_eps = conn.execute("SELECT COUNT(*) FROM lifecycle_episodes WHERE ticker = 'ABCD' AND closed_at IS NULL"
                                 ).fetchone()[0]
     assert open_eps == 1
+
+
+def test_live_refresh_budget_counts_the_current_watchlist(app_main, monkeypatch):
+    """F2-3 / F2-3b: a Live refresh is confirmed by the server, with a budget for the CURRENT watchlist."""
+    from tests.test_baseline_jobs import AS_OF, build_uw
+
+    uw = build_uw()
+    adapter = uw.adapter(["ABCD"])
+    monkeypatch.setattr(app_main, "get_adapter", lambda: adapter)
+    monkeypatch.setattr(app_main, "_utcnow", lambda: AS_OF)
+    app_main._settings_store.set_watchlist([f"T{c}" for c in "ABCDEFGHIJKL"])
+    client = TestClient(app_main.app)
+    r = client.post("/api/radar/refresh")
+    assert r.status_code == 428 and r.json()["detail"]["tickers"] == 12
+    r = client.post("/api/ticker/ABCD/refresh")
+    assert r.status_code == 428 and r.json()["detail"]["tickers"] == 1
+    assert uw.calls == []
+    # Demo Mode (synthetic data) is never interrupted
+    monkeypatch.setattr(app_main, "get_adapter", lambda: app_main.SyntheticDataAdapter(app_main.settings.fixtures_dir))
+    assert client.post("/api/radar/refresh").status_code != 428

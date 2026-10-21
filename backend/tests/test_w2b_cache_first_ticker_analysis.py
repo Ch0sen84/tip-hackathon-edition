@@ -98,7 +98,7 @@ def test_ticker_analysis_explicit_refresh_makes_real_call_and_writes_exactly_one
     before = len(catalog.list_coverage_status(ticker)) if hasattr(catalog, "list_coverage_status") else None
 
     client = TestClient(app_main.app)
-    resp = client.post(f"/api/ticker/{ticker}/refresh")
+    resp = client.post(f"/api/ticker/{ticker}/refresh", json={"confirm": True})
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert body["served_from_cache"] is False
@@ -125,7 +125,7 @@ def test_ticker_analysis_refresh_requires_auth(app_main, monkeypatch):
     monkeypatch.setattr(app_module, "LOCAL_MODE_ACTIVE", False)
     client = TestClient(app_main.app)
     client.headers.pop("X-TIP-Auth", None)
-    resp = client.post("/api/ticker/AMD/refresh")
+    resp = client.post("/api/ticker/AMD/refresh", json={"confirm": True})
     assert resp.status_code == 401
 
 
@@ -134,7 +134,7 @@ def test_ticker_analysis_refresh_duplicate_concurrent_is_rejected_cleanly(app_ma
     app_module._ticker_refresh_lock.acquire()
     try:
         client = TestClient(app_main.app)
-        resp = client.post("/api/ticker/AMD/refresh")
+        resp = client.post("/api/ticker/AMD/refresh", json={"confirm": True})
         assert resp.status_code == 409
     finally:
         app_module._ticker_refresh_lock.release()

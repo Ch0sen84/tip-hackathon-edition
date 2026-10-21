@@ -126,6 +126,8 @@ DIAGNOSTIC_SAMPLE_ROWS = 5
 # unknown reasons meaning the provider returned unusable content for the
 # session: backfills skip such sessions instead of re-walking them every step
 REJECTED_CONTENT_REASONS = ("invalid_rows", "bounds_not_honored", "wrong_session_date", "rows_out_of_order")
+# C2-7: sessions a walk cannot prove for a structural reason are also backed off for REJECTED_RETRY_AFTER
+BACKOFF_REASONS = REJECTED_CONTENT_REASONS + ("cursor_stuck",)
 REJECTED_RETRY_AFTER = timedelta(hours=24)
 _sleep = time.sleep          # patched by tests
 _log = logging.getLogger(__name__)
@@ -463,14 +465,19 @@ def _floor_second(dt: datetime) -> datetime:
 def update_session_coverage(client, catalog, dataset: str, ticker: str, session_date: date,
                             now_utc: Optional[datetime] = None, max_pages: int = DEFAULT_SCAN_PAGES,
                             kind: str = "on_demand", reverify: Optional[str] = None,
-                            preserve_on_incomplete: bool = False) -> CoverageUpdate:
+                            preserve_on_incomplete: bool = False, settle: bool = True) -> CoverageUpdate:
     """Extend proven coverage of one session within `max_pages` requests.
     Never raises on provider behaviour; never claims unproven coverage.
 
     `reverify` (e.g. "operator") forces a fresh post-settlement walk even of a
     certified session; with `preserve_on_incomplete` the stored coverage is
     only replaced if that walk certifies the session (an unfinished or failed
-    reconciliation leaves the existing row untouched)."""
+    reconciliation leaves the existing row untouched).
+
+    `settle=False` (evidence collection: scans, and the evidence session of a backfill) never starts a
+    settlement re-walk: a session already covered from the open to the close is left as it is, so the
+    evidence session stays verified from the open overnight (C2-4). Certification comes from the
+    settled walks of approved backfills and jobs."""
     spec = DATASETS[dataset]
     now_utc = now_utc or datetime.now(timezone.utc)
     sd = session_date.isoformat()
@@ -497,21 +504,30 @@ def update_session_coverage(client, catalog, dataset: str, ticker: str, session_
                               detail="session not settled yet; reconciliation refused")
     if policy.is_certified(cov) and not reverify:
         return CoverageUpdate(dataset, ticker, sd, COLLECTION_OK, cov, detail="certified")
+    if policy.is_legacy_complete(cov) and not reverify and (now_utc < settle_at or not settle):
+        # C2-6: a legacy row is never rewritten in place; only a settled re-walk replaces it
+        return CoverageUpdate(dataset, ticker, sd, COLLECTION_OK, cov, detail="legacy_uncertified")
     usable = cov.get("status") in ("complete", "partial")
     c_from = _parse(cov.get("covered_from_utc")) if usable else None
     c_through = _parse(cov.get("covered_through_utc")) if usable else None
     proof = _parse(cov.get("proof_started_utc")) if usable else None
     i_from = _parse(cov.get("island_from_utc")) if usable else None
     i_through = _parse(cov.get("island_through_utc")) if usable else None
-    if i_from is None or i_through is None or c_through is None:
+    if i_from is None or i_through is None or c_through is None or i_through <= i_from:
         i_from = i_through = None
+    elif i_from <= c_through:                      # overlapping proven intervals are one interval
+        c_through, i_from, i_through = max(c_through, i_through), None, None
     carried = {"reverify_trigger": cov.get("reverify_trigger") if usable else None,
                "rows_before_reverify": cov.get("rows_before_reverify") if usable else None,
                "gap_flag": cov.get("gap_flag") if usable else None}
 
     # after settlement an interval is only extended if it was itself walked after settlement
+    if (not settle and not reverify and usable and now_utc >= settle_at and c_from is not None
+            and c_from <= open_utc and c_through is not None and c_through >= close_utc):
+        # C2-4: nothing left to collect for evidence; never trade a verified interval for a re-walk here
+        return CoverageUpdate(dataset, ticker, sd, COLLECTION_OK, cov, detail=cov.get("last_error") or "covered")
     trigger = reverify
-    if trigger is None and usable and now_utc >= settle_at:
+    if trigger is None and settle and usable and now_utc >= settle_at:
         if policy.is_legacy_complete(cov):
             trigger = "legacy"
         elif cov.get("last_error") == "suspected_provider_gap":
@@ -542,10 +558,11 @@ def update_session_coverage(client, catalog, dataset: str, ticker: str, session_
         return CoverageUpdate(*a, **k, **retry_stats)
 
     def reconciliation(outcome, rows_after=None, detail=None):
-        if carried["reverify_trigger"]:
+        # every re-walk is logged; a NEW gap suspicion is logged even on a first walk (C2-2 needs its time)
+        if carried["reverify_trigger"] or outcome == "suspected_provider_gap":
             catalog.record_coverage_reconciliation(
-                dataset, ticker, sd, carried["reverify_trigger"], carried["rows_before_reverify"], rows_after,
-                outcome, policy.CERTIFIER if outcome == "certified" else None, detail, kind=kind)
+                dataset, ticker, sd, carried["reverify_trigger"] or "first_walk", carried["rows_before_reverify"],
+                rows_after, outcome, policy.CERTIFIER if outcome == "certified" else None, detail, kind=kind)
 
     def store(cov_status, frm, thr, why, certification=None):
         if preserve_on_incomplete and cov_status != "complete":
@@ -640,8 +657,8 @@ def update_session_coverage(client, catalog, dataset: str, ticker: str, session_
     elif i_from is not None:
         reason = reason or "page_budget_exhausted"
 
-    # 2) backward gap: [open, c_from)
-    if c_from is not None and c_from > open_utc and budget > 0:
+    # 2) backward gap: [open, c_from) -- never after a failed window in this walk (C2-8)
+    if c_from is not None and c_from > open_utc and budget > 0 and status == COLLECTION_OK:
         w = counted(_fetch_window(spec, client, catalog, ticker, session_date, open_utc, c_from, budget, kind, sink))
         pages += w["pages"]; rows += w["rows"]
         if w["outcome"] == "exhausted":
@@ -671,10 +688,15 @@ def update_session_coverage(client, catalog, dataset: str, ticker: str, session_
         else:
             times = _session_times(catalog, dataset, ticker, open_utc, close_utc)
             max_gap, implausible = policy.gap_assessment(times, open_utc, close_utc)
+            suspected_at = _suspected_at(catalog, dataset, ticker, sd) if implausible else None
             if implausible and carried["gap_flag"] not in ("suspected", "confirmed"):
                 cov_status, why = "partial", "suspected_provider_gap"
-                reconciliation("suspected_provider_gap", len(times), {"max_gap_s": max_gap})
+                reconciliation("suspected_provider_gap", len(times),
+                               {"max_gap_s": max_gap, "suspected_at": now_utc.isoformat()})
                 carried.update(gap_flag="suspected", reverify_trigger=None, rows_before_reverify=None)
+            elif (implausible and carried["gap_flag"] == "suspected" and suspected_at is not None
+                  and now_utc - suspected_at < policy.GAP_CONFIRM_AFTER):
+                cov_status, why = "partial", "suspected_provider_gap"     # too soon to call the gap genuine
             else:
                 cov_status, why = "complete", None
                 reconciliation("certified", len(times), {"max_gap_s": max_gap})
@@ -701,9 +723,10 @@ def backfill_baseline(client, catalog, dataset: str, ticker: str, evidence_sessi
     now_utc = now_utc or datetime.now(timezone.utc)
     budget, results = max_pages, []
 
-    def touch(d):
+    def touch(d, settle=True):
         nonlocal budget
-        u = update_session_coverage(client, catalog, dataset, ticker, d, now_utc=now_utc, max_pages=budget, kind=kind)
+        u = update_session_coverage(client, catalog, dataset, ticker, d, now_utc=now_utc, max_pages=budget, kind=kind,
+                                    settle=settle)
         budget -= max(u.pages, 0)
         cov = u.coverage or {}
         results.append({"session_date": d.isoformat(), "status": u.collection_status,
@@ -713,8 +736,8 @@ def backfill_baseline(client, catalog, dataset: str, ticker: str, evidence_sessi
 
     if tc.is_trading_day(evidence_session):
         cov = catalog.get_session_coverage(dataset, ticker, evidence_session.isoformat()) or {}
-        if budget > 0 and not policy.is_certified(cov) and cov.get("status") != "unavailable":
-            u, cov = touch(evidence_session)
+        if budget > 0 and not policy.is_certified(cov) and not _is_cutoff(cov):
+            u, cov = touch(evidence_session, settle=False)
             if not u.ok:
                 return _backfill_result(catalog, dataset, ticker, evidence_session, max_pages, budget, results)
     d = evidence_session
@@ -723,16 +746,34 @@ def backfill_baseline(client, catalog, dataset: str, ticker: str, evidence_sessi
         if budget <= 0:
             break
         cov = catalog.get_session_coverage(dataset, ticker, d.isoformat()) or {}
-        if policy.is_certified(cov) or cov.get("status") == "unavailable" or (
-                cov.get("status") == "unknown" and cov.get("last_error") in REJECTED_CONTENT_REASONS
+        if policy.is_certified(cov) or _is_cutoff(cov) or (
+                cov.get("status") == "unknown" and cov.get("last_error") in BACKOFF_REASONS
                 and not _rejection_expired(cov, now_utc)):
-            if cov.get("status") == "unavailable":
+            if _is_cutoff(cov):
                 break  # history cutoff: older sessions are unavailable too
             continue
         u, cov = touch(d)
-        if not u.ok or cov.get("status") == "unavailable":
+        if not u.ok or _is_cutoff(cov):
             break
     return _backfill_result(catalog, dataset, ticker, evidence_session, max_pages, budget, results)
+
+
+def _suspected_at(catalog, dataset, ticker, sd) -> Optional[datetime]:
+    """When this session's gap was first suspected (from the reconciliation log), or None."""
+    try:
+        recs = catalog.list_coverage_reconciliations(dataset, ticker, limit=1000)
+    except Exception:  # noqa: BLE001
+        return None
+    times = [_parse((r.get("detail") or {}).get("suspected_at") or r.get("created_at")) for r in recs
+             if r.get("session_date") == sd and r.get("outcome") == "suspected_provider_gap"]
+    times = [t for t in times if t is not None]
+    return max(times) if times else None
+
+
+def _is_cutoff(cov: dict) -> bool:
+    """P2-4: only UW's history cutoff ends a backfill. A legacy `unavailable / not_entitled` row (an auth
+    failure misclassified by earlier releases) is walked again like any other unproven session."""
+    return cov.get("status") in ("unavailable", "unknown") and cov.get("last_error") == "provider_history_cutoff"
 
 
 def _rejection_expired(cov: dict, now_utc: datetime) -> bool:
@@ -743,7 +784,7 @@ def _rejection_expired(cov: dict, now_utc: datetime) -> bool:
 
 
 def _backfill_result(catalog, dataset, ticker, evidence_session, max_pages, budget, results):
-    complete = sum(1 for c in catalog.list_session_coverage(dataset, ticker)
-                   if policy.is_certified(c) and c["session_date"] < evidence_session.isoformat())
+    covs = catalog.list_session_coverage(dataset, ticker)
+    complete = policy.usable_prior_count(covs, evidence_session.isoformat())   # what the baseline will use
     return {"dataset": dataset, "ticker": ticker, "pages_used": max_pages - max(budget, 0),
             "sessions_touched": results, "complete_prior_sessions": complete}

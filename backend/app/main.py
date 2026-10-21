@@ -40,7 +40,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, StrictBool
 
 from .adapters.base import UWDataAdapter, collection_result, collection_summary
 from .adapters.live_uw_adapter import DISCOVERY_LIMIT_CAP, ERROR, UNAUTHORIZED, UNAVAILABLE, LiveUWAdapter, UWRestClient
@@ -71,7 +71,7 @@ from .core.scheduler_store import InvalidModeError, MODES as SCHEDULER_MODES, Sc
 from . import scheduler as scheduler_module
 from .core.candles import build_markers
 from .ingestion import IngestionCatalog, StorageGuardPausedError as IngestionStorageGuardPausedError, utcnow_iso as _ingestion_utcnow_iso
-from .settings_store import MAX_WATCHLIST_SIZE, SettingsStore, last4
+from .settings_store import MAX_WATCHLIST_SIZE, SettingsStore, SettingsUnavailableError, last4
 from .storage import QualifyingDaysStore, StorageGuardPausedError
 from . import update_check as _update_check
 from . import version as _version
@@ -158,6 +158,25 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# S2-5: in Network Mode every /api read needs the token too (radar, tickers, watchlist and settings are
+# private). Only the health check and the pairing/bootstrap entry points stay open. Local Mode is unchanged:
+# require_auth's same-origin rule already applies there to the routes that declare it.
+_NETWORK_PUBLIC_API = frozenset({"/api/health", "/api/auth/mode", "/api/auth/bootstrap", "/api/auth/pair"})
+
+
+@app.middleware("http")
+async def _network_mode_reads_need_auth(request: Request, call_next):
+    path = request.url.path
+    if (not LOCAL_MODE_ACTIVE and request.method in ("GET", "HEAD") and path.startswith("/api/")
+            and path not in _NETWORK_PUBLIC_API):
+        try:
+            require_auth(request)
+        except HTTPException as exc:
+            from fastapi.responses import JSONResponse
+            return JSONResponse({"detail": exc.detail}, status_code=exc.status_code)
+    return await call_next(request)
+
+
 # SEC-2: browser hardening on every response. No framing (clickjacking a Local Mode same-origin
 # request), scripts only from this origin (no inline script anywhere in the app), no MIME sniffing.
 SECURITY_HEADERS = {
@@ -205,6 +224,13 @@ _store: Optional[QualifyingDaysStore] = None
 _demo_store: Optional[QualifyingDaysStore] = None  # Demo-only lifecycle DB (settings.demo_db_path)
 _catalog: Optional[IngestionCatalog] = None
 _settings_store = SettingsStore(os.environ.get("TIP_SETTINGS_PATH", "./data/settings.json"))
+
+
+@app.exception_handler(SettingsUnavailableError)
+async def _settings_unavailable(request: Request, exc: SettingsUnavailableError):
+    """S2-6: a transient I/O error on the settings file is a retryable 503 -- nothing was changed."""
+    from fastapi.responses import JSONResponse
+    return JSONResponse({"detail": f"{exc}; nothing was changed, try again"}, status_code=503)
 _last_uw_test_result: Optional[str] = None  # in-memory only, informational; never persisted
 
 # --- Phase A: real browser-usable auth for every mutating route --------
@@ -586,8 +612,9 @@ def _on_startup() -> None:
     log = logging.getLogger(__name__)
     log_fn = log.warning if network_mode_active else log.debug
     # SEC-3/SEC-4: a code rotated later (expiry, too many wrong guesses) is announced the same way
-    _pairing_store.on_rotate = lambda new_code: log_fn(
-        "TIP Hackathon Edition -- pairing code rotated (expiry or failed attempts); new code: %s", new_code)
+    _pairing_store.on_rotate = lambda new_code, reason: log_fn(
+        "TIP Hackathon Edition -- new pairing code (%s): %s",
+        {"used": "previous code was used", "expired": "previous code expired"}.get(reason, reason), new_code)
     code = _pairing_store.current_code(force_new=True)
     log_fn(
         "\n%s\nTIP Hackathon Edition -- Docker Desktop / browser pairing code: %s\n"
@@ -689,8 +716,9 @@ def _baseline_report(ticker: str, session_date, as_of_utc) -> dict:
         b = session_baseline.compute(catalog, dataset, ticker, session_date, as_of_utc=as_of_utc)
         out[dataset] = {
             "baseline": b.as_metrics(),
-            "complete_prior_sessions": sum(1 for c in coverage if coverage_policy.is_certified(c)
-                                           and c["session_date"] < session_date.isoformat()),
+            "complete_prior_sessions": coverage_policy.usable_prior_count(coverage, session_date.isoformat()),
+            "certified_prior_sessions": sum(1 for c in coverage if coverage_policy.is_certified(c)
+                                            and c["session_date"] < session_date.isoformat()),
             "legacy_uncertified_prior_sessions": sum(1 for c in coverage if coverage_policy.is_legacy_complete(c)
                                                      and c["session_date"] < session_date.isoformat()),
             "coverage": coverage[-40:],
@@ -785,7 +813,8 @@ def _collect_session_dataset(adapter: LiveUWAdapter, dataset: str, ticker: str, 
     try:
         with _collection_lock(ticker):
             update = session_collection.update_session_coverage(
-                adapter.client, get_catalog(), dataset, ticker, session_date, now_utc=now_utc, kind=kind)
+                adapter.client, get_catalog(), dataset, ticker, session_date, now_utc=now_utc, kind=kind,
+                settle=False)       # C2-4: evidence collection never starts a settlement re-walk
         cov = update.coverage or {}
         # Every cataloged observation dated on the session's NY calendar day
         # (pre-market .. after-hours), up to now.
@@ -1059,7 +1088,7 @@ class PairBody(BaseModel):
 
 
 @app.post("/api/auth/pair")
-def auth_pair(body: PairBody):
+def auth_pair(body: PairBody, request: Request):
     """QA remediation D1: the secure fallback for exactly the real-world
     failure mode this item reproduces -- a genuine Docker Desktop browser
     whose request arrives at `is_loopback()` as the bridge-gateway
@@ -1068,14 +1097,15 @@ def auth_pair(body: PairBody):
     This route is intentionally NOT gated on request.client.host at all
     -- see auth.PairingCodeStore's module comment for why: the security
     boundary here is possession of the one-time code itself (64 bits of
-    entropy, single-use, 15-minute TTL, rate-limited), which is only ever
+    entropy, single-use, 15-minute TTL; wrong guesses are counted, never a lockout), which is only ever
     disclosed via `docker logs`/the host-mounted volume file -- channels
     a LAN/Docker-network-adjacent attacker who is NOT at the real host
     cannot read. Knowing this app is reachable, or even being on the
     exact same Docker bridge network, gives an attacker zero information
     about the current code.
     """
-    if not _pairing_store.consume(body.pairing_code.strip()):
+    peer = request.client.host if request.client else None
+    if not _pairing_store.consume(body.pairing_code.strip(), client=peer):
         raise HTTPException(
             status_code=403,
             detail=(
@@ -1116,7 +1146,7 @@ class ConfirmBody(BaseModel):
     # structural guard against it ever firing from anything but an
     # explicit user click that has already seen the cost disclosure in
     # the UI, not just a disabled-by-default frontend button.
-    confirm: bool = False
+    confirm: StrictBool = False
 
 
 def _scan_request_budget() -> dict:
@@ -1153,7 +1183,8 @@ def get_settings(request: Request):
     return {
         "mode": data["mode"],
         "public_demo": settings.public_demo,
-        "settings_warning": _settings_store.recovery_notice,   # PE-P5: an unreadable file was preserved aside
+        "settings_warning": _settings_store.recovery_notice if show_fingerprints else (
+            "settings problem detected; authenticate to see details" if _settings_store.recovery_notice else None),   # PE-P5: an unreadable file was preserved aside
         "uw": {
             "configured": bool(uw_key),
             "source": uw_source,  # "ui" | "env" | "none"
@@ -1326,7 +1357,8 @@ def delete_uw_key():
     _reset_adapter_cache()
     global _last_uw_test_result
     _last_uw_test_result = None
-    return {"configured": False, "mode": data["mode"]}
+    # S2-6: the app's own unreadable copies of the settings file may still hold the key -- removed too
+    return {"configured": False, "mode": data["mode"], "removed_preserved_copies": _settings_store.purge_preserved_copies()}
 
 
 @app.post("/api/settings/ai-key", dependencies=[Depends(require_auth)])
@@ -1346,7 +1378,7 @@ def save_ai_key(body: AiKeyBody):
 @app.delete("/api/settings/ai-key", dependencies=[Depends(require_auth)])
 def delete_ai_key():
     _settings_store.clear_ai_key()
-    return {"configured": False}
+    return {"configured": False, "removed_preserved_copies": _settings_store.purge_preserved_copies()}
 
 
 @app.post("/api/settings/ai-key/test", dependencies=[Depends(require_auth)])
@@ -1482,11 +1514,39 @@ class SchedulerModeBody(BaseModel):
     confirm: Optional[str] = None          # FE-F1: must equal `mode` to arm dry_run / enabled
 
 
-def _confirmation_required(action: str, consequence: str, **facts) -> HTTPException:
+def _confirmation_required(action: str, consequence: str, confirm_with=True, **facts) -> HTTPException:
     """FE-F1: an action that makes provider requests (or arms recurring ones) is never one click. Without
-    an explicit confirmation the server answers 428 with the consequence and budget, and nothing is done."""
+    an explicit confirmation the server answers 428 with the consequence and budget, and nothing is done.
+    `consequence` is plain user-facing text (the UI shows it verbatim); the value to re-send as `confirm`
+    is given separately in `confirm_with`."""
     return HTTPException(status_code=428, detail={"confirmation_required": True, "action": action,
-                                                  "consequence": consequence, **facts})
+                                                  "consequence": consequence, "confirm_with": confirm_with,
+                                                  **facts})
+
+
+def _require_refresh_confirmation(body, n_tickers: int, what: str) -> None:
+    """F2-3 / J2-3: a Live refresh spends real provider requests and saves an evaluation, so the SERVER asks
+    for the confirmation (a browser tab with a stale idea of the mode cannot skip it). Demo Mode reads
+    synthetic data and is never interrupted."""
+    if (body and body.confirm) or not isinstance(get_adapter(), LiveUWAdapter):
+        return
+    b = _scan_request_budget()
+    n = max(1, int(n_tickers))
+    raise _confirmation_required(
+        "live_refresh",
+        f"Refreshes {what} from Unusual Whales now: up to {b['per_ticker_scan_requests'] * n} requests "
+        f"({b['per_ticker_scan_requests']} per ticker x {n}; each may be re-attempted up to "
+        f"{b['attempts_per_request'] - 1} time(s) after a transient error). Each new evaluation is saved.",
+        tickers=n, max_requests=b["per_ticker_scan_requests"] * n)
+
+
+def _provider_label() -> str:
+    """Names who the requests go to, so a Demo Mode dialog never claims real Unusual Whales requests."""
+    try:
+        live = isinstance(get_adapter(), LiveUWAdapter)
+    except Exception:  # noqa: BLE001 -- disclosure only; assume the costly case
+        live = True
+    return "Unusual Whales" if live else "synthetic demo data (no real requests are made)"
 
 
 @app.get("/api/scheduler/status", dependencies=[Depends(require_auth)])
@@ -1539,7 +1599,7 @@ class RunOnceBody(BaseModel):
     # "Discover Once" / "Discover & Evaluate Once" UI buttons call, and
     # the only way a one-time run is possible while mode stays Disabled.
     depth: Optional[str] = None
-    confirm: bool = False                  # FE-F1: a one-time run makes real provider requests
+    confirm: StrictBool = False            # FE-F1: a one-time run makes real provider requests (S2-3: strict)
 
 
 @app.post("/api/scheduler/run-once", dependencies=[Depends(require_auth)])
@@ -1566,9 +1626,10 @@ def scheduler_run_once(body: RunOnceBody = RunOnceBody()):
                      or (body.depth is None and runner.store.get_mode() == "enabled"))
         raise _confirmation_required(
             "scheduler_run_once",
-            ("1 market screener request" + (f", then up to {runner.top_n} full ticker evaluations (each several "
-                                            "Unusual Whales requests; evaluations write signal records)"
-                                            if evaluates else "")) + ". Send confirm=true to proceed.",
+            f"Runs once now: 1 market screener request to {_provider_label()}"
+            + (f", then up to {runner.top_n} full ticker evaluations, several requests each; every evaluation "
+               "is saved as a signal record" if evaluates else "; discovery only, nothing is evaluated")
+            + ". No historical backfill. The recurring schedule is not changed.",
             depth=body.depth, top_n=runner.top_n, evaluates=evaluates)
     if body.depth is not None:
         result = runner.run_once_with_depth(body.depth)
@@ -1589,15 +1650,16 @@ def set_scheduler_mode(body: SchedulerModeBody):
         raise HTTPException(status_code=400, detail=f"mode must be one of {SCHEDULER_MODES}")
     runner = get_scheduler_runner()
     if body.mode != "disabled" and body.confirm != body.mode:
-        per_cycle = ("1 market screener request per cycle (discovery only)" if body.mode == "dry_run" else
-                     f"1 screener request plus up to {runner.top_n} full ticker evaluations per cycle"
-                     + (" plus a historical baseline backfill" if runner.run_baseline_backfill is not None else ""))
+        per_cycle = ("1 market screener request per cycle (discovery only, nothing is evaluated)"
+                     if body.mode == "dry_run" else
+                     f"1 screener request plus up to {runner.top_n} full ticker evaluations per cycle (every "
+                     "evaluation is saved as a signal record)"
+                     + (", plus a historical baseline backfill" if runner.run_baseline_backfill is not None else ""))
         raise _confirmation_required(
             f"scheduler_mode:{body.mode}",
-            f"Arms RECURRING background Unusual Whales requests during market hours every "
-            f"{int(runner.scan_interval_s // 60)} minutes until disabled: {per_cycle}. "
-            "Evaluations write signal records. Send confirm equal to the mode to proceed.",
-            mode=body.mode, interval_s=runner.scan_interval_s, top_n=runner.top_n)
+            f"Starts RECURRING background requests to {_provider_label()} during market hours, every "
+            f"{int(runner.scan_interval_s // 60)} minutes until you set Disabled: {per_cycle}.",
+            confirm_with=body.mode, mode=body.mode, interval_s=runner.scan_interval_s, top_n=runner.top_n)
     state = runner.store.set_mode(body.mode, actor="authenticated_user")
     return {"mode": state["mode"], "updated_at": state["updated_at"], "updated_by": state["updated_by"]}
 
@@ -2082,7 +2144,7 @@ _radar_refresh_lock = threading.Lock()
 
 
 @app.post("/api/radar/refresh", dependencies=[Depends(require_auth)])
-def radar_refresh():
+def radar_refresh(body: Optional[ConfirmBody] = None):
     """W2's explicit "Refresh Data" action: the ONLY route that makes a
     real live UW fetch for the personal watchlist. Structurally separate
     from the market-wide scheduler (/api/scheduler/*) -- different
@@ -2098,6 +2160,8 @@ def radar_refresh():
     Duplicate-concurrent-refresh prevention: a non-blocking lock acquire;
     a second call while one is already in flight gets a clean 409 rather
     than silently queuing, double-fetching, or double-counting telemetry."""
+    _require_refresh_confirmation(body, len(_settings_store.get_watchlist(default=settings.live_watchlist)),
+                                  "the watchlist")
     if not _radar_refresh_lock.acquire(blocking=False):
         raise HTTPException(status_code=409, detail="A watchlist refresh is already in progress. Try again shortly.")
     try:
@@ -2403,7 +2467,7 @@ _baseline_backfill_lock = threading.Lock()
 
 
 @app.post("/api/ticker/{ticker}/baseline/backfill", dependencies=[Depends(require_auth)])
-def ticker_baseline_backfill(ticker: str, max_pages: int = 60):
+def ticker_baseline_backfill(ticker: str, max_pages: int = 60, confirm: bool = False):
     """Explicit, authenticated, bounded backfill of COMPLETE session coverage
     for prior trading sessions (real UW requests, at most `max_pages`,
     clamped to BACKFILL_MAX_PAGES_PER_REQUEST)."""
@@ -2413,10 +2477,15 @@ def ticker_baseline_backfill(ticker: str, max_pages: int = 60):
         raise HTTPException(status_code=400, detail="Baseline backfill is only available in Live Mode.")
     if int(max_pages) < 1:                               # never turn a 0/negative budget into a request
         raise HTTPException(status_code=400, detail="max_pages must be at least 1.")
+    budget = max(1, min(int(max_pages), BACKFILL_MAX_PAGES_PER_REQUEST))
+    if not confirm:                                     # S2-2: same contract as reconcile and jobs
+        raise _confirmation_required(
+            "baseline_backfill",
+            f"Collects prior sessions for {ticker} from Unusual Whales now: up to {budget} pages.",
+            max_pages=budget)
     if not _baseline_backfill_lock.acquire(blocking=False):
         raise HTTPException(status_code=409, detail="A baseline backfill is already running.")
     try:
-        budget = max(1, min(int(max_pages), BACKFILL_MAX_PAGES_PER_REQUEST))
         result = _run_baseline_backfill(adapter, ticker, budget, "on_demand")
         now = _utcnow()
         return {"ticker": ticker, "max_pages": budget, "backfill": result,
@@ -2432,7 +2501,7 @@ class ReconcileBody(BaseModel):
     dataset: str
     session_date: str
     max_pages: int = 100
-    confirm: bool = False
+    confirm: StrictBool = False
 
 
 @app.post("/api/ticker/{ticker}/baseline/reconcile", dependencies=[Depends(require_auth)])
@@ -2461,20 +2530,24 @@ def ticker_baseline_reconcile(ticker: str, body: ReconcileBody):
     if not body.confirm:
         raise _confirmation_required(
             "coverage_reconciliation",
-            f"Re-walks {body.dataset} {d.isoformat()} for {ticker}: up to {budget} Unusual Whales pages. "
-            "Send confirm=true to proceed.", max_pages=budget)
+            f"Re-walks the {body.dataset} session of {d.isoformat()} for {ticker} from the open: up to {budget} "
+            "Unusual Whales pages. The stored coverage changes only if the re-walk certifies the session.",
+            max_pages=budget)
     if not _baseline_backfill_lock.acquire(blocking=False):
         raise HTTPException(status_code=409, detail="A baseline backfill or reconciliation is already running.")
     try:
         catalog = get_catalog()
+        before = max((r["id"] for r in catalog.list_coverage_reconciliations(limit=1)), default=0)
         with _collection_lock(ticker):
             u = session_collection.update_session_coverage(
                 adapter.client, catalog, body.dataset, ticker, d, now_utc=now, max_pages=budget,
                 kind="on_demand", reverify="operator", preserve_on_incomplete=True)
+        # C2-10: only records written by THIS attempt (an attempt that logs nothing returns none)
         recs = [r for r in catalog.list_coverage_reconciliations(body.dataset, ticker, limit=20)
-                if r["session_date"] == d.isoformat()]
+                if r["session_date"] == d.isoformat() and r["id"] > before]
         return {"ticker": ticker, "dataset": body.dataset, "session_date": d.isoformat(), "max_pages": budget,
                 "collection": u.summary(), "reconciliation": recs[0] if recs else None,
+                "reconciliations": recs,
                 "coverage": catalog.get_session_coverage(body.dataset, ticker, d.isoformat())}
     finally:
         _baseline_backfill_lock.release()
@@ -2496,9 +2569,10 @@ _baseline_job_runner: Optional[baseline_jobs.BaselineJobRunner] = None
 def get_baseline_job_store() -> baseline_jobs.BaselineJobStore:
     global _baseline_job_store
     catalog = get_catalog()                             # schema (migration 9) exists before first use
-    if _baseline_job_store is None or _baseline_job_store.owner is not catalog:
-        _baseline_job_store = baseline_jobs.BaselineJobStore(settings.db_path, catalog._conn, owner=catalog)
-    return _baseline_job_store
+    with _singleton_lock:                               # J2-5: exactly one store per catalog
+        if _baseline_job_store is None or _baseline_job_store.owner is not catalog:
+            _baseline_job_store = baseline_jobs.BaselineJobStore(settings.db_path, catalog._conn, owner=catalog)
+        return _baseline_job_store
 
 
 def _baseline_job_step(ticker: str, pages: int, datasets=None) -> dict:
@@ -2522,13 +2596,14 @@ def _baseline_job_step(ticker: str, pages: int, datasets=None) -> dict:
 def get_baseline_job_runner() -> baseline_jobs.BaselineJobRunner:
     global _baseline_job_runner
     store = get_baseline_job_store()
-    if _baseline_job_runner is None or _baseline_job_runner.store is not store:
-        _baseline_job_runner = baseline_jobs.BaselineJobRunner(store, _baseline_job_step)
-    return _baseline_job_runner
+    with _singleton_lock:                               # J2-5: one runner, so one view of the job thread
+        if _baseline_job_runner is None or _baseline_job_runner.store is not store:
+            _baseline_job_runner = baseline_jobs.BaselineJobRunner(store, _baseline_job_step)
+        return _baseline_job_runner
 
 
 class BaselineJobBody(BaseModel):
-    confirm: bool = False                  # FE-F1: the 428 answer states the total page budget first
+    confirm: StrictBool = False            # FE-F1: the 428 answer states the total page budget first
     tickers: Optional[list] = None
     scope: Optional[str] = None                         # "watchlist"
     max_pages_per_ticker: int = baseline_jobs.DEFAULT_MAX_PAGES_PER_TICKER
@@ -2553,7 +2628,7 @@ def _coverage_overview(ticker: str, session_date) -> dict:
         for c in prior:
             k = coverage_policy.status_key(c)
             counts[k] = counts.get(k, 0) + 1
-        complete = sum(1 for c in prior if coverage_policy.is_certified(c))
+        complete = coverage_policy.usable_prior_count(prior, session_date.isoformat())   # C2-5
         legacy = sum(1 for c in prior if coverage_policy.is_legacy_complete(c))
         cutoff = next((c["session_date"] for c in sorted(prior, key=lambda c: c["session_date"], reverse=True)
                        if c["status"] == "unavailable"), None)
@@ -2626,9 +2701,9 @@ def baseline_job_create(body: BaselineJobBody):
         per = max(1, min(int(body.max_pages_per_ticker), baseline_jobs.MAX_PAGES_PER_TICKER_CAP))
         raise _confirmation_required(
             "baseline_job",
-            f"Collects historical sessions for {len(tickers)} ticker(s): up to {per} Unusual Whales pages per "
-            f"ticker, {per * len(tickers)} pages in total, in the background until done, paused or cancelled. "
-            "Send confirm=true to proceed.",
+            f"Collects historical sessions for {len(tickers)} ticker(s) from Unusual Whales: up to {per} pages "
+            f"per ticker, {per * len(tickers)} pages in total, in the background until done, paused or "
+            "cancelled.",
             tickers=tickers, max_pages_per_ticker=per, total_pages=per * len(tickers))
     lo, hi = baseline_jobs.STEP_PAGES_RANGE
     lookback = session_collection.BACKFILL_LOOKBACK_SESSIONS
@@ -2670,7 +2745,20 @@ def baseline_job_pause(job_id: int):
 
 
 @app.post("/api/baseline/jobs/{job_id}/resume", dependencies=[Depends(require_auth)])
-def baseline_job_resume(job_id: int):
+def baseline_job_resume(job_id: int, body: Optional[ConfirmBody] = None):
+    job = get_baseline_job_store().get(job_id)
+    if job is not None and job["status"] == "paused" and not (body and body.confirm):
+        # S2-2: resuming restarts provider spending; state what is left of the approved budget first
+        per = int(job.get("max_pages_per_ticker") or 0)
+        progress = job.get("progress") or {}
+        left = sum(max(0, per - int((progress.get(t) or {}).get("pages_used") or 0))
+                   for t in (job.get("tickers") or [])
+                   if (progress.get(t) or {}).get("state") not in ("done", "complete", "cutoff", "target_reached"))
+        raise _confirmation_required(
+            "baseline_job_resume",
+            f"Resumes the historical collection: up to {left} more Unusual Whales pages across "
+            f"{len(job.get('tickers') or [])} ticker(s), in the background until done, paused or cancelled.",
+            remaining_pages=left)
     return _baseline_job_transition(job_id, ("paused",), "running", start=True)
 
 
@@ -2700,7 +2788,7 @@ _ticker_refresh_lock = threading.Lock()
 
 
 @app.post("/api/ticker/{ticker}/refresh", dependencies=[Depends(require_auth)])
-def ticker_analysis_refresh(ticker: str):
+def ticker_analysis_refresh(ticker: str, body: Optional[ConfirmBody] = None):
     """W2-b's explicit, user-triggered refresh action for Ticker Analysis
     specifically -- deliberately a SEPARATE control from the watchlist's
     POST /api/radar/refresh (different scope: one ticker a user is
@@ -2709,6 +2797,7 @@ def ticker_analysis_refresh(ticker: str):
     ticker's chart). Authenticated, and concurrency-locked the same way
     as the watchlist refresh -- a second concurrent refresh gets a clean
     409 rather than double-fetching or double-cataloging."""
+    _require_refresh_confirmation(body, 1, str(ticker).upper()[:12])
     if not _ticker_refresh_lock.acquire(blocking=False):
         raise HTTPException(status_code=409, detail="A refresh for this ticker is already in progress. Try again shortly.")
     try:
@@ -3063,7 +3152,7 @@ def investigate_availability():
 
 
 @app.post("/api/investigate/{ticker}", dependencies=[Depends(require_auth)])
-def investigate_ticker(ticker: str):
+def investigate_ticker(ticker: str, body: Optional[ConfirmBody] = None):
     """Bounded 'Investigate with AI' for one ticker. Demo mode / PUBLIC_DEMO
     always returns a pre-written, clearly-labeled simulated transcript and
     NEVER calls a real LLM or UW endpoint. Live mode makes the real bounded
@@ -3094,6 +3183,13 @@ def investigate_ticker(ticker: str):
             detail="Live mode requires a Unusual Whales API key (Settings) before Investigate with AI can run.",
         )
 
+    if not (body and body.confirm):
+        # S2-2: the most expensive action in the app (billed AI calls plus provider requests) is never one
+        # request; the UI's two-click arm sends confirm=true after showing this cost
+        raise _confirmation_required(
+            "investigate",
+            f"Runs an AI investigation of {safe_ticker}: two billed calls to your {ai_provider} account plus a "
+            "few bounded read-only Unusual Whales requests. Nothing is saved as a TIP evaluation.")
     adapter = get_adapter()
     store = get_store(_mode_of(adapter))
     # FE-F2: Investigate never runs or SAVES an evaluation of its own (it used to call _run_scan, which
@@ -3215,12 +3311,18 @@ if _FRONTEND_DIR.exists():
     def _serve_index():
         return HTMLResponse(_index_html_with_cache_busting())
 
+    _STATIC_SUFFIXES = (".html", ".js", ".css", ".png", ".svg", ".ico", ".woff", ".woff2", ".map")
+    _STATIC_ALLOWED = frozenset(
+        p.relative_to(_FRONTEND_DIR).as_posix() for p in _FRONTEND_DIR.rglob("*")
+        if p.is_file() and not p.name.lower().startswith("test_") and p.suffix.lower() in _STATIC_SUFFIXES)
+
     class _ProductionStaticFiles(StaticFiles):
-        """SEC-9: serves the app's own assets only -- never the test harnesses kept in frontend/."""
+        """SEC-9 / S2-4: serves an ALLOWLIST of the app's own assets (computed once at startup), matched
+        exactly -- case variants, trailing dots or alternate data streams on Windows never reach a test
+        harness or a source file."""
 
         async def get_response(self, path, scope):
-            name = path.replace("\\", "/").rsplit("/", 1)[-1]
-            if name.startswith("test_") or name.endswith((".py", ".mjs", ".md")):
+            if path.replace("\\", "/").lstrip("/") not in _STATIC_ALLOWED:
                 from starlette.exceptions import HTTPException as _StarletteHTTPException
                 raise _StarletteHTTPException(status_code=404)
             return await super().get_response(path, scope)

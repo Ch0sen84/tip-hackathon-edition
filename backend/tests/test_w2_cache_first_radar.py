@@ -170,7 +170,7 @@ def test_explicit_refresh_data_action_does_make_real_calls(app_main, monkeypatch
     mock_session.get.return_value = MagicMock(status_code=200, ok=True, text="{}", headers={},
                                                 json=MagicMock(return_value={"data": []}))
     client = TestClient(app_main.app)
-    resp = client.post("/api/radar/refresh")
+    resp = client.post("/api/radar/refresh", json={"confirm": True})
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert body["served_from_cache"] is False
@@ -184,7 +184,7 @@ def test_duplicate_concurrent_refresh_is_rejected_cleanly(app_main, monkeypatch,
     app_module._radar_refresh_lock.acquire()  # simulate a refresh already in progress
     try:
         client = TestClient(app_main.app)
-        resp = client.post("/api/radar/refresh")
+        resp = client.post("/api/radar/refresh", json={"confirm": True})
         assert resp.status_code == 409
         assert "already in progress" in resp.json()["detail"]
     finally:
@@ -199,7 +199,7 @@ def test_refresh_requires_auth_same_path_as_every_other_mutating_route(app_main,
     monkeypatch.setattr(app_module, "LOCAL_MODE_ACTIVE", False)
     client = TestClient(app_main.app)
     client.headers.pop("X-TIP-Auth", None)  # TestClient auto-injects a valid token by default
-    resp = client.post("/api/radar/refresh")
+    resp = client.post("/api/radar/refresh", json={"confirm": True})
     assert resp.status_code == 401
 
 

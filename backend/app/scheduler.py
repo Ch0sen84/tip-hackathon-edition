@@ -386,7 +386,12 @@ class SchedulerRunner:
             candidates = disc.get("candidates") or []
             if disc.get("unavailable"):
                 # S3: a failed screener is a failed cycle, never an empty market snapshot
-                pause_reason = f"discovery unavailable: {disc.get('reason') or 'provider failure'}"
+                # J2-4: plain words (never a raw dict), and honest: nothing is paused, the next cycle retries
+                why = disc.get("reason")
+                if isinstance(why, dict):
+                    why = why.get("message") or why.get("status") or "provider failure"
+                pause_reason = (f"last cycle failed: market screener unavailable ({str(why or 'provider failure')[:160]}); "
+                                "nothing was cataloged and the next scheduled cycle retries")
                 candidates = []
             # QA remediation D3: this snapshot persistence is now gated to
             # exclude a real SyntheticDataAdapter (demo mode) -- SAME

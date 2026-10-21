@@ -35,7 +35,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "backend"))
 
-from app.core import session_baseline, trading_calendar as tc  # noqa: E402
+from app.core import coverage_policy as policy, session_baseline, trading_calendar as tc  # noqa: E402
 
 TABLES = {"darkpool": "darkpool_observations", "options_flow": "options_flow_observations"}
 DEFAULT_KEEP = 90
@@ -67,12 +67,18 @@ def _day_rows(conn, dataset, ticker, session_date, cols="id, source_id, ticker, 
 
 
 def _candidates(conn, keep: int):
-    """(dataset, ticker, session_date) complete sessions older than the newest `keep` complete ones."""
+    """(dataset, ticker, session_date) CERTIFIED complete sessions older than the newest `keep` certified ones.
+    A legacy (uncertified) 'complete' session will be re-walked from scratch by the collector, so its rows
+    must stay in place (P2-3)."""
     out = []
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(session_coverage)")}
+    certified = (" AND certified_by IN (" + ",".join("?" * len(policy.ACCEPTED_CERTIFIERS)) + ")"
+                 if "certified_by" in cols else " AND 0")
     for dataset, ticker in conn.execute("SELECT DISTINCT dataset, ticker FROM session_coverage").fetchall():
         done = [r[0] for r in conn.execute(
-            "SELECT session_date FROM session_coverage WHERE dataset = ? AND ticker = ? AND status = 'complete' "
-            "ORDER BY session_date DESC", (dataset, ticker))]
+            "SELECT session_date FROM session_coverage WHERE dataset = ? AND ticker = ? AND status = 'complete'"
+            + certified + " ORDER BY session_date DESC",
+            (dataset, ticker, *(sorted(policy.ACCEPTED_CERTIFIERS) if "certified_by" in cols else ())))]
         out += [(dataset, ticker, d) for d in sorted(done[keep:])]
     return out
 

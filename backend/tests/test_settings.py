@@ -136,7 +136,7 @@ def test_delete_uw_key_clears_and_forces_demo_mode(app_main, monkeypatch):
 
     resp = client.delete("/api/settings/uw-key")
     assert resp.status_code == 200
-    assert resp.json() == {"configured": False, "mode": "demo"}
+    assert resp.json() == {"configured": False, "mode": "demo", "removed_preserved_copies": []}
 
     status = client.get("/api/settings").json()
     assert status["uw"]["configured"] is False
@@ -320,7 +320,7 @@ def test_ai_key_save_and_clear(app_main):
 
     resp = client.delete("/api/settings/ai-key")
     assert resp.status_code == 200
-    assert resp.json() == {"configured": False}
+    assert resp.json() == {"configured": False, "removed_preserved_copies": []}
     status = client.get("/api/settings").json()
     assert status["ai"]["configured"] is False
 

@@ -86,7 +86,7 @@ def test_J2_resume_while_thread_finishing_leaves_status_running_without_thread(l
         a = client.post("/api/baseline/jobs", json={"confirm": True, "tickers": ["ABCD"], "step_pages": 20}).json()["job"]
         assert reached.wait(60)
         assert store.get(a["id"])["status"] == "paused"
-        r = client.post(f"/api/baseline/jobs/{a['id']}/resume")
+        r = client.post(f"/api/baseline/jobs/{a['id']}/resume", json={"confirm": True})
         print("\nJ2 resume ->", r.status_code, r.json().get("detail"), "| status now:", store.get(a["id"])["status"])
     finally:
         release.set()
@@ -351,7 +351,7 @@ def test_G1_every_get_route_makes_zero_uw_requests(app_main, monkeypatch, tmp_pa
     offenders = {}
     for phase in ("empty", "after_refresh"):
         if phase == "after_refresh":
-            rr = client.post("/api/ticker/ABCD/refresh")
+            rr = client.post("/api/ticker/ABCD/refresh", json={"confirm": True})
             print("G1 refresh status", rr.status_code, "calls", len(adapter.fake_session.calls))
         for g in gets:
             before = len(adapter.fake_session.calls)

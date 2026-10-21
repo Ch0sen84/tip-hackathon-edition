@@ -269,6 +269,32 @@ def _is_canceled(trade: dict) -> bool:
     return trade.get("canceled") in (True, "true", "True", 1)
 
 
+def _canceled_print_keys(ticker: str, versions) -> set:
+    """Print keys whose NEWEST stored version (highest row id) reports the print canceled. `versions` is an
+    iterable of (row_id, trade). C-F3 / C2-3: the latest report decides, so a cancellation the provider
+    later reverses is honoured too."""
+    latest: dict = {}
+    for row_id, t in versions:
+        k = darkpool_print_key(ticker, t)
+        if k not in latest or row_id > latest[k][0]:
+            latest[k] = (row_id, _is_canceled(t))
+    return {k for k, (_i, c) in latest.items() if c}
+
+
+def _is_state_marker(source_id) -> bool:
+    """A cancel/reinstate version row (`<source_id>#canceled...` / `#reinstated@...`), not an observation."""
+    return "#canceled" in str(source_id) or "#reinstated@" in str(source_id)
+
+
+def _current_prints(ticker: str, versions) -> list:
+    """The stored observations minus every print CURRENTLY canceled and minus the state-marker rows
+    (C-F3 / P2-5 / C2-3). `versions` is a list of (row_id, trade, source_id). Ordinary rows are passed
+    through as before (no other de-duplication: that is _iter_window's job)."""
+    canceled = _canceled_print_keys(ticker, [(i, t) for i, t, _sid in versions])
+    return [t for _i, t, sid in versions
+            if not _is_state_marker(sid) and not _is_canceled(t) and darkpool_print_key(ticker, t) not in canceled]
+
+
 def darkpool_print_key(ticker: str, trade: dict) -> str:
     """Verified-unique, re-fetch-stable identity of one UW dark-pool print."""
     return "dp:" + fingerprint(
@@ -424,16 +450,29 @@ class IngestionCatalog:
                 )
                 if cur.rowcount:
                     inserted += 1
-                elif _is_canceled(trade):
-                    # C-F3: a print stored earlier and now reported CANCELED. Raw rows are append-only:
-                    # record the cancellation as its own row (idempotent key); _iter_window then excludes
-                    # every version of that print, and the window signature changes (cache rebuild).
-                    cur = conn.execute(
-                        "INSERT OR IGNORE INTO darkpool_observations "
-                        "(source_id, ticker, event_time, retrieved_at, raw_json) VALUES (?, ?, ?, ?, ?)",
-                        (f"{source_id}#canceled", ticker, event_time, retrieved_at, json.dumps(trade, default=str)))
-                    if cur.rowcount:
-                        inserted += 1
+                else:
+                    # C-F3 / C2-3: a print stored earlier whose cancellation state has CHANGED (canceled now,
+                    # or a cancellation reversed). Raw rows are append-only: the new state is recorded as its
+                    # own version row; readers let the newest version decide, and the window signature
+                    # changes (cache rebuild). An unchanged re-report adds nothing.
+                    sid = str(source_id)
+                    last = conn.execute(
+                        "SELECT raw_json FROM darkpool_observations WHERE source_id = ? "
+                        "OR (source_id >= ? AND source_id < ?) ORDER BY id DESC LIMIT 1",
+                        (sid, sid + "#", sid + "$")).fetchone()
+                    try:
+                        was_canceled = _is_canceled(json.loads(last[0])) if last and last[0] else False
+                    except (json.JSONDecodeError, TypeError):
+                        was_canceled = False
+                    now_canceled = _is_canceled(trade)
+                    if now_canceled != was_canceled:
+                        marker = f"{sid}#{'canceled' if now_canceled else 'reinstated'}@{retrieved_at}"
+                        cur = conn.execute(
+                            "INSERT OR IGNORE INTO darkpool_observations "
+                            "(source_id, ticker, event_time, retrieved_at, raw_json) VALUES (?, ?, ?, ?, ?)",
+                            (marker, ticker, event_time, retrieved_at, json.dumps(trade, default=str)))
+                        if cur.rowcount:
+                            inserted += 1
             conn.commit()
         return inserted
 
@@ -692,10 +731,11 @@ class IngestionCatalog:
         same shape contract as get_cached_flow_observations above."""
         with self._conn() as conn:
             rows = conn.execute(
-                "SELECT raw_json FROM darkpool_observations WHERE ticker = ? ORDER BY event_time ASC",
+                "SELECT id, raw_json, source_id FROM darkpool_observations WHERE ticker = ? "
+                "ORDER BY event_time ASC, id ASC",
                 (ticker,),
             ).fetchall()
-        return [json.loads(r[0]) for r in rows if r[0]]
+        return _current_prints(ticker, [(r[0], json.loads(r[1]), r[2]) for r in rows if r[1]])
 
     def get_price_bars_cached_at(self, ticker: str, timeframe: str) -> Optional[str]:
         """Most recent REAL retrieved_at among this ticker/timeframe's
@@ -987,19 +1027,27 @@ class IngestionCatalog:
         never re-derived)."""
         with self._conn() as conn:
             rows = conn.execute(
-                "SELECT event_time, raw_json FROM darkpool_observations "
-                "WHERE ticker = ? ORDER BY event_time",
+                "SELECT id, event_time, raw_json, source_id FROM darkpool_observations "
+                "WHERE ticker = ? ORDER BY event_time, id",
                 (ticker,),
             ).fetchall()
         grouped: dict = {}
-        for event_time, raw_json in rows:
+        parsed = []
+        for row_id, event_time, raw_json, sid in rows:
+            try:
+                parsed.append((row_id, event_time, json.loads(raw_json) if raw_json else {}, sid))
+            except (json.JSONDecodeError, TypeError):
+                parsed.append((row_id, event_time, {}, sid))
+        canceled = _canceled_print_keys(ticker, [(i, d) for i, _e, d, _s in parsed if d])
+        for _row_id, event_time, data, sid in parsed:
+            if _is_state_marker(sid) or (data and (_is_canceled(data) or darkpool_print_key(ticker, data) in canceled)):
+                continue                                     # P2-5 / C2-3: no marker rows, no canceled print
             date_key = (event_time or "")[:10]
             premium = 0.0
-            if raw_json:
+            if data:
                 try:
-                    data = json.loads(raw_json)
                     premium = float(data.get("premium") or 0)
-                except (json.JSONDecodeError, TypeError, ValueError):
+                except (TypeError, ValueError):
                     premium = 0.0
             grouped.setdefault(date_key, []).append({"event_time": event_time, "premium": premium})
         return grouped
@@ -1181,11 +1229,11 @@ class IngestionCatalog:
         lo, hi = self._window_date_range(start_utc, end_utc)
         with self._conn() as conn:
             rows = conn.execute(
-                f"SELECT event_time, raw_json FROM {table} WHERE ticker = ? AND event_time >= ? AND event_time < ? "
-                f"ORDER BY event_time", (ticker, lo, hi)).fetchall()
+                f"SELECT id, event_time, raw_json FROM {table} WHERE ticker = ? AND event_time >= ? AND event_time < ? "
+                f"ORDER BY event_time, id", (ticker, lo, hi)).fetchall()
         seen = set()
         parsed = []
-        for event_time, raw_json in rows:
+        for row_id, event_time, raw_json in rows:
             ts = _parse_iso_dt(str(event_time).replace("Z", "+00:00"))
             if ts is None or ts < start_utc or ts > end_utc:
                 continue
@@ -1193,11 +1241,11 @@ class IngestionCatalog:
                 data = json.loads(raw_json) if raw_json else {}
             except (json.JSONDecodeError, TypeError):
                 continue
-            parsed.append((ts, data))
-        # a print reported canceled in ANY stored version is excluded in every version (C-F3)
-        canceled = ({darkpool_print_key(ticker, d) for _t, d in parsed if _is_canceled(d)}
+            parsed.append((row_id, ts, data))
+        # C-F3 / C2-3: the NEWEST stored version of a print decides whether it is currently canceled
+        canceled = (_canceled_print_keys(ticker, [(i, d) for i, _t, d in parsed])
                     if dataset == "darkpool" else set())
-        for ts, data in parsed:
+        for _row_id, ts, data in parsed:
             if dataset == "darkpool":
                 if _is_canceled(data):
                     continue

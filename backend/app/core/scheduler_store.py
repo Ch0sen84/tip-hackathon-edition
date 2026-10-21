@@ -78,7 +78,7 @@ class SchedulerStore:
         if self._persistent_conn is not None:
             yield self._persistent_conn
             return
-        conn = sqlite3.connect(self.db_path)
+        conn = sqlite3.connect(self.db_path, timeout=30)   # P2-6
         try:
             yield conn
         finally:

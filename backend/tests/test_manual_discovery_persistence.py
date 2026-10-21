@@ -91,7 +91,7 @@ def test_manual_discover_then_evaluate_then_shows_on_market_wide_radar(app_main,
     # underlying _run_scan/_catalog_scan_best_effort pipeline a watchlist
     # scan already uses, never a second pipeline, just reached via the
     # explicit-trigger route rather than a plain GET.
-    eval_resp = client.post(f"/api/ticker/{ticker}/refresh")
+    eval_resp = client.post(f"/api/ticker/{ticker}/refresh", json={"confirm": True})
     assert eval_resp.status_code == 200
 
     # 4. Market-wide Radar now shows it as a freshly-evaluated, CURRENT

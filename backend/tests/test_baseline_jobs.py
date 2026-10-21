@@ -9,7 +9,7 @@ from fastapi.testclient import TestClient
 
 from app import baseline_jobs, session_collection
 from tests.uw_fakes import FakeResponse, ok
-from tests.uw_paginated import PaginatedUW, prior_sessions, session_prints
+from tests.uw_paginated import PaginatedUW, prior_sessions, session_alerts, session_prints
 
 EVIDENCE = date(2026, 10, 16)
 AS_OF = datetime(2026, 10, 16, 16, 0, tzinfo=timezone.utc)
@@ -17,11 +17,12 @@ STATE = ok({"close": "101.00", "prev_close": "100.00"})
 
 
 def build_uw(history_sessions=26, **kw):
-    rows = []
+    rows, alerts = [], []
     for d in prior_sessions(EVIDENCE, history_sessions):
         rows += session_prints("ABCD", d, 10_000.0)
+        alerts += session_alerts("ABCD", d, 50_000.0)       # an options history too: the baseline needs activity
     rows += session_prints("ABCD", EVIDENCE, 10_000.0)
-    return PaginatedUW(darkpool=rows, static={"stock-state": STATE, "flow-alerts": ok([])}, **kw)
+    return PaginatedUW(darkpool=rows, flow=alerts, static={"stock-state": STATE, "flow-alerts": ok([])}, **kw)
 
 
 JOB_STOP_TIMEOUT_S = 60
@@ -124,7 +125,7 @@ def test_pause_then_resume_never_refetches_verified_sessions(live, monkeypatch):
                    if c["status"] == "complete"}
     assert done_before
     calls_before = len(uw.calls)
-    assert client.post(f"/api/baseline/jobs/{job['id']}/resume").status_code == 200
+    assert client.post(f"/api/baseline/jobs/{job['id']}/resume", json={"confirm": True}).status_code == 200
     live.get_baseline_job_runner().join(60)
     assert live.get_baseline_job_store().get(job["id"])["status"] == "completed"
     later_dates = {(p or {}).get("date") for url, p in uw.calls[calls_before:] if "/api/darkpool/" in url}
@@ -216,7 +217,7 @@ def test_job_and_interactive_refreshes_never_write_one_tickers_coverage_concurre
     job = client.post("/api/baseline/jobs", json={"confirm": True, "tickers": ["ABCD"], "step_pages": 10,
                                                   "max_pages_per_ticker": 400}).json()["job"]
     for _ in range(4):
-        assert client.post("/api/ticker/ABCD/refresh").status_code in (200, 409)
+        assert client.post("/api/ticker/ABCD/refresh", json={"confirm": True}).status_code in (200, 409)
     live.get_baseline_job_runner().join(60)
     final = live.get_baseline_job_store().get(job["id"])
     assert final["status"] == "completed", (final["last_error"], final["progress"])

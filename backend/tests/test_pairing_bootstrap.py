@@ -104,17 +104,19 @@ def test_pairing_code_expires_after_ttl(app_main, monkeypatch):
     assert store.consume(code) is False
 
 
-def test_pairing_lockout_after_too_many_failed_attempts(app_main):
+def test_wrong_guesses_never_lock_out_or_rotate_the_real_code(app_main):
+    """SEC-3 / S2-1 (supersedes the original lockout): a lockout let any client that can reach the port
+    deny pairing to the operator (behind Docker Desktop every client shares the gateway address), and a
+    rotate-on-failure flooded the log with live codes. 64 bits of entropy make online guessing infeasible
+    on their own, so wrong guesses are only counted."""
     from app.auth import PairingCodeStore as _Store
 
     store = _Store(app_main._pairing_store.code_path)
     real_code = store.current_code()
     for _ in range(25):
-        store.consume("wrong-guess")
-    # Even the REAL code is now rejected until rotation/TTL -- the
-    # lockout is a defense-in-depth measure independent of the already-
-    # large (64-bit) keyspace.
-    assert store.consume(real_code) is False
+        assert store.consume("wrong-guess") is False
+    assert store.current_code() == real_code
+    assert store.consume(real_code) is True
 
 
 def test_pairing_route_never_exposes_the_code_itself(app_main):

@@ -92,10 +92,9 @@ def test_unauthenticated_network_mode_caller_cannot_initiate_ohlc_collection(app
     client = TestClient(app_main.app)
     client.headers.pop("X-TIP-Auth", None)
     resp = client.get(f"/api/ticker/{ticker}/ohlc")
-    # GET never required auth (by design, same as /api/radar and
-    # /api/ticker/{ticker}) -- the security property is that it still
-    # cannot cost a real UW call even though it's reachable.
-    assert resp.status_code == 200
+    # S2-5: in Network Mode every /api read needs the token too; either way the GET can never cost a
+    # real UW call.
+    assert resp.status_code == 401
     assert mock_session.get.call_count == 0
     # The POST refresh route DOES require auth -- this is the actual
     # boundary that matters for this item.

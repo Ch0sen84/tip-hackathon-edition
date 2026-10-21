@@ -246,7 +246,7 @@ def _resume_with(live, uw, datasets_state, remaining):
     store.update(job["id"], progress=progress, pages_used=100 - remaining)
     store.recover_after_restart()
     client = TestClient(live.app)
-    assert client.post(f"/api/baseline/jobs/{job['id']}/resume").status_code == 200
+    assert client.post(f"/api/baseline/jobs/{job['id']}/resume", json={"confirm": True}).status_code == 200
     live.get_baseline_job_runner().join(60)
     return store.get(job["id"])
 
@@ -272,7 +272,7 @@ def test_b3_resume_with_one_page_left_and_only_one_dataset_unfinished(live):
 def test_b3_explicit_backfill_route_with_max_pages_1_makes_one_request(live):
     uw = live.use_uw(both_datasets_uw())
     client = TestClient(live.app)
-    r = client.post("/api/ticker/ABCD/baseline/backfill?max_pages=1")
+    r = client.post("/api/ticker/ABCD/baseline/backfill?confirm=true&max_pages=1")
     assert r.status_code == 200 and r.json()["max_pages"] == 1
     assert len(provider_calls(uw)) == 1
     bf = r.json()["backfill"]

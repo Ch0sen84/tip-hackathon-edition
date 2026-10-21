@@ -61,7 +61,7 @@ def test_fixture_declares_itself_synthetic():
 def test_synthetic_data_traverses_every_layer_honestly(live):
     m, client, url, state = live
     assert requests.get(f"{url}/__control/info", timeout=5).json()["synthetic"] is True
-    radar = client.post("/api/radar/refresh").json()
+    radar = client.post("/api/radar/refresh", json={"confirm": True}).json()
     entries = {e["ticker"]: e for e in radar["highest"] + radar["other"]}
     assert set(entries) == set(WATCH) and radar["highest"] == []
     for t, e in entries.items():
@@ -100,7 +100,7 @@ def test_synthetic_data_traverses_every_layer_honestly(live):
 
 def test_backfill_hits_the_replay_history_cutoff_and_stays_insufficient(live):
     m, client, url, state = live
-    body = client.post("/api/ticker/SYNC/baseline/backfill?max_pages=40").json()
+    body = client.post("/api/ticker/SYNC/baseline/backfill?confirm=true&max_pages=40").json()
     for dataset in ("darkpool", "options_flow"):
         b = body["datasets"][dataset]["baseline"]
         assert b["status"] == "insufficient" and b["eligible_sessions"] < 20
@@ -121,7 +121,7 @@ def test_injected_faults_are_unavailable_not_negative(live, fault, expected):
         requests.post(f"{url}/__control/fail?path=flow-alerts&status=503", timeout=5)
     else:
         requests.post(f"{url}/__control/malformed?path=flow-alerts", timeout=5)
-    body = client.post("/api/ticker/SYNC/refresh").json()
+    body = client.post("/api/ticker/SYNC/refresh", json={"confirm": True}).json()
     assert body["collection"]["options_flow"]["status"] == expected
     assert body["gates"]["options_flow_anomaly"]["status"] == "unavailable"
     assert body["transition_rule"] == "held_incomplete_collection"

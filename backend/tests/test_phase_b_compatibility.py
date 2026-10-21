@@ -140,7 +140,7 @@ def test_ticker_analysis_response_shape_matches_documented_contract(app_main, mo
     # W2-b: GET is now cache-first -- use the explicit POST refresh route
     # to exercise a real scan's response shape, same pattern as the
     # radar tests' S1/W2 fix above.
-    resp = client.post("/api/ticker/NVDA/refresh")
+    resp = client.post("/api/ticker/NVDA/refresh", json={"confirm": True})
     assert resp.status_code == 200
     assert set(resp.json().keys()) == EXPECTED_TICKER_ANALYSIS_KEYS
 
@@ -166,7 +166,7 @@ def test_ticker_analysis_response_identical_whether_ingestion_succeeds_or_is_bro
     # W2-b: GET is cache-first now -- use the explicit POST refresh route
     # so both calls genuinely exercise a real scan (which is this test's
     # whole point: comparing ok-vs-broken catalog WRITE behavior).
-    resp_ok = client.post("/api/ticker/NVDA/refresh")
+    resp_ok = client.post("/api/ticker/NVDA/refresh", json={"confirm": True})
     assert resp_ok.status_code == 200
     body_ok = resp_ok.json()
 
@@ -192,7 +192,7 @@ def test_ticker_analysis_response_identical_whether_ingestion_succeeds_or_is_bro
         list_darkpool_observations_by_date=lambda ticker: {},
     ))
     _fresh_memory_store(app_main, monkeypatch)  # fresh, independent history again
-    resp_broken = client.post("/api/ticker/NVDA/refresh")
+    resp_broken = client.post("/api/ticker/NVDA/refresh", json={"confirm": True})
     assert resp_broken.status_code == 200
     body_broken = resp_broken.json()
 
@@ -232,7 +232,7 @@ def test_radar_response_shape_unaffected_when_ingestion_catalog_write_is_paused(
     # query string). Both calls here must use the real POST
     # /api/radar/refresh action instead, exactly like the UI's "Refresh
     # Data" button does.
-    resp_ok = client.post("/api/radar/refresh")
+    resp_ok = client.post("/api/radar/refresh", json={"confirm": True})
     assert resp_ok.status_code == 200
     assert set(resp_ok.json().keys()) == EXPECTED_RADAR_KEYS
     body_ok = resp_ok.json()
@@ -259,7 +259,7 @@ def test_radar_response_shape_unaffected_when_ingestion_catalog_write_is_paused(
         list_darkpool_observations_by_date=lambda ticker: {},
     ))
     _fresh_memory_store(app_main, monkeypatch)
-    resp_paused = client.post("/api/radar/refresh")
+    resp_paused = client.post("/api/radar/refresh", json={"confirm": True})
     assert resp_paused.status_code == 200
     body_paused = resp_paused.json()
     # `last_scan_at` is a genuine wall-clock timestamp recorded fresh on

@@ -68,7 +68,7 @@ def test_live_scan_of_a_ticker_that_is_also_a_demo_fixture_starts_clean(file_bac
 
     adapter = fake_live_adapter(_quiet_live_routes(), watchlist=["FLUX"])
     monkeypatch.setattr(m, "get_adapter", lambda: adapter)
-    body = client.post("/api/ticker/FLUX/refresh").json()
+    body = client.post("/api/ticker/FLUX/refresh", json={"confirm": True}).json()
     assert body["previous_state"] is None, "Live must never inherit the Demo lifecycle state"
     assert m.get_store("live").qualifying_days_count("FLUX") == 0
     # and the Live scan did not touch the Demo store either

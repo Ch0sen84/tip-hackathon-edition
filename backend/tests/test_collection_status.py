@@ -97,7 +97,7 @@ def test_outage_holds_state_and_writes_no_lifecycle_history(live_app):
     days_before = store.qualifying_days_count("SPY")
     m.use_routes(routes(flow=FakeResponse(503, {"error": "upstream"})))
 
-    body = TestClient(m.app).post("/api/ticker/SPY/refresh").json()
+    body = TestClient(m.app).post("/api/ticker/SPY/refresh", json={"confirm": True}).json()
 
     assert body["state"] == "BUILDING"
     assert body["transition_rule"] == "held_incomplete_collection"
@@ -117,9 +117,9 @@ def test_outage_and_genuine_empty_answer_are_no_longer_identical(live_app):
     client = TestClient(m.app)
     _seed_building(m)
     m.use_routes(routes(flow=FakeResponse(503, {"error": "upstream"}), dp=ok([])))
-    outage = client.post("/api/ticker/SPY/refresh").json()
+    outage = client.post("/api/ticker/SPY/refresh", json={"confirm": True}).json()
     m.use_routes(routes(flow=ok([]), dp=ok([])))
-    quiet = client.post("/api/ticker/SPY/refresh").json()
+    quiet = client.post("/api/ticker/SPY/refresh", json={"confirm": True}).json()
     assert outage["gates"]["options_flow_anomaly"]["status"] == "unavailable"
     assert outage["transition_rule"] == "held_incomplete_collection"
     assert outage["collection_complete"] is False
@@ -134,7 +134,7 @@ def test_outage_and_genuine_empty_answer_are_no_longer_identical(live_app):
 def test_failed_first_scan_creates_no_lifecycle_record(live_app):
     m = live_app
     m.use_routes(routes(dp=FakeResponse(500, {"error": "x"})))
-    body = TestClient(m.app).post("/api/ticker/SPY/refresh").json()
+    body = TestClient(m.app).post("/api/ticker/SPY/refresh", json={"confirm": True}).json()
     assert body["state"] is None
     assert m.get_store("live").current_state("SPY") is None
     assert m.get_store("live").history("SPY") == []
@@ -144,13 +144,13 @@ def test_cached_view_after_outage_reports_failure_and_last_successful_collection
     m = live_app
     client = TestClient(m.app)
     m.use_routes(routes())
-    good = client.post("/api/ticker/SPY/refresh").json()
+    good = client.post("/api/ticker/SPY/refresh", json={"confirm": True}).json()
     assert good["collection_complete"] is True and good["eval_freshness"] == "current"
     first_success = good["last_successful_collection_at"]
     assert first_success
 
     m.use_routes(routes(state=FakeResponse(502, {"error": "gateway"})))
-    client.post("/api/ticker/SPY/refresh")
+    client.post("/api/ticker/SPY/refresh", json={"confirm": True})
     cached = client.get("/api/ticker/SPY").json()
     assert cached["served_from_cache"] is True
     assert cached["eval_freshness"] == "collection_failed"
@@ -161,7 +161,7 @@ def test_cached_view_after_outage_reports_failure_and_last_successful_collection
 def test_radar_refresh_marks_failed_ticker_as_collection_failed_not_current(live_app):
     m = live_app
     m.use_routes(routes(flow=FakeResponse(429, {"error": "slow"})))
-    body = TestClient(m.app).post("/api/radar/refresh").json()
+    body = TestClient(m.app).post("/api/radar/refresh", json={"confirm": True}).json()
     entries = {e["ticker"]: e for e in body["highest"] + body["other"]}
     assert entries["SPY"]["eval_freshness"] == "collection_failed"
     assert entries["SPY"]["collection"]["options_flow"]["status"] == "rate_limited"

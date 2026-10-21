@@ -95,7 +95,7 @@ def test_post_radar_refresh_still_works_and_is_the_sole_mutating_path(app_main, 
     mock_session.get.return_value = MagicMock(status_code=200, ok=True, text="{}", headers={},
                                                 json=MagicMock(return_value={"data": []}))
     client = TestClient(app_main.app)
-    resp = client.post("/api/radar/refresh")
+    resp = client.post("/api/radar/refresh", json={"confirm": True})
     assert resp.status_code == 200, resp.text
     assert resp.json()["served_from_cache"] is False
     assert mock_session.get.call_count > 0

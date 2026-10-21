@@ -35,7 +35,7 @@ def test_explicit_refresh_never_returns_current_with_null_last_evaluated_at(app_
     mock_session.get.return_value = MagicMock(status_code=200, ok=True, text="{}", headers={},
                                                 json=MagicMock(return_value={"data": []}))
     client = TestClient(app_main.app)
-    resp = client.post(f"/api/ticker/{ticker}/refresh")
+    resp = client.post(f"/api/ticker/{ticker}/refresh", json={"confirm": True})
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert body["eval_freshness"] == "current"
@@ -54,7 +54,7 @@ def test_immediately_following_cache_only_get_reflects_the_real_refresh_timestam
     mock_session.get.return_value = MagicMock(status_code=200, ok=True, text="{}", headers={},
                                                 json=MagicMock(return_value={"data": []}))
     client = TestClient(app_main.app)
-    refresh_resp = client.post(f"/api/ticker/{ticker}/refresh")
+    refresh_resp = client.post(f"/api/ticker/{ticker}/refresh", json={"confirm": True})
     assert refresh_resp.status_code == 200
 
     get_resp = client.get(f"/api/ticker/{ticker}")
