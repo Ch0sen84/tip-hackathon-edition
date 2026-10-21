@@ -315,8 +315,11 @@ def test_backup_root_alias_is_refused(env):
     try:
         os.symlink(env.bk, link, target_is_directory=True)
     except (OSError, NotImplementedError):
-        pytest.skip("symlinks unavailable on this host (the drill exercises a Windows junction instead)")
+        if os.name != "nt":
+            raise
+        subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(env.bk)], check=True, capture_output=True)
     assert env.snapshot(root=link) == 2
+    assert "alias" in env.last_err
 
 
 # --- restore failure paths --------------------------------------------------------------------------

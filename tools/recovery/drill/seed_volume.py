@@ -1,6 +1,7 @@
 """Seed a DISPOSABLE drill volume (mounted at /srv/data) with a representative,
 SYNTHETIC-ONLY Release 2 (schema 9) deployment state. Runs inside the 147e315 image:
-    python /r/seed_volume.py /srv/data [--scheduler enabled] [--active-job]
+    python /r/seed_volume.py /srv/data [--scheduler enabled] [--active-job] [--corrupt-demo]
+        [--fifo] [--hardlink] [--bad-demo] [--unexpected-db]
 Creates: primary DB (schema 1-9, synthetic SPY-free rows, scheduler row), Demo DB with a
 live -wal/-shm pair, a zero-length primary -journal, settings.json / .auth_token /
 .pairing_code (placeholders, never real credentials), a migration .bak, a hidden file, an
@@ -13,11 +14,13 @@ import sys
 
 sys.path.insert(0, "/srv/backend")
 from app.ingestion import IngestionCatalog  # noqa: E402
+from app.storage import QualifyingDaysStore  # noqa: E402
 
 root = sys.argv[1]
 os.makedirs(root, exist_ok=True)
 db = os.path.join(root, "tip_hackathon.db")
-cat = IngestionCatalog(db)                                   # migrations 1-9 (147e315 code)
+QualifyingDaysStore(db)                                      # as the app does: storage schema + migrations 1-9
+cat = IngestionCatalog(db)
 cat.catalog_darkpool_observations("SYNT", [{"ticker": "SYNT", "executed_at": "2026-10-15T14:00:00Z", "price": "1",
                                             "size": 1, "premium": "100", "tracking_id": "seed-1", "volume": 1}])
 cat.catalog_options_flow_observations("SYNT", [{"id": "seed-a1", "ticker": "SYNT", "created_at": "2026-10-15T14:00:00Z",
@@ -38,7 +41,10 @@ shutil.copy2(db, os.path.join(root, "tip_hackathon.db.pre-migration-20261016T000
 open(db + "-journal", "wb").close()                          # zero-length (not hot) journal sidecar
 
 demo = os.path.join(root, "tip_hackathon.demo.db")
-IngestionCatalog(demo)
+if "--bad-demo" in sys.argv:                                 # negative fixture: a valid SQLite file that is not
+    sqlite3.connect(demo).executescript("CREATE TABLE notes (k TEXT);")      # a TIP Demo database
+else:
+    QualifyingDaysStore(demo)
 d = sqlite3.connect(demo)
 d.execute("PRAGMA journal_mode=WAL")
 d.execute("CREATE TABLE IF NOT EXISTS drill_demo (k TEXT)")
@@ -69,6 +75,8 @@ os.chown(os.path.join(root, "keep", "sub", "owned.txt"), 1000, 1000)
 os.chown(os.path.join(root, "keep", "sub"), 1000, 1000)
 if not os.path.lexists(os.path.join(root, "settings.link")):
     os.symlink("settings.json", os.path.join(root, "settings.link"))
+if "--unexpected-db" in sys.argv:                            # negative fixture: an unknown SQLite database
+    sqlite3.connect(os.path.join(root, "extra.sqlite")).executescript("CREATE TABLE t (x);")
 if "--fifo" in sys.argv:                                     # negative fixtures: unsupported entries
     os.mkfifo(os.path.join(root, "drill.fifo"))
 if "--hardlink" in sys.argv:

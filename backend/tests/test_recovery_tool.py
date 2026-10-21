@@ -352,3 +352,13 @@ def test_schema_reference_matches_the_application_migrations_1_to_9():
     storage schema + migrations 1-9 create, i.e. migrations 1-9 are unchanged."""
     ref = _load("schema_reference").build(str(Path(__file__).resolve().parents[1]))
     assert ref == r3.REFERENCE
+
+
+def test_runtime_fingerprint_treats_unset_values_alike_but_not_real_settings():
+    base = {"Id": "a" * 64, "Name": "/p-s-1", "Config": {"Cmd": ["x"]}, "HostConfig": {"OomKillDisable": None, "Memory": 0},
+            "Mounts": [], "NetworkSettings": {"Networks": {}}}
+    same = {**base, "HostConfig": {"OomKillDisable": False, "Memory": None}}
+    assert r3.fingerprint_diff(r3.runtime_fingerprint(base), r3.runtime_fingerprint(same)) == []
+    real = {**base, "HostConfig": {"OomKillDisable": True, "Memory": 1 << 30}}
+    d = r3.fingerprint_diff(r3.runtime_fingerprint(base), r3.runtime_fingerprint(real))
+    assert any("OomKillDisable" in x for x in d) and any("Memory" in x for x in d)

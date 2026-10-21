@@ -30,9 +30,9 @@ SERVICE = "tip-hackathon"
 EVIDENCE = []
 
 
-def sh(cmd, env=None, check=False, timeout=900):
+def sh(cmd, env=None, check=False, timeout=900, cwd=None):
     e = dict(os.environ, **(env or {}))
-    r = subprocess.run([str(c) for c in cmd], capture_output=True, env=e, timeout=timeout)
+    r = subprocess.run([str(c) for c in cmd], capture_output=True, env=e, timeout=timeout, cwd=cwd)
     if check and r.returncode != 0:
         raise SystemExit(f"setup command failed: {cmd}\n{r.stderr.decode()[-1500:]}")
     return r
@@ -43,6 +43,7 @@ class Drill:
         self.a = a
         self.work = Path(a.workdir).resolve()
         self.work.mkdir(parents=True, exist_ok=True)
+        self.tool = Path(a.tool_dir).resolve() / "r3recover.py" if a.tool_dir else TOOL
 
     # --- compose plumbing ------------------------------------------------------------------
     def cenv(self, image):
@@ -102,17 +103,20 @@ class Drill:
 
     # --- tool invocation + evidence -------------------------------------------------------------
     def r3(self, *args, env=None):
-        r = sh([sys.executable, TOOL, *args], env=env)
+        r = sh([sys.executable, self.tool, *args], env=env, cwd=self.work)
         return r.returncode, r.stdout.decode(), r.stderr.decode()
 
-    def step(self, kind, name, args, expect_rc, project, env=None, note=""):
+    def step(self, kind, name, args, expect_rc, project, env=None, note="", must=None):
         rc, out, err = self.r3(*args, env=env)
         running = self.app_running(project) if project else None
         ok = (rc == expect_rc) if kind == "positive" else (rc != 0 and rc == expect_rc and not running)
+        if must is not None and must not in err:        # the BLOCK must be for the reason under test
+            ok = False
         rec = {"kind": kind, "name": name, "command": "python tools/recovery/r3recover.py " + " ".join(map(str, args)),
                "env": {k: v for k, v in (env or {}).items() if k.startswith("R3_")},
                "expected_exit": expect_rc, "observed_exit": rc,
-               "expected_outcome": note, "observed_outcome": (err.strip().splitlines() or [""])[-1][:400],
+               "expected_outcome": note, "required_reason": must,
+               "observed_outcome": (err.strip().splitlines() or [""])[-1][:600],
                "app_running_after": running, "result": "PASS" if ok else "FAIL"}
         EVIDENCE.append(rec)
         print(f"[{rec['result']}] {kind:8} {name}: exit {rc} (expected {expect_rc}) app_running={running}", flush=True)
@@ -121,6 +125,21 @@ class Drill:
     def fact(self, name, ok, detail):
         EVIDENCE.append({"kind": "check", "name": name, "result": "PASS" if ok else "FAIL", "detail": detail})
         print(f"[{'PASS' if ok else 'FAIL'}] check    {name}: {detail}", flush=True)
+
+    def fresh_token(self, dep, u4):
+        rc, out, _ = self.r3("rollback", *dep, "--u4", u4, "--helper-image", self.a.helper_image, "--dry-run")
+        return json.loads(out)["approval_token"] if rc == 0 else "RESTORE:none"
+
+    def rerestore(self, P, dep, u4):
+        """Return the main deployment to 'restored, verified, stopped' (used after negatives that start or
+        mutate; with a defective tool the app may have been started)."""
+        if self.app_running(P):
+            sh(["docker", "stop", self.container(P)], check=True)
+        self.r3("rollback", *dep, "--u4", u4, "--helper-image", self.a.helper_image, "--approve",
+                self.fresh_token(dep, u4), "--stop")
+
+    def started_at(self, P):
+        return sh(["docker", "inspect", self.container(P), "--format", "{{.State.StartedAt}}"]).stdout.decode().strip()
 
     # --- helpers on volumes ---------------------------------------------------------------------
     def counts(self, vol):
@@ -257,13 +276,32 @@ class Drill:
         self.fact("N14 restore state recorded as BLOCKED_PARTIAL", state == "BLOCKED_PARTIAL", state)
         self.step("negative", "N14b start-rollback refused while PARTIAL",
                   ["start-rollback", *dep, "--u4", u4, "--helper-image", H, "--rollback-image", OLD, "--compose-file", BASE_COMPOSE,
-                   "--compose-file", OVERRIDE, "--env-file", ENVF], 2, P, env=self.cenv(OLD), note="BLOCKED: state BLOCKED_PARTIAL")
+                   "--compose-file", OVERRIDE, "--env-file", ENVF], 2, P, env=self.cenv(OLD), note="BLOCKED: state BLOCKED_PARTIAL",
+                  must="BLOCKED_PARTIAL")
+
+        # ---------------- APPROVAL IS ONE-TIME AND STATE-BOUND ----------------
+        t30 = self.fresh_token(dep, u4)
+        self.compose(P, CAND, "create", "--no-build", "--pull", "never", "--force-recreate", SERVICE, check=True)
+        before30 = self.counts(vol)
+        self.step("negative", "N30 approval issued before the service container was recreated",
+                  ["rollback", *dep, "--u4", u4, "--helper-image", H, "--approve", t30, "--stop"], 2, P,
+                  note="BLOCKED: deployment changed since the approval (container id)", must="changed since the approval")
+        self.fact("N30 volume untouched", self.counts(vol) == before30, "counts unchanged")
 
         # ---------------- FULL RESTORE (positive) ----------------
-        self.step("positive", "P8 full restore (--approve) after the partial attempt", ["rollback", *dep, "--u4", u4, "--helper-image", H, "--approve", token], 0, P)
+        t8 = self.fresh_token(dep, u4)
+        self.step("positive", "P8 full restore (--approve) after the partial attempt", ["rollback", *dep, "--u4", u4, "--helper-image", H, "--approve", t8], 0, P)
         restored = self.counts(vol)
         self.fact("P8 every post-U4 write is gone (counts and file set equal U4)", restored == u4_counts,
                   {"u4": u4_counts, "candidate": cand_counts, "restored": restored})
+        self.mutate(vol, "printf R >> /v/.r3-hidden-marker")     # make a replay observable
+        self.step("negative", "N29 replay of the already-used approval token",
+                  ["rollback", *dep, "--u4", u4, "--helper-image", H, "--approve", t8, "--stop"], 2, P,
+                  note="BLOCKED: approval token was already used (one-time)", must="already used")
+        self.fact("N29 replay restored nothing", self.counts(vol)["files"] == restored["files"] and
+                  sh(["docker", "run", "--rm", "--pull", "never", "--network", "none", "-v", f"{vol}:/v:ro", "--entrypoint",
+                      "cat", H, "/v/.r3-hidden-marker"]).stdout.decode().endswith("R"), "marker change still present")
+        self.rerestore(P, dep, u4)
 
         # ---------------- NEGATIVE MATRIX (part 2: tampering after a verified restore) ----------------
         tamper = [
@@ -282,15 +320,51 @@ class Drill:
                       "--compose-file", BASE_COMPOSE, "--compose-file", OVERRIDE, "--env-file", ENVF]
         for name, cmd in tamper:
             self.mutate(vol, cmd)
-            self.step("negative", name, start_args, 2, P, env=self.cenv(OLD), note="BLOCKED: volume no longer matches U4; not started")
-            self.r3("rollback", *dep, "--u4", u4, "--helper-image", H, "--approve", token)   # clean re-restore
+            self.step("negative", name, start_args, 2, P, env=self.cenv(OLD), note="BLOCKED: volume no longer matches U4; not started",
+                      must="volume no longer matches U4")
+            self.rerestore(P, dep, u4)                                                   # clean re-restore
         self.step("negative", "N20a rollback image given as a mutable tag",
                   [*start_args[:start_args.index("--rollback-image") + 1], "tip-hackathon-edition-tip-hackathon:latest",
                    *start_args[start_args.index("--rollback-image") + 2:]], 2, P, env=self.cenv(OLD),
-                  note="BLOCKED: tags refused (immutable sha256 ID required)")
+                  note="BLOCKED: tags refused (immutable sha256 ID required)", must="immutable image ID")
         self.step("negative", "N8 wrong rollback image (the candidate)",
                   [*start_args[:start_args.index("--rollback-image") + 1], CAND, *start_args[start_args.index("--rollback-image") + 2:]],
-                  2, P, env=self.cenv(OLD), note="BLOCKED: --rollback-image != U4 image")
+                  2, P, env=self.cenv(OLD), note="BLOCKED: --rollback-image != U4 image", must="!= the image recorded in U4")
+
+        # ---------------- START-TIME NEGATIVES ----------------
+        holder = sh(["docker", "create", "--pull", "never", "--network", "none", "-v", f"{vol}:/x:ro", "--entrypoint", "true", H],
+                    check=True).stdout.decode().strip()
+        self.step("negative", "N24 a STOPPED container references the volume", start_args, 2, P, env=self.cenv(OLD),
+                  note="BLOCKED: other containers reference the volume (running or stopped)", must="other containers reference volume")
+        sh(["docker", "rm", "-f", holder], check=True)
+        self.rerestore(P, dep, u4)
+        self.step("negative", "N25 volume changed after compose create, before start", start_args, 2, P,
+                  env={**self.cenv(OLD), "R3_DRILL_FAULT": "mutate_after_create"},
+                  note="BLOCKED: volume changed after the rollback container was created; NOT starting", must="volume changed after the rollback container was created")
+        self.fact("N25 docker start never ran on the created container", self.started_at(P).startswith("0001-01-01"),
+                  self.started_at(P))
+        self.rerestore(P, dep, u4)
+        rt = self.work / "runtime"
+        rt.mkdir(exist_ok=True)
+        runtime_cases = [
+            ("N26a runtime differs: command", "config.Cmd", "command: [\"uvicorn\", \"app.main:app\", \"--host\", \"0.0.0.0\", \"--port\", \"8000\", \"--log-level\", \"warning\"]"),
+            ("N26b runtime differs: healthcheck", "config.Healthcheck", "healthcheck:\n      test: [\"CMD\", \"true\"]\n      interval: 30s"),
+            ("N26c runtime differs: working_dir", "config.WorkingDir", "working_dir: /srv"),
+        ]
+        for i, (name, field, body) in enumerate(runtime_cases):
+            f = rt / f"runtime{i}.yml"
+            f.write_text(f"services:\n  tip-hackathon:\n    {body}\n")
+            args = [*start_args[:start_args.index("--env-file")], "--compose-file", f, *start_args[start_args.index("--env-file"):]]
+            self.step("negative", name, args, 2, P, env=self.cenv(OLD), note="BLOCKED: runtime differs from the recorded deployment",
+                      must=field)
+            self.fact(f"{name.split()[0]} docker start never ran", self.started_at(P).startswith("0001-01-01"), self.started_at(P))
+            self.rerestore(P, dep, u4)
+        self.step("negative", "N27 acceptance fails after start", start_args, 2, P,
+                  env={**self.cenv(OLD), "R3_DRILL_FAULT": "fail_acceptance"},
+                  note="BLOCKED: acceptance failed; the container was stopped and confirmed stopped", must="acceptance forced to fail")
+        self.fact("N27 the container had started and is stopped again", not self.app_running(P) and
+                  not self.started_at(P).startswith("0001-01-01"), self.started_at(P))
+        self.rerestore(P, dep, u4)
 
         # ---------------- START PINNED ROLLBACK (positive) ----------------
         self.step("positive", "P9 start-rollback: pinned 147e315 via Compose (no build/pull), config checked before start, acceptance",
@@ -298,6 +372,9 @@ class Drill:
         self.step("positive", "P10 independent acceptance (version 147e315, schema 1-9, scheduler disabled, 0 requests)",
                   ["accept", *dep, "--expect-image", OLD, "--quiet-seconds", "5"], 0, None)
         self.fact("P10 rollback container runs the pinned image", sh(["docker", "inspect", self.container(P), "--format", "{{.Image}}"]).stdout.decode().strip() == OLD, OLD)
+        self.step("negative", "N28 standalone acceptance failure stops the running application",
+                  ["accept", *dep, "--expect-image", OLD, "--expect-schema", "10", "--quiet-seconds", "1"], 2, P,
+                  note="BLOCKED: schema 1-9 != 1-10; the container was stopped and confirmed stopped", must="acceptance failed")
 
         # ---------------- DISCOVERY / QUIESCENCE NEGATIVES ----------------
         self.step("negative", "N-vol misspelled --expect-volume (nothing created)", ["preflight", *dep, "--expect-volume", "r3drill_tip-dta"], 2, None,
@@ -315,10 +392,18 @@ class Drill:
                              SERVICE, extra=files, check=True)                             # (never started)
             if kw.get("scale"):
                 self.compose(proj, OLD, "up", "--no-start", "--no-build", "--pull", "never", "--scale", f"{SERVICE}=2", extra=files, check=True)
-            args = ["snapshot", "--project", proj, "--service", SERVICE, "--backup-root", self.work / "neg", "--helper-image", H, "--stop"] \
-                if kw.get("snapshot") else ["preflight", "--project", proj, "--service", SERVICE]
             (self.work / "neg").mkdir(exist_ok=True)
-            self.step("negative", name, args, 2, proj, note=kw["note"])
+            root = kw.get("root", lambda p: self.work / "neg")(proj)
+            args = ["snapshot", "--project", proj, "--service", SERVICE, "--backup-root", root, "--helper-image", H, "--stop"] \
+                if kw.get("snapshot") else ["preflight", "--project", proj, "--service", SERVICE]
+            ctx = kw["pre"](proj) if kw.get("pre") else None
+            u4s_before = self.u4_dirs(proj)
+            self.step("negative", name, args, 2, proj, env=kw.get("env"), note=kw["note"], must=kw.get("must"))
+            if kw.get("after"):
+                kw["after"](proj, ctx, u4s_before)
+            elif kw.get("snapshot"):
+                self.fact(f"{name.split()[0]} no verifiable U4 was created", self.verifiable_new_u4(proj, u4s_before) == [],
+                          "no new U4 with a manifest")
             self.down(proj, extra=files)
 
         # unexpected pull: U4 records an image that is no longer present locally
@@ -357,7 +442,91 @@ class Drill:
              {"seed": ("--fifo",), "snapshot": True, "note": "BLOCKED: unsupported entry (never silently dropped)"}),
             ("N22 unsupported filesystem entry (hard link)", "r3drill-hlink", [],
              {"seed": ("--hardlink",), "snapshot": True, "note": "BLOCKED: hard link refused"}),
+            ("N23 a STOPPED container references the volume at snapshot time", "r3drill-holder", [],
+             {"snapshot": True, "pre": self.make_holder, "after": self.drop_holder,
+              "must": "other containers reference volume", "note": "BLOCKED: other containers reference the volume (running or stopped)"}),
+            ("N31 Demo DB is a valid SQLite file but not a TIP database", "r3drill-baddemo", [],
+             {"seed": ("--bad-demo",), "snapshot": True, "must": "Demo database has no valid 147e315 migration set", "note": "BLOCKED: Demo database has no valid 147e315 migration set"}),
+            ("N32 unexpected SQLite database in the volume", "r3drill-xdb", [],
+             {"seed": ("--unexpected-db",), "snapshot": True, "must": "unexpected SQLite database", "note": "BLOCKED: unexpected SQLite database"}),
+            ("N33 source changed after the archive was verified", "r3drill-mutarc", [],
+             {"snapshot": True, "env": {"R3_DRILL_FAULT": "mutate_after_archive"}, "after": self.check_failed_u4,
+              "must": "source volume changed after it was archived", "note": "BLOCKED: source volume changed after it was archived"}),
+            ("N34a relative backup root", "r3drill-relroot", [],
+             {"snapshot": True, "root": self.rel_root, "must": "is not an absolute path", "note": "BLOCKED: backup root is not absolute"}),
+            ("N34b missing backup root (never created)", "r3drill-noroot", [],
+             {"snapshot": True, "root": lambda p: self.work / "no-such-root",
+              "after": lambda p, c, b: self.fact("N34b backup root still absent", not (self.work / "no-such-root").exists(), "absent"),
+              "must": "does not exist (it is never created)", "note": "BLOCKED: backup root does not exist"}),
+            ("N34c backup root is a junction/symlink alias", "r3drill-alias", [],
+             {"snapshot": True, "root": self.alias_root, "must": "is an alias resolving to", "note": "BLOCKED: backup root is an alias"}),
+            ("N34d backup root inside the source volume (Docker Desktop UNC path)", "r3drill-inside", [],
+             {"snapshot": True, "root": self.inside_root, "after": self.check_inside,
+              "must": "UNC/network/device path", "note": "BLOCKED: backup root points into Docker storage / the source volume"}),
+            ("N35 another recovery operation holds the lock", "r3drill-lock", [],
+             {"snapshot": True, "pre": self.hold_lock, "after": self.release_lock, "must": "another recovery operation holds", "note": "BLOCKED: lock held"}),
         ]
+
+    # --- variant helpers -----------------------------------------------------------------------------
+    def u4_dirs(self, proj):
+        out = set()
+        for root in (self.work / "neg", self.work / "rel-bk"):
+            if root.is_dir():
+                out |= {p for p in root.iterdir() if p.name.startswith(f"U4-{proj}-")}
+        return out
+
+    def verifiable_new_u4(self, proj, before):
+        return [p for p in self.u4_dirs(proj) - before if (p / "manifest.json").exists()]
+
+    def make_holder(self, proj):
+        return sh(["docker", "create", "--pull", "never", "--network", "none", "-v", f"{self.volume(proj)}:/x:ro",
+                   "--entrypoint", "true", self.a.helper_image], check=True).stdout.decode().strip()
+
+    def drop_holder(self, proj, cid, before):
+        sh(["docker", "rm", "-f", cid], check=True)
+        self.fact("N23 no verifiable U4 was created", self.verifiable_new_u4(proj, before) == [], "no new U4 with a manifest")
+
+    def check_failed_u4(self, proj, ctx, before):
+        new = sorted(self.u4_dirs(proj) - before)
+        rc = self.r3("verify", "--u4", new[-1])[0] if new else None
+        self.fact("N33 the aborted U4 has no manifest, is marked SNAPSHOT_FAILED and does not verify",
+                  bool(new) and not (new[-1] / "manifest.json").exists() and (new[-1] / "SNAPSHOT_FAILED").exists() and rc == 2,
+                  {"u4": new[-1].name if new else None, "verify_exit": rc})
+
+    def rel_root(self, proj):
+        (self.work / "rel-bk").mkdir(exist_ok=True)
+        return "rel-bk"                                   # relative to the tool's working directory (<WORKDIR>)
+
+    def alias_root(self, proj):
+        alias = self.work / "bk-junction"
+        if not alias.exists():
+            r = sh(["cmd", "/c", "mklink", "/J", str(alias), str(self.work / "neg")]) if os.name == "nt" else None
+            if os.name != "nt" or r.returncode != 0:
+                os.symlink(self.work / "neg", alias, target_is_directory=True)
+        return alias
+
+    def inside_root(self, proj):
+        p = f"\\\\wsl.localhost\\docker-desktop\\mnt\\docker-desktop-disk\\data\\docker\\volumes\\{self.volume(proj)}\\_data"
+        self._inside = p
+        return p
+
+    def check_inside(self, proj, ctx, before):
+        files = sh(["docker", "run", "--rm", "--pull", "never", "--network", "none", "-v", f"{self.volume(proj)}:/v:ro",
+                    "--entrypoint", "ls", self.a.helper_image, "-A", "/v"]).stdout.decode().split()
+        self.fact("N34d nothing was written into the source volume", bool(files) and not any(f.startswith(("U4-", ".r3-write-test", ".r3recover-"))
+                                                                            for f in files),
+                  {"unc_path_exists": Path(self._inside).is_dir(), "volume_entries": sorted(files)[:20]})
+
+    def hold_lock(self, proj):
+        lock = self.work / "neg" / f".r3recover-{proj}.lock"
+        lock.write_text('{"held-by": "drill"}')
+        return lock
+
+    def release_lock(self, proj, lock, before):
+        held = lock.exists()
+        lock.unlink()
+        self.fact("N35 the foreign lock was not removed and no verifiable U4 was created",
+                  held and self.verifiable_new_u4(proj, before) == [], "lock intact")
 
     def pull_negative(self):
         a, H = self.a, self.a.helper_image
@@ -379,8 +548,8 @@ class Drill:
             self.fact("N20b setup snapshot", False, err[-300:]); return
         u4 = Path(json.loads(out)["u4_dir"])
         self.r3("test-restore", "--u4", u4, "--helper-image", H)
-        token = f"RESTORE:{u4.name}:{self.volume(P)}"
-        self.r3("rollback", "--project", P, "--service", SERVICE, "--u4", u4, "--helper-image", H, "--approve", token)
+        pdep = ["--project", P, "--service", SERVICE]
+        self.r3("rollback", *pdep, "--u4", u4, "--helper-image", H, "--approve", self.fresh_token(pdep, u4))
         self.compose(P, a.candidate_image, "create", "--no-build", "--pull", "never", "--force-recreate", SERVICE, check=True)
         sh(["docker", "rmi", tag], check=True)
         gone = sh(["docker", "image", "inspect", tid]).returncode != 0
@@ -436,6 +605,7 @@ def main():
     p = argparse.ArgumentParser()
     for k in ("--old-image", "--candidate-image", "--helper-image", "--candidate-commit", "--workdir"):
         p.add_argument(k, required=True)
+    p.add_argument("--tool-dir", help="tools/recovery directory of the tool under test (default: this checkout)")
     a = p.parse_args()
     ev = Drill(a).run()
     out = Path(a.workdir) / "evidence.json"

@@ -151,7 +151,9 @@ UNORDERED = {"CapAdd", "CapDrop", "SecurityOpt", "GroupAdd", "Dns", "DnsOptions"
 
 
 def _norm(v, unordered=False):
-    if v in (None, [], {}, ""):
+    # Docker reports an unset setting as null, false, 0, "" or an empty collection depending on how the
+    # container was created; all of these mean "default". A real value (true, a non-zero limit) is kept.
+    if v is None or v is False or v == 0 or v in ([], {}, ""):
         return None
     if unordered and isinstance(v, list):
         return sorted(v, key=lambda x: json.dumps(x, sort_keys=True))

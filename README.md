@@ -529,18 +529,21 @@ interface) unless you explicitly set `ALLOW_PUBLIC_BIND=1` first.
 
 > **Upgrading an existing deployment to Release 3 (migration 10)?** Follow only
 > [docs/RELEASE3_RECOVERY_RUNBOOK.md](docs/RELEASE3_RECOVERY_RUNBOOK.md): it requires a verified full-volume
-> U4 snapshot before the upgrade and is the only supported rollback. Do not use the generic update steps or the
-> AI-agent update prompt below for that upgrade.
+> U4 snapshot and release-owner approvals A1-A4 before the upgrade, and is the only supported rollback.
+> Builds older than Release 3 still offer a generic "AI-agent update prompt" with direct rebuild steps: never
+> follow it for an existing deployment.
 
 ## Checking for updates
 
 Settings → **Application Updates** shows the installed build and can
 check the public GitHub repo for newer commits. This is a **check-and-
 inform feature only** -- it never runs `git`, Docker, or anything
-destructive by itself; updating is always a manual or AI-agent-assisted
-step you run yourself (see the "Copy AI-agent update prompt" button,
-which gives you a ready-to-paste prompt that explicitly preserves
-`.env`, the `tip-data` volume, and your saved credentials).
+destructive by itself. Upgrading an existing installation is a manual,
+operator-run procedure that follows only
+[docs/RELEASE3_RECOVERY_RUNBOOK.md](docs/RELEASE3_RECOVERY_RUNBOOK.md). The
+"Copy upgrade guidance" button copies text that points to that runbook,
+requires a verified U4 snapshot and approvals A1-A4, contains no git or
+Docker command, and states that copying it authorizes nothing.
 
 **How the installed version is known.** There is no `.git` directory
 inside the running container (the Dockerfile only `COPY`s source), so
