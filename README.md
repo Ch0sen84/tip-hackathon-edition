@@ -559,7 +559,12 @@ operator-run procedure that follows only
 requires a verified U4 snapshot and approvals A1-A4, contains no git or
 Docker command, and states that copying it authorizes nothing.
 
-**How the installed version is known.** There is no `.git` directory
+### How the installed version is known
+
+This section is about version stamping on a **fresh install** only. Upgrading an existing deployment follows
+only [docs/RELEASE3_RECOVERY_RUNBOOK.md](docs/RELEASE3_RECOVERY_RUNBOOK.md).
+
+There is no `.git` directory
 inside the running container (the Dockerfile only `COPY`s source), so
 the commit can't be discovered at runtime. It is baked in at **image
 build time** instead, via Docker build ARGs written to a plain

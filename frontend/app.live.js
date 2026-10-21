@@ -88,6 +88,8 @@ function _authHeaders(extra) {
 // renderAuthSetupBanner) and wires its button/fallback-paste controls.
 // Safe to call repeatedly (e.g. once on load, again on every 401) --
 // always re-renders from scratch, never stacks duplicate banners.
+let _authBannerVariant = null;
+
 function showAuthSetupBanner(variant) {
   // Local Mode: page load must show ZERO authentication UI of any
   // kind -- this is a defensive backstop (bootstrap() above already
@@ -102,6 +104,7 @@ function showAuthSetupBanner(variant) {
   if (TIP_AUTH_MODE === "local") return;
   const el = document.getElementById("authSetupBanner");
   if (!el) return;
+  _authBannerVariant = variant;
   el.style.display = "";
   el.innerHTML = renderAuthSetupBanner(variant);
   const bootstrapBtn = document.getElementById("authBootstrapBtn");
@@ -196,6 +199,14 @@ function showAuthSetupBanner(variant) {
 // another's retry, and never throws back into the caller (a banner
 // click handler).
 async function onAuthRestored() {
+  // R3F-1: in Network Mode the first settings read was refused (401) -- re-read it before anything else so the
+  // mode, the Settings view and the watchlist editor are real, then restore whatever view the URL asks for.
+  try { await loadSettings(); } catch (e) { /* the views below report their own errors */ }
+  try {
+    if (typeof applyNavState === "function" && typeof parseNavHash === "function") {
+      applyNavState(parseNavHash(location.hash), window.TIP_NAV_HANDLERS, { push: false });
+    }
+  } catch (e) { /* navigation restore is best-effort */ }
   const tasks = [];
   if (document.getElementById("marketWideCandidateList")) {
     tasks.push(loadMarketWideRadar());
@@ -285,8 +296,11 @@ async function apiGetAuthed(path) {
 // an immediate, obvious way to re-authenticate, and the thrown error says
 // so explicitly rather than just "HTTP 401".
 function _throwAuthError(path) {
+  const hadToken = !!getAuthToken();
   clearAuthToken();
-  showAuthSetupBanner("error");
+  // R3F-11: "your token is no longer valid" only for someone who had one; a first run keeps the
+  // bootstrap / pairing instructions it is already showing
+  showAuthSetupBanner(hadToken ? "error" : (_authBannerVariant || "bootstrap_failed"));
   throw new Error(
     `Authentication required for ${path}: your access token is missing or no longer valid. ` +
       `Use the "Set up access" banner above to re-authenticate.`
@@ -787,7 +801,7 @@ function wireRefreshLastBarButton(ticker, range, mySeq) {
 async function loadTickerDetail(ticker, { refresh = false } = {}) {
   const mySeq = ++_navSeq;
   const el = document.getElementById("tickerDetail");
-  el.innerHTML = `<div class="empty">${refresh ? "Refreshing" : "Loading"} ${esc(ticker)}...</div>`;
+  el.innerHTML = `<div class="empty">${refresh ? "Requesting a refresh of" : "Loading"} ${esc(ticker)}...</div>`;
   let loaded = false;
   try {
     const d = refresh
@@ -873,7 +887,7 @@ function modeLabelFor(simulated, transport, confirmed = true) {
 // the same ticker with 409).
 let _investigateInFlight = false;
 
-async function runInvestigate(ticker, navSeq, modeLabel) {
+async function runInvestigate(ticker, navSeq, modeLabel, simulated) {
   if (_investigateInFlight) {
     const body = document.getElementById("investigateBody");
     if (body) body.innerHTML = `<div class="empty">A previous investigation is still running -- try again when it finishes.</div>`;
@@ -883,14 +897,14 @@ async function runInvestigate(ticker, navSeq, modeLabel) {
   const runBtn = document.getElementById("runInvestigateBtn");
   if (runBtn) runBtn.disabled = true;
   try {
-    await _runInvestigate(ticker, navSeq, modeLabel);
+    await _runInvestigate(ticker, navSeq, modeLabel, simulated);
   } finally {
     _investigateInFlight = false;
     if (runBtn && runBtn.isConnected !== false) runBtn.disabled = false;
   }
 }
 
-async function _runInvestigate(ticker, navSeq, modeLabel) {
+async function _runInvestigate(ticker, navSeq, modeLabel, simulated) {
   const mySeq = navSeq != null ? navSeq : _navSeq;
   const body = document.getElementById("investigateBody");
   // Per explicit instruction: prefer accurate progress states over a fake
@@ -904,8 +918,10 @@ async function _runInvestigate(ticker, navSeq, modeLabel) {
     // standalone fetch) so this paid, state-changing call gets the same
     // X-TIP-Auth header + 401 handling as every other mutating call --
     // see apiPost's docstring above.
-    // S2-2: the two-click arm above IS the explicit confirmation of the stated cost
-    const d = await apiPost(`/api/investigate/${encodeURIComponent(ticker)}`, { confirm: true });
+    // S2-2 / R3F-2: the two-click arm is the confirmation only when the panel showed the LIVE (billed) copy;
+    // a panel that promised a simulated run asks the server, which states the cost if it is live after all.
+    const path = `/api/investigate/${encodeURIComponent(ticker)}`;
+    const d = simulated === false ? await apiPost(path, { confirm: true }) : await apiPostConfirmed(path, {});
     if (mySeq !== _navSeq) return; // user moved on before this resolved -- never render a stale ticker's result
     body.innerHTML = renderInvestigateResult(d, ticker, d.transport ? modeLabelFor(d.simulated, d.transport) : modeLabel);
   } catch (err) {
@@ -923,7 +939,7 @@ async function _runInvestigate(ticker, navSeq, modeLabel) {
 // re-renders this card (a fresh ticker load, a mode switch) naturally
 // resets this by re-running loadInvestigateSection from scratch -- there is
 // no persisted "already confirmed" flag anywhere.
-function wireInvestigateConfirm(ticker, navSeq, modeLabel) {
+function wireInvestigateConfirm(ticker, navSeq, modeLabel, simulated) {
   const btn = document.getElementById("runInvestigateBtn");
   if (!btn) return;
   const originalLabel = btn.textContent;
@@ -934,7 +950,7 @@ function wireInvestigateConfirm(ticker, navSeq, modeLabel) {
     btn.classList.remove("btn-confirm-armed");
   };
   btn.addEventListener("click", () => {
-    if (_investigateInFlight) return;
+    if (_investigateInFlight) { runInvestigate(ticker, navSeq, modeLabel, simulated); return; }   // shows why (R3F-3)
     if (!armed) {
       armed = true;
       btn.textContent = `Confirm: this makes a real call (click again to run)`;
@@ -942,7 +958,7 @@ function wireInvestigateConfirm(ticker, navSeq, modeLabel) {
       return;
     }
     disarm();
-    runInvestigate(ticker, navSeq, modeLabel);
+    runInvestigate(ticker, navSeq, modeLabel, simulated);
   });
 }
 
@@ -977,7 +993,7 @@ async function loadInvestigateSection(ticker, navSeq) {
       : `<p class="ai-disabled-note">Configured transport: <strong>${esc(transportLabel(avail.transport))}</strong></p>`;
     const simNote = avail.simulated
       ? `<p class="ai-disabled-note">Demo mode: running this will show a pre-written simulated transcript, not a real AI/UW call.</p>`
-      : `<p class="ai-disabled-note">Live mode: this will make a few bounded, read-only Unusual Whales lookups plus two AI calls using your saved keys, entirely from your local backend. A real end-to-end AI-directed investigation over genuine MCP tool calls has been independently verified (a real NVDA run, mcp transport) -- see README for the verification writeup.</p>`;
+      : `<p class="ai-disabled-note">Live mode: this will make a few bounded, read-only Unusual Whales lookups plus two AI calls using your saved keys, entirely from your local backend. An end-to-end AI-directed investigation over genuine MCP tool calls was run once in earlier development (an NVDA run, mcp transport); no verification writeup is included in this repository.</p>`;
     el.innerHTML = `
       <div class="ai-card">
         <h3>Investigate with AI</h3>
@@ -987,7 +1003,7 @@ async function loadInvestigateSection(ticker, navSeq) {
         <button class="btn" id="runInvestigateBtn">Investigate ${esc(ticker)} with AI</button>
         <div id="investigateBody" style="margin-top:10px"></div>
       </div>`;
-    wireInvestigateConfirm(ticker, navSeq, modeLabel);
+    wireInvestigateConfirm(ticker, navSeq, modeLabel, avail.simulated);
   } catch (err) {
     el.innerHTML = `<div class="ai-card"><h3>Investigate with AI</h3><p class="ai-disabled-note">Unavailable: ${esc(err.message)}</p></div>`;
   }
@@ -1191,6 +1207,8 @@ async function loadSettings() {
 // view, and polling stops by itself as soon as either is no longer true.
 let _baselinePollTimer = null;
 
+let _baselineLastMessage = null;
+
 async function loadBaselinePanel() {
   const card = document.getElementById("baselineCard");
   if (!card) return null;
@@ -1204,6 +1222,10 @@ async function loadBaselinePanel() {
   card.innerHTML = renderBaselinePanel(ov);
   wireBaselinePanel(ov);
   scheduleBaselinePoll(ov);
+  const statusLine = document.getElementById("baselineStatus");
+  if (statusLine && _baselineLastMessage && Date.now() - _baselineLastMessage.at < 60000) {
+    statusLine.textContent = _baselineLastMessage.text;      // R3F-5: kept across the 3 s job polling
+  }
   return ov;
 }
 
@@ -1224,6 +1246,7 @@ function wireBaselinePanel(ov) {
   const act = async (fn) => {
     let message = "";
     try { await fn(); } catch (err) { message = err.message; }
+    _baselineLastMessage = message ? { text: message, at: Date.now() } : null;
     await loadBaselinePanel();                       // replaces the card (and its status line) ...
     const fresh = document.getElementById("baselineStatus");
     if (fresh && message) fresh.textContent = message; // ... so the outcome is written afterwards (F2-2)
@@ -1654,7 +1677,9 @@ async function runOneTimeDepthAction(depth) {
       isError = true;
       finalMessage = `${label} ran but did not complete: ${result.pause_reason}.`;
     } else if (depth === "discovery_only") {
-      finalMessage = `Discover Once complete -- candidates discovered and cataloged. Recurring mode unchanged (still ${modeLabel}).`;
+      finalMessage = _currentMode === "live"
+        ? `Discover Once complete -- candidates discovered and cataloged. Recurring mode unchanged (still ${modeLabel}).`
+        : `Discover Once complete -- synthetic demo discovery ran; nothing is cataloged in Demo Mode. Recurring mode unchanged (still ${modeLabel}).`;
     } else {
       const n = result.candidates_evaluated ?? 0;
       finalMessage = `Discover & Evaluate Once complete -- ${n} candidate(s) evaluated. Recurring mode unchanged (still ${modeLabel}).`;
@@ -1714,8 +1739,8 @@ async function refreshWatchlistData() {
   const btn = document.getElementById("refreshWatchlistDataBtn");
   const statusEl = document.getElementById("refreshWatchlistDataStatus");
   _watchlistRefreshInFlight = true;
-  if (btn) { btn.disabled = true; btn.textContent = "Refreshing..."; }
-  if (statusEl) statusEl.textContent = "Fetching fresh data from Unusual Whales...";
+  if (btn) { btn.disabled = true; btn.textContent = "Requesting..."; }
+  if (statusEl) statusEl.textContent = "Requesting a refresh (Live Mode asks you to confirm the request budget first)...";
   try {
     await apiPostConfirmed("/api/radar/refresh", {});
     // The POST has already performed and persisted exactly one evaluation
@@ -1822,8 +1847,9 @@ window.TIP_NAV_HANDLERS = {
   // FE-F6: Market Intelligence (freshness badges, scheduler mode, last/next run) and the Settings baseline
   // panel (job status) are local reads -- re-read them when the view is opened again instead of showing
   // the state from when the page first loaded. No provider request is made by either read.
-  onViewActivated: (view) => {
-    if (view === "radar" && _lastRadarData) loadRadar();          // F2-5: cache-only GET, no provider request
+  onViewActivated: (view, previous) => {
+    // F2-5 / R3F-4: Live Market Radar reads are cache-only; re-read only when returning from another view
+    if (view === "radar" && previous && previous !== "radar" && _lastRadarData && _currentMode === "live") loadRadar();
     if (view === "marketwide" && _marketWideLoaded) loadMarketWideRadar();
     if (view === "settings" && document.getElementById("baselineCard")) loadBaselinePanel();
   },

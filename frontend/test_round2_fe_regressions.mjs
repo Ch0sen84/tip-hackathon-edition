@@ -216,12 +216,26 @@ async function main() {
 
   console.log("\n=== F2-5: view re-reads (FE-F6) ===");
   await check("returning to Market Radar re-reads its freshness/last-scanned state", async () => {
+    // F2-5 as refined by R3F-4: Live only (a Live radar read is cache-only; a Demo read is a synthetic scan
+    // that writes history), and only when returning from another view.
     reset();
-    x.handlers().onViewActivated("radar");
+    await x.loadRadar();
+    x.setMode("live");
+    const before = requests.filter((r) => r.method === "GET" && r.path === "/api/radar").length;
+    x.handlers().onViewActivated("radar", "settings");
     await sleep(50);
-    const n = requests.filter((r) => r.method === "GET" && r.path === "/api/radar").length;
-    console.log(`   GET /api/radar on Radar activation: ${n}`);
+    const n = requests.filter((r) => r.method === "GET" && r.path === "/api/radar").length - before;
+    x.handlers().onViewActivated("radar", "radar");                  // already on Radar: no extra read
+    await sleep(50);
+    const again = requests.filter((r) => r.method === "GET" && r.path === "/api/radar").length - before;
+    x.setMode("demo");
+    x.handlers().onViewActivated("radar", "settings");               // Demo: never a writing re-scan
+    await sleep(50);
+    const demo = requests.filter((r) => r.method === "GET" && r.path === "/api/radar").length - before;
+    console.log(`   GET /api/radar on Live return: ${n} | staying: ${again - n} | Demo return: ${demo - again}`);
     assert.ok(n >= 1, "Market Radar keeps its first-load 'last scanned ...' / freshness text for the whole session");
+    assert.equal(again - n, 0);
+    assert.equal(demo - again, 0);
   });
 
   console.log("\n=== F2-6: chart 'Load chart data' (ohlc/refresh) bypasses the FE-F11 range guard ===");

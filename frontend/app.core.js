@@ -927,13 +927,14 @@ function renderMarketWideRadar(data) {
 }
 
 function switchView(view) {
+  const previous = TIP_STATE.currentView;
   document.querySelectorAll(".nav-item").forEach((b) => b.classList.toggle("active", b.dataset.view === view));
   document.querySelectorAll(".view").forEach((v) => v.classList.toggle("active", v.id === `view-${view}`));
   TIP_STATE.currentView = view;
   // FE-F6: a view that shows time-sensitive state re-reads it when it becomes active again
   const handlers = typeof window !== "undefined" ? window.TIP_NAV_HANDLERS : null;
   if (handlers && typeof handlers.onViewActivated === "function") {
-    try { handlers.onViewActivated(view); } catch (e) { /* a refresh hook must never break navigation */ }
+    try { handlers.onViewActivated(view, previous); } catch (e) { /* a refresh hook must never break navigation */ }
   }
 }
 
@@ -1593,8 +1594,14 @@ function setupRadarFiltersAndRender(data, loadTickerDetailFn) {
   const { famOpts, stateOpts } = renderRadarFilterOptions(allEntries);
   const famSel = document.getElementById("filterFamily");
   const stateSel = document.getElementById("filterState");
-  if (famSel) famSel.innerHTML = famOpts;
-  if (stateSel) stateSel.innerHTML = stateOpts;
+  const keep = (sel, opts) => {                 // R3F-4: a re-render keeps the user's current filter
+    if (!sel) return;
+    const prev = sel.value;
+    sel.innerHTML = opts;
+    if (prev && Array.from(sel.options || []).some((o) => o.value === prev)) sel.value = prev;
+  };
+  keep(famSel, famOpts);
+  keep(stateSel, stateOpts);
   const rerender = () => renderRadarLists(data, {
     family: famSel ? famSel.value : "",
     state: stateSel ? stateSel.value : "",
@@ -4400,9 +4407,9 @@ function renderInvestigateResult(d, ticker, modeLabel) {
          ${esc(d.simulated_label || "Simulated agent walkthrough -- not live UW data, not a real AI call")}
        </div>`
     : `<div class="ai-live-banner">LIVE: this investigation made real calls using your configured AI provider and UW key.
-         Bounded, read-only tool selection and synthesis. A real end-to-end AI-directed investigation over genuine
-         MCP tool calls has been independently verified (a real NVDA run, mcp transport) -- see README for the
-         verification writeup.
+         Bounded, read-only tool selection and synthesis. An end-to-end AI-directed investigation over genuine MCP tool calls was run
+         once in earlier development (an NVDA run, mcp transport); no verification writeup is included in this
+         repository.
          <br><strong>Transport: ${esc(transportLabel(d.transport))}</strong></div>`;
   const headerHtml = ticker ? renderInvestigateHeader(ticker, modeLabel || "") : "";
   return `
@@ -4531,17 +4538,17 @@ function renderSettingsView(d) {
         <h3>AI / MCP (optional) <span class="muted">(real in the local edition)</span></h3>
         <p class="muted">Not available in the public demo build. The local edition supports a
           bounded, read-only "Investigate with AI" feature: tool-selection and synthesis via your
-          configured AI provider when live. A real end-to-end AI-directed investigation over genuine
-          MCP tool calls has been independently verified (a real NVDA run) -- see the GitHub README's
-          verification writeup.</p>
+          configured AI provider when live. An end-to-end AI-directed investigation over genuine
+          MCP tool calls was run once in earlier development (an NVDA run); no verification writeup is
+          included in this repository.</p>
       </div>`
     : `<div class="settings-card">
         <h3>AI / MCP (optional)</h3>
         <p class="muted">Status: ${aiStatusLine}</p>
         <p class="muted">Bounded, read-only investigation: tool-selection and synthesis via your configured AI
-          provider when live. A real end-to-end AI-directed investigation over genuine MCP tool calls has been
-          independently verified (a real NVDA run, mcp transport) -- see README for the verification writeup.
-          This confirms the <code>mcp</code> transport specifically; the <code>rest</code> fallback transport
+          provider when live. An end-to-end AI-directed investigation over genuine MCP tool calls was run once
+          in earlier development (an NVDA run, mcp transport); no verification writeup is included in this
+          repository. That run exercised the <code>mcp</code> transport specifically; the <code>rest</code> fallback transport
           (see "Effective transport" below) uses plain REST calls and has not had a separate end-to-end
           verification pass.</p>
         <!-- Priority 5 fix: "an AI key is configured" and "which transport actually

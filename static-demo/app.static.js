@@ -114,8 +114,8 @@ async function loadInvestigateSection(ticker, navSeq) {
         captured from a real run of the local app's bounded AI-investigation feature -- no live AI
         or MCP call happens on this page. The downloadable local edition can run a bounded, read-only
         investigation against UW's real MCP server plus your own AI provider key when live; that workflow was
-        independently verified with a real provider (a real NVDA run) -- see the GitHub README's
-        verification writeup.</p>
+        run once end to end in earlier development (an NVDA run); no verification writeup is included in
+        the repository.</p>
       <button class="btn" id="runInvestigateBtn">Investigate ${esc(ticker)} with AI (simulated)</button>
       <div id="investigateBody" style="margin-top:10px"></div>
     </div>`;
