@@ -9,11 +9,15 @@
 .gitignore
 .idea
 .vscode
+**/.idea
+**/.vscode
 **/.DS_Store
 
 # secrets and local configuration (the app reads its settings from the /srv/data volume)
 .env
 .env.*
+**/.env
+**/.env.*
 !.env.example
 **/.capture_settings_tmp*.json
 

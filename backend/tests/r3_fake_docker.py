@@ -136,6 +136,12 @@ class FakeDocker:
                 return self._ok(rc=1, err=b"No such image")
             fmt = a[a.index("--format") + 1] if "--format" in a else ""
             return self._ok(json.dumps(self.image_tags.get(a[2], [])) if "RepoTags" in fmt else a[2])
+        if a[0] == "tag":
+            for img, tags in self.image_tags.items():
+                if a[2] in tags:
+                    tags.remove(a[2])
+            self.image_tags.setdefault(a[1], []).append(a[2])
+            return self._ok()
         if a[0] == "run":
             return self._run(a)
         if a[0] == "stop":

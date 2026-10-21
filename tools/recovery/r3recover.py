@@ -150,7 +150,9 @@ HOST_KEYS = ("PortBindings", "PublishAllPorts", "RestartPolicy", "Privileged", "
              "Devices", "DeviceCgroupRules", "DeviceRequests", "Sysctls", "Tmpfs", "ExtraHosts", "Dns", "DnsOptions",
              "DnsSearch", "GroupAdd", "Init", "Runtime", "ShmSize", "Memory", "MemorySwap", "NanoCpus", "CpuShares",
              "PidsLimit", "Ulimits", "OomKillDisable", "LogConfig", "Binds", "Mounts", "VolumesFrom", "Links",
-             "AutoRemove", "Isolation", "MaskedPaths", "ReadonlyPaths")
+             "AutoRemove", "Isolation", "MaskedPaths", "ReadonlyPaths", "CpuQuota", "CpuPeriod",
+             "CpuRealtimePeriod", "CpuRealtimeRuntime", "CpusetCpus", "CpusetMems", "CpuCount", "CpuPercent",
+             "BlkioWeight", "MemoryReservation", "OomScoreAdj", "CgroupParent", "StorageOpt", "Annotations")
 UNORDERED = {"CapAdd", "CapDrop", "SecurityOpt", "GroupAdd", "Dns", "DnsOptions", "DnsSearch", "ExtraHosts",
              "DeviceCgroupRules", "Binds", "VolumesFrom", "Links"}
 
@@ -1075,8 +1077,16 @@ def _start_rollback(a, u4p):
         raise Blocked("rollback container or its topology changed before start; NOT starting")
     run(["docker", "start", final["container"]["id"]])
     log("pinned rollback container started; running acceptance")
-    return _accept_or_stop(a.project, a.service, final["container"]["id"], expected_image, m["expected_commit"],
-                           SCHEMA9_VERSIONS, a.quiet_seconds, fault=_drill_fault(final))
+    rc = _accept_or_stop(a.project, a.service, final["container"]["id"], expected_image, m["expected_commit"],
+                         SCHEMA9_VERSIONS, a.quiet_seconds, fault=_drill_fault(final))
+    if rc == EXIT_OK:
+        # R3D-2: the Compose image tag still named the candidate; a later plain `docker compose up -d` would
+        # recreate the service from it on the restored schema-9 volume. Point the tag back at the rollback image
+        # (a tag move deletes nothing; the candidate keeps its ID). The runbook's R4 also returns the checkout.
+        tag = f"{a.project}-{a.service}:latest"
+        run(["docker", "tag", expected_image, tag])
+        log(f"{tag} now points at the rollback image {expected_image[:19]}; return <COMPOSE_DIR> to 147e315 (R4)")
+    return rc
 
 
 ACCEPT_SNIPPET = r"""
@@ -1115,6 +1125,11 @@ print(json.dumps(out))
 
 def acceptance_errors(out, expected_commit, expect_schema):
     errs = []
+    if not re.fullmatch(r"[0-9a-f]{40}", str(expected_commit or "")):
+        errs.append(f"expected commit {expected_commit!r} is not a full 40-hex commit (a '-dirty' or abbreviated "
+                    "build stamp is never a release)")
+    if str(out.get("version") or "").endswith("-dirty"):
+        errs.append(f"version {out.get('version')} is a dirty development build")
     if not out.get("health"):
         errs.append("health not ok")
     if out.get("version") != expected_commit:

@@ -49,7 +49,14 @@ ALWAYS_FORBIDDEN = {
 }
 TOPIC = re.compile(r"\brollback\b|\bU4\b|roll back", re.I)
 BANNER = "# HISTORICAL RECORD"
-REBUILD = re.compile(r"compose\b[^`\n|]*?\bbuild\b|build_with_version\.sh", re.I)
+REBUILD = re.compile(r"compose\b[^`\n|]*?\bbuild\b|build_with_version\.sh|\bdocker\s+(image\s+)?build\b", re.I)
+# R3D-5: a negation excuses a rebuild command only when it sits on the command's own line, before it
+# ("never run `docker compose up --build` to upgrade"), never because a negation word appears somewhere nearby
+CMD_NEGATED = re.compile(r"\b(never|do not|don't|must not)\b", re.I)
+# a sentence that forbids something ("never", "do not", an emphatic NOT) is a warning, not upgrade advice;
+# a weak "no" ("no downtime") never excuses anything (R3D-5)
+STRONG_NEGATION = re.compile(r"\b(never|do not|don't|must not|NOT)\b")
+SENTENCE_SPLIT = re.compile(r"(?<=[.!?:])\s+|\n\s*\n")
 UPGRADE_WORDS = re.compile(r"\bupgrad\w*|\bupdat\w*|\brebuild\w*|\b(code|dependency|dependencies|source)\b[^.\n]{0,20}"
                            r"\bchang\w*|\bgit pull\b|\bnew (version|release|commit)\b|\bpick(ed)? up\b", re.I)
 FENCE = re.compile(r"^\s*(```|~~~)")
@@ -77,8 +84,19 @@ def lint_rebuild(rel, text):
         for i in range(a, b + 1):
             if not REBUILD.search(lines[i]):
                 continue
-            near = [lines[j] for j in range(max(a, i - 2), i + 1)]
-            upgrade = [x for x in near if UPGRADE_WORDS.search(x) and RUNBOOK not in x and not NEGATION.search(x)]
+            m = REBUILD.search(lines[i])
+            negated = bool(CMD_NEGATED.search(lines[i][:m.start()]))
+            # R3D-5: upgrade wording anywhere in the section before the command counts (sentence by sentence,
+            # outside code fences), not just two lines up; a sentence naming the runbook or forbidding is exempt
+            prose, fenced = [], False
+            for j in range(a, i):
+                if FENCE.match(lines[j]):
+                    fenced = not fenced
+                elif not fenced:
+                    prose.append(lines[j])
+            sentences = SENTENCE_SPLIT.split("\n".join(prose))
+            upgrade = [] if negated else [x for x in sentences if UPGRADE_WORDS.search(x) and RUNBOOK not in x
+                                          and not STRONG_NEGATION.search(x)]
             if not linked:
                 out.append(f"{rel}:{i + 1}: rebuild command in a section that does not point existing-deployment "
                            f"upgrades to {RUNBOOK}")

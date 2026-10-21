@@ -104,6 +104,10 @@ def test_full_positive_path(env):
     assert env.start() == 0, env.last_err
     assert running(env.fake) and env.fake.service_container()["Image"] == fd.OLD_IMAGE
     assert env.fake.volumes[env.fake.volume]["content"] == fd.good_volume_manifest(REFERENCE)
+    # R3D-2: after an accepted rollback the Compose image tag names 147e315 again (a later `compose up`
+    # cannot recreate the service from the candidate)
+    assert "p-s:latest" in env.fake.image_tags.get(fd.OLD_IMAGE, [])
+    assert not any("p-s:latest" in tags for img, tags in env.fake.image_tags.items() if img != fd.OLD_IMAGE)
 
 
 # --- finding 2: probe-to-start race, lock, other volume users ------------------------------------
