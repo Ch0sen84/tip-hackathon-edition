@@ -1,0 +1,22 @@
+# DISPOSABLE recovery-drill override for the repo's docker-compose.yml. Never use with the
+# production project. Pins the app image by ID (no build, no pull), makes the project network
+# INTERNAL (no route to any external host), labels the volume as a drill volume (the only
+# volumes on which r3recover honours its rehearsal fault hook) and adds a synthetic fake provider.
+services:
+  tip-hackathon:
+    image: ${R3_APP_IMAGE:?set R3_APP_IMAGE to an image ID}
+    pull_policy: never
+    build: !reset null
+  fakeuw:
+    image: ${R3_FAKE_IMAGE:?set R3_FAKE_IMAGE to an image ID}
+    pull_policy: never
+    entrypoint: ["python", "/r/fake_uw_server.py", "18901"]
+    volumes:
+      - ${R3_DRILL_DIR:?set R3_DRILL_DIR}:/r:ro
+networks:
+  default:
+    internal: true
+volumes:
+  tip-data:
+    labels:
+      r3.drill: "1"

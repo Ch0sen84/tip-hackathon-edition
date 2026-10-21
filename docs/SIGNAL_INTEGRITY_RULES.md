@@ -9,7 +9,8 @@ source of truth:
 - `backend/app/core/flow_direction.py` (direction)
 
 Companion documents: [GATE_PROOF.md](GATE_PROOF.md) (gate by gate), [TRADING_VALIDITY.md](TRADING_VALIDITY.md)
-(what outputs mean), [RELEASE_MIGRATION_ROLLBACK.md](RELEASE_MIGRATION_ROLLBACK.md).
+(what outputs mean), [RELEASE_MIGRATION_ROLLBACK.md](RELEASE_MIGRATION_ROLLBACK.md). Upgrade and rollback:
+[RELEASE3_RECOVERY_RUNBOOK.md](RELEASE3_RECOVERY_RUNBOOK.md) (authoritative).
 
 ## 1. Missing data is never negative evidence
 - **Explicit collection status.** Every UW request reports one of `ok`, `error`, `rate_limited`, `unauthorized`,
