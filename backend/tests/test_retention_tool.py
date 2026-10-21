@@ -202,3 +202,30 @@ def test_restore_puts_back_the_exact_rows(db, tmp_path, monkeypatch):
     assert conn.execute("SELECT COUNT(*) FROM session_value_curves WHERE sealed = 1").fetchone()[0] == 0
     manifest = [json.loads(l) for l in (arch / "manifest.jsonl").read_text().splitlines()]
     assert all(len(m["sha256"]) == 64 for m in manifest)
+
+
+# --- PE-N2 ------------------------------------------------------------------------------------------
+def test_restore_reports_rows_actually_reinserted_and_those_already_present(db, tmp_path, monkeypatch):
+    arch = tmp_path / "arch"
+    retention.cmd_archive(db, KEEP, arch)
+    first = retention.cmd_restore(db, arch)                    # nothing was pruned: every row is still there
+    assert all(r["rows"] == 0 and r["already_present"] > 0 for r in first["restored_sessions"])
+    monkeypatch.setenv("TIP_RETENTION_ENABLED", "1")
+    retention.cmd_prune(db, KEEP, arch, confirmed=True)
+    second = retention.cmd_restore(db, arch)
+    assert all(r["rows"] > 0 and r["already_present"] == 0 for r in second["restored_sessions"])
+
+
+def test_a_torn_last_manifest_line_is_ignored_but_earlier_corruption_stops_the_tool(db, tmp_path):
+    arch = tmp_path / "arch"
+    retention.cmd_archive(db, KEEP, arch)
+    f = arch / "manifest.jsonl"
+    good = f.read_text()
+    f.write_text(good + '{"dataset": "darkpool", "tick')       # an append interrupted mid-line
+    assert len(retention._manifest(arch)) == 2 * (25 - KEEP)
+    retention._append_manifest(arch, {"dataset": "x", "ticker": "Y", "session_date": "2026-01-02"})
+    assert f.read_text() == good + '{"dataset": "x", "session_date": "2026-01-02", "ticker": "Y"}\n'
+    assert len(retention._manifest(arch)) == 2 * (25 - KEEP) + 1     # the next run still works
+    f.write_text('{"broken\n' + good)
+    with pytest.raises(SystemExit, match="manifest corrupt at line 1"):
+        retention._manifest(arch)                               # corruption before the end is never skipped

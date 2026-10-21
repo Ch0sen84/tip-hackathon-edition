@@ -142,6 +142,8 @@ def _write_archive(path: Path, rows) -> str:
     with open(path, "wb") as fh:
         with gzip.GzipFile(filename="", mode="wb", fileobj=fh, mtime=0) as gz:
             gz.write(payload)
+        fh.flush()
+        os.fsync(fh.fileno())        # PE-N2: an archive must be durable before prune may delete its rows
     return hashlib.sha256(payload).hexdigest()
 
 
@@ -151,13 +153,45 @@ def _read_archive(path: Path):
 
 
 def _manifest(archive_dir: Path) -> dict:
+    """PE-N2: an append interrupted mid-line leaves a torn LAST line; that entry was never complete (its
+    archive is re-created by the next `archive`), so it is ignored with a warning. A malformed line anywhere
+    else is real corruption and stops the tool."""
     m = {}
     f = archive_dir / "manifest.jsonl"
     if f.exists():
-        for line in f.read_text().splitlines():
-            e = json.loads(line)
+        lines = f.read_text().splitlines()
+        for i, line in enumerate(lines):
+            if not line.strip():
+                continue
+            try:
+                e = json.loads(line)
+            except ValueError:
+                if i == len(lines) - 1:
+                    print(f"warning: ignoring an incomplete last manifest line in {f}", file=sys.stderr)
+                    continue
+                raise SystemExit(f"manifest corrupt at line {i + 1}: {f}")
             m[(e["dataset"], e["ticker"], e["session_date"])] = e
     return m
+
+
+def _append_manifest(archive_dir: Path, entry: dict) -> None:
+    """Appends one entry durably. A torn last line (an earlier append interrupted mid-line) is an entry that
+    never completed: it is cut off first, so the manifest stays parseable and the new entry is never glued
+    onto it."""
+    f = archive_dir / "manifest.jsonl"
+    if f.exists() and f.stat().st_size:
+        data = f.read_bytes()
+        if not data.endswith(b"\n"):
+            keep = data.rfind(b"\n") + 1
+            print(f"warning: dropping an incomplete last manifest line in {f}", file=sys.stderr)
+            with open(f, "r+b") as fh:
+                fh.truncate(keep)
+                fh.flush()
+                os.fsync(fh.fileno())
+    with open(f, "a") as fh:
+        fh.write(json.dumps(entry, sort_keys=True) + "\n")
+        fh.flush()
+        os.fsync(fh.fileno())
 
 
 def cmd_archive(db, keep, archive_dir: Path):
@@ -184,8 +218,7 @@ def cmd_archive(db, keep, archive_dir: Path):
         entry = {"dataset": dataset, "ticker": ticker, "session_date": sd, "rows": len(rows),
                  "ids_sha256": hashlib.sha256(",".join(str(r[0]) for r in rows).encode()).hexdigest(),
                  "sha256": sha, "file": str(path.relative_to(archive_dir)), "created_at": datetime.now(timezone.utc).isoformat()}
-        with open(archive_dir / "manifest.jsonl", "a") as fh:
-            fh.write(json.dumps(entry, sort_keys=True) + "\n")
+        _append_manifest(archive_dir, entry)
         done += 1
     conn.close()
     return {"archived_sessions": done, "skipped": skipped}
@@ -278,14 +311,19 @@ def cmd_restore(db, archive_dir: Path, only=None):
         if sha != e["sha256"]:
             raise SystemExit(f"archive checksum mismatch: {e['file']}")
         conn.execute("BEGIN IMMEDIATE")
+        before = conn.total_changes
         conn.executemany(f"INSERT OR IGNORE INTO {TABLES[dataset]} (id, source_id, ticker, event_time, retrieved_at, raw_json) "
                          f"VALUES (?, ?, ?, ?, ?, ?)", [(r["id"], r["source_id"], r["ticker"], r["event_time"],
                                                          r["retrieved_at"], r["raw_json"]) for r in back])
+        inserted = conn.total_changes - before
         conn.execute("UPDATE session_value_curves SET sealed = 0, archive_ref = NULL WHERE dataset = ? AND ticker = ? "
                      "AND session_date = ?", (dataset, ticker, sd))
         _refresh_sealed_signatures(conn, cat, dataset, ticker)
         conn.execute("COMMIT")
-        restored.append({"dataset": dataset, "ticker": ticker, "session_date": sd, "rows": len(back)})
+        # PE-N2: report what was actually re-inserted; rows already present (same id or re-ingested
+        # source_id) are skipped by INSERT OR IGNORE and counted separately.
+        restored.append({"dataset": dataset, "ticker": ticker, "session_date": sd, "rows": inserted,
+                         "already_present": len(back) - inserted})
     conn.close()
     return {"restored_sessions": restored}
 
