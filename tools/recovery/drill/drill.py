@@ -606,12 +606,12 @@ def call(m,p,body=None,h=None):
         with urllib.request.urlopen(r,timeout=120) as x: return x.status,json.loads(x.read() or b"null")
     except urllib.error.HTTPError as e: return e.code,None
 tok=call("GET","/api/auth/bootstrap")[1]["token"]; A={**H,"X-TIP-Auth":tok}
-s,b=call("POST","/api/baseline/jobs",{"tickers":["SYNT"],"max_pages_per_ticker":12,"step_pages":10},A)
+s,b=call("POST","/api/baseline/jobs",{"tickers":["SYNT"],"max_pages_per_ticker":12,"step_pages":10,"confirm":True},A)  # the operator confirms the stated budget (428 contract)
 for _ in range(240):
     j=call("GET","/api/baseline/jobs/current",h=A)[1]["job"]
     if j and j["status"] in ("completed","paused","cancelled"): break
     time.sleep(0.5)
-call("POST","/api/ticker/FAILX/baseline/backfill?max_pages=2",h=A)
+call("POST","/api/ticker/FAILX/baseline/backfill?max_pages=2&confirm=true",h=A)
 t=call("GET","/api/diagnostics/uw-requests",h=A)[1]
 failed=sum(v.get("failed",0) for v in t.get("by_path",{}).values())
 print(json.dumps({"job_status":j["status"],"job_pages":j["pages_used"],"provider_totals":t.get("totals"),"failed_provider_requests":failed}))

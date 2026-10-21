@@ -141,6 +141,18 @@ def test_f4_accept_reports_a_candidate_running_under_another_project(env):
     assert env.fake.containers[stray["Id"]]["State"]["Running"] is True
 
 
+def test_f4_rollback_acceptance_is_not_failed_by_another_deployment_of_the_rollback_release(env):
+    """Drill finding (P10/N28): another container of the pinned 147e315 image elsewhere on the host (a second
+    deployment, a test stack) must not fail -- and so stop -- the service a rollback has just restored. The
+    stray check guards CANDIDATE acceptance only (start-rollback itself created the rollback container)."""
+    other = fd.container_template("another-stack", "s", "another-stack_tip-data", fd.OLD_IMAGE,
+                                  "/var/lib/docker/volumes/y/_data")
+    env.fake.containers[other["Id"]] = other
+    _accept(env, "--expect-image", fd.OLD_IMAGE)
+    assert "OUTSIDE" not in (env.last_err or "")
+    assert env.fake.containers[other["Id"]]["State"]["Running"] is True
+
+
 def test_build_script_pins_the_compose_project():
     s = _text(TOOLS / "build_with_version.sh")
     assert '--project-name' in s and 'COMPOSE+=(-p "$PROJECT_NAME")' in s

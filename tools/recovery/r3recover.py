@@ -1190,7 +1190,12 @@ def _stray_containers(image_id, own_id):
 
 def _accept_prechecks(a, cur):
     def check():
-        strays = _stray_containers(a.expect_image, cur["container"]["id"])
+        # D-F4: a CANDIDATE started outside the deployment's Compose project (U6 without -p) is caught here.
+        # Not for acceptance of the pinned 147e315 rollback: start-rollback created that container itself from
+        # the recorded Compose inputs, and another deployment of the same release on the host must not fail
+        # (and therefore stop) the service that was just restored.
+        strays = (_stray_containers(a.expect_image, cur["container"]["id"])
+                  if a.expect_commit != EXPECTED_COMMIT_DEFAULT else [])
         if strays:
             raise Blocked(f"the image {a.expect_image[:19]} also runs OUTSIDE {a.project}/{a.service}: {strays}. "
                           f"U6 was not run against the deployment's Compose project (-p {a.project}); that container "
