@@ -65,6 +65,11 @@ class Drill:
         image = image or self.a.old_image
         self.compose(project, image, "create", "--no-build", "--pull", "never", extra=extra, check=True)
         vol = self.volume(project)
+        owner = sh(["docker", "volume", "inspect", vol, "--format", '{{index .Labels "com.docker.compose.project"}}'])
+        if owner.returncode != 0 or owner.stdout.decode().strip() != project:
+            if seed or start:                      # never let 'docker run -v' create an unlabelled volume
+                raise SystemExit(f"{project}: Compose did not create {vol}; refusing to seed")
+            return                                 # e.g. the bind-mount variant: nothing to seed
         sh(["docker", "run", "--rm", "--pull", "never", "--network", "none", "-v", f"{vol}:/srv/data",
             "-v", f"{DRILL}:/r:ro", "--entrypoint", "python", self.a.old_image, "/r/seed_volume.py", "/srv/data", *seed],
            check=True)
@@ -319,6 +324,10 @@ class Drill:
         # unexpected pull: U4 records an image that is no longer present locally
         self.pull_negative()
         self.down(P)
+        left_v = sh(["docker", "volume", "ls", "-q", "--filter", "name=r3drill"]).stdout.decode().split() +             sh(["docker", "volume", "ls", "-q", "--filter", "label=r3.disposable=1"]).stdout.decode().split()
+        left_c = sh(["docker", "ps", "-a", "-q", "--filter", "name=r3drill"]).stdout.decode().split()
+        self.fact("CLEANUP no drill volumes or containers left", not left_v and not left_c,
+                  {"volumes": left_v, "containers": left_c})
         return EVIDENCE
 
     def variants(self):

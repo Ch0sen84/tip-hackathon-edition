@@ -335,3 +335,17 @@ def test_drill_fault_hook_is_ignored_outside_labelled_drill_volumes(monkeypatch,
     assert r3.cmd_rollback(A) == r3.EXIT_OK
     assert seen["fault"] == expected_fault
     assert json.loads((u4 / "restore_state.json").read_text())["state"] == "RESTORED_VERIFIED"
+
+
+def test_failed_forensic_copy_blocks_before_the_volume_is_touched(monkeypatch, tmp_path):
+    u4 = tmp_path / "U4-x"; u4.mkdir()
+    m = {"u4_id": "U4-x", "archive": {"sha256": "a" * 64}, "volume_manifest": good_manifest()}
+    monkeypatch.setattr(r3, "_rollback_checks", lambda a: (m, "sha256:" + "2" * 64, ident()))
+    monkeypatch.setattr(r3, "helper_run", lambda *x, **k: (_ for _ in ()).throw(r3.Blocked("no space left on device")))
+    monkeypatch.setattr(r3, "_extract", lambda *x, **k: pytest.fail("restore must not start after a failed forensic copy"))
+
+    class A: dry_run, stop, project, service = False, False, "p", "s"
+    A.u4, A.approve = str(u4), "RESTORE:U4-x:p_tip-data"
+    with pytest.raises(r3.Blocked, match="no space"):
+        r3.cmd_rollback(A)
+    assert not (u4 / "restore_state.json").exists()               # the volume was never declared IN_PROGRESS
