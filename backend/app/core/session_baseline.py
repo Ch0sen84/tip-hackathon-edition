@@ -14,6 +14,11 @@ Signal-integrity remediation (audit B1/B8/B18). Differences from the Phase C
     historical session is cut at the same elapsed time OR its own close
     (early-close days), regular session only -- after-hours prints are not
     compared against regular-hours history.
+  * Provenance (Release 3, migration 11): only sessions CERTIFIED by this
+    release's collector rules are history (core/coverage_policy: settled walk,
+    gap check). 'complete' rows from earlier collectors are counted as
+    complete:legacy_uncertified in the summary and never used -- the evaluation
+    hold on legacy sessions is enforced here, not only documented.
   * No look-ahead: only COMPLETE sessions strictly BEFORE the evidence
     session are eligible (the Phase C wrapper also used later dates when
     replaying history), at most MAX_HISTORY_SESSIONS most recent.
@@ -39,6 +44,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
+from . import coverage_policy as policy
 from . import trading_calendar as tc
 from .dark_pool_baseline import (
     BASELINE_READY_MIN, PERCENTILE_THRESHOLD, RATIO_THRESHOLD, STRONG_MIN, classify_tier, percentile_rank,
@@ -207,6 +213,7 @@ class SessionBaseline:
     evidence_coverage: Optional[dict] = None
     coverage_summary: dict = field(default_factory=dict)
     excluded_before_first_activity: int = 0
+    excluded_implausible_empty: int = 0
 
     def as_metrics(self) -> dict:
         return {
@@ -223,6 +230,7 @@ class SessionBaseline:
             "evidence_coverage": self.evidence_coverage,
             "coverage_summary": self.coverage_summary,
             "excluded_before_first_activity": self.excluded_before_first_activity,
+            "excluded_implausible_empty": self.excluded_implausible_empty,
         }
 
     def as_dark_pool_gate_inputs(self) -> dict:
@@ -243,9 +251,9 @@ def compute(catalog, dataset: str, ticker: str, evidence_session: date,
     prior = [c for c in all_cov if c["session_date"] < sd]
     summary: dict = {}
     for c in prior:
-        k = c["status"] + (f":{c['last_error']}" if c.get("last_error") else "")
+        k = policy.status_key(c)
         summary[k] = summary.get(k, 0) + 1
-    eligible = [c for c in prior if c["status"] == "complete"]
+    eligible = [c for c in prior if policy.is_certified(c)]
     eligible = eligible[-MAX_HISTORY_SESSIONS:]
     tier = classify_tier(len(eligible)) if min_sessions == BASELINE_READY_MIN else (
         TIER_PRELIMINARY if len(eligible) < min_sessions else "baseline_ready")
@@ -289,19 +297,26 @@ def compute(catalog, dataset: str, ticker: str, evidence_session: date,
             continue
         if curve is not None:
             v, n_obs = curve.upto(cutoff)
-            active = curve.n > 0
+            day_n = curve.n
         else:
             h_obs = catalog.observations_between(dataset, ticker, h_open, cutoff)
             v, n_obs = sum(_f(o.get(value_key)) for o in h_obs), len(h_obs)
-            full_day = catalog.observations_between(dataset, ticker, h_open, h_close) if not h_obs else h_obs
-            active = bool(full_day)
+            day_n = len(catalog.observations_between(dataset, ticker, h_open, h_close))
         hist_rows.append({"session_date": c["session_date"], "value": v, "observations": n_obs,
-                          "active": active})
+                          "active": day_n > 0, "day_n": day_n})
     # A verified-empty session BEFORE the ticker's first observed activity
     # (e.g. pre-listing) is not a genuine "zero activity" baseline day.
     first_active = next((i for i, r in enumerate(hist_rows) if r["active"]), len(hist_rows))
     base.excluded_before_first_activity = first_active
     hist_rows = hist_rows[first_active:]
+    # C-F5: a ZERO-activity session after the first activity of a clearly active ticker (median active
+    # session >= EMPTY_SESSION_MIN_MEDIAN_ROWS rows) is a provider-side outage or an unscheduled closure,
+    # not evidence of a quiet day: excluded, never averaged in as zero. Thin tickers keep genuine zeros.
+    active_n = sorted(r["day_n"] for r in hist_rows if r["active"])
+    if active_n and active_n[len(active_n) // 2] >= policy.EMPTY_SESSION_MIN_MEDIAN_ROWS:
+        keep = [r for r in hist_rows if r["active"]]
+        base.excluded_implausible_empty = len(hist_rows) - len(keep)
+        hist_rows = keep
     base.history_sessions = [{k: r[k] for k in ("session_date", "value", "observations")} for r in hist_rows]
     hist_values = [r["value"] for r in hist_rows]
     base.eligible_sessions = len(hist_values)
@@ -309,8 +324,11 @@ def compute(catalog, dataset: str, ticker: str, evidence_session: date,
         TIER_PRELIMINARY if len(hist_values) < min_sessions else "baseline_ready")
 
     if not hist_values or len(hist_values) < min_sessions:
-        base.reason = (f"only {len(hist_values)} complete prior sessions (need >= {min_sessions}) -- "
-                       "insufficient history, not evidence either way")
+        legacy = summary.get("complete:legacy_uncertified", 0)
+        base.reason = (f"only {len(hist_values)} certified complete prior sessions (need >= {min_sessions}) -- "
+                       "insufficient history, not evidence either way"
+                       + (f"; {legacy} legacy session(s) from an earlier collector are not used until "
+                          "re-verified by an approved baseline job" if legacy else ""))
         return base
     mean = statistics.mean(hist_values)
     stdev = statistics.pstdev(hist_values) if len(hist_values) >= 2 else 0.0

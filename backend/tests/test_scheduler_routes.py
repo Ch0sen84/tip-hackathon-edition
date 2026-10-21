@@ -19,7 +19,7 @@ def test_scheduler_status_requires_auth(app_main):
 def test_scheduler_mode_post_requires_auth(app_main):
     client = TestClient(app_main.app)
     client.headers.pop("X-TIP-Auth", None)
-    res = client.post("/api/scheduler/mode", json={"mode": "dry_run"})
+    res = client.post("/api/scheduler/mode", json={"mode": "dry_run", "confirm": "dry_run"})
     assert res.status_code == 401
 
 
@@ -42,7 +42,7 @@ def test_scheduler_status_defaults_to_disabled(app_main):
 
 def test_set_scheduler_mode_to_dry_run_then_status_reflects_it(app_main):
     client = TestClient(app_main.app)
-    res = client.post("/api/scheduler/mode", json={"mode": "dry_run"})
+    res = client.post("/api/scheduler/mode", json={"mode": "dry_run", "confirm": "dry_run"})
     assert res.status_code == 200
     assert res.json()["mode"] == "dry_run"
     status = client.get("/api/scheduler/status").json()
@@ -58,7 +58,7 @@ def test_set_scheduler_mode_rejects_invalid_value(app_main):
 def test_all_three_modes_settable_via_the_route(app_main):
     client = TestClient(app_main.app)
     for mode in ("dry_run", "enabled", "disabled"):
-        res = client.post("/api/scheduler/mode", json={"mode": mode})
+        res = client.post("/api/scheduler/mode", json={"mode": mode, "confirm": mode})
         assert res.status_code == 200
         assert res.json()["mode"] == mode
 
@@ -106,13 +106,13 @@ def test_scheduler_status_exposes_effective_config_d9(app_main):
 def test_scheduler_run_once_requires_auth(app_main):
     client = TestClient(app_main.app)
     client.headers.pop("X-TIP-Auth", None)
-    res = client.post("/api/scheduler/run-once")
+    res = client.post("/api/scheduler/run-once", json={"confirm": True})
     assert res.status_code == 401
 
 
 def test_scheduler_run_once_refuses_when_disabled(app_main):
     client = TestClient(app_main.app)
-    res = client.post("/api/scheduler/run-once")
+    res = client.post("/api/scheduler/run-once", json={"confirm": True})
     assert res.status_code == 200
     assert res.json()["reason"] == "disabled"
 
@@ -132,8 +132,8 @@ def test_scheduler_run_once_runs_a_cycle_in_dry_run_mode(app_main, monkeypatch):
 
     monkeypatch.setattr(_main, "get_adapter", lambda: _FakeAdapter())
     client = TestClient(app_main.app)
-    client.post("/api/scheduler/mode", json={"mode": "dry_run"})
-    res = client.post("/api/scheduler/run-once")
+    client.post("/api/scheduler/mode", json={"mode": "dry_run", "confirm": "dry_run"})
+    res = client.post("/api/scheduler/run-once", json={"confirm": True})
     assert res.status_code == 200
     body = res.json()
     assert body["ran"] is True
@@ -160,7 +160,7 @@ def test_scheduler_run_once_discovery_only_works_while_mode_disabled(app_main, m
     monkeypatch.setattr(_main, "get_adapter", lambda: _FakeAdapter())
     client = TestClient(app_main.app)
     assert client.get("/api/scheduler/status").json()["mode"] == "disabled"
-    res = client.post("/api/scheduler/run-once", json={"depth": "discovery_only"})
+    res = client.post("/api/scheduler/run-once", json={"confirm": True, "depth": "discovery_only"})
     assert res.status_code == 200
     body = res.json()
     assert body["ran"] is True
@@ -201,7 +201,7 @@ def test_scheduler_run_once_discovery_plus_evaluation_works_while_mode_disabled(
 
     monkeypatch.setattr(_main, "get_adapter", lambda: _DiscoveryWrappedAdapter())
     client = TestClient(app_main.app)
-    res = client.post("/api/scheduler/run-once", json={"depth": "discovery_plus_evaluation"})
+    res = client.post("/api/scheduler/run-once", json={"confirm": True, "depth": "discovery_plus_evaluation"})
     assert res.status_code == 200
     body = res.json()
     assert body["ran"] is True
@@ -212,7 +212,7 @@ def test_scheduler_run_once_discovery_plus_evaluation_works_while_mode_disabled(
 
 def test_scheduler_run_once_rejects_invalid_depth_with_400(app_main):
     client = TestClient(app_main.app)
-    res = client.post("/api/scheduler/run-once", json={"depth": "bogus"})
+    res = client.post("/api/scheduler/run-once", json={"confirm": True, "depth": "bogus"})
     assert res.status_code == 400
 
 
@@ -220,7 +220,7 @@ def test_scheduler_run_once_without_depth_preserves_legacy_disabled_refusal(app_
     """Backward compat: omitting `depth` entirely must behave EXACTLY
     like before this round -- refuses while mode is 'disabled'."""
     client = TestClient(app_main.app)
-    res = client.post("/api/scheduler/run-once", json={})
+    res = client.post("/api/scheduler/run-once", json={"confirm": True})
     assert res.status_code == 200
     assert res.json()["reason"] == "disabled"
 

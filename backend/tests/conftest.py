@@ -4,6 +4,26 @@ from pathlib import Path
 
 import pytest
 
+
+@pytest.fixture
+def no_gap_policy(monkeypatch):
+    """For pagination tests whose CONSTRUCTED fixtures cover only part of a day: the coverage
+    plausibility checks (core/coverage_policy gap + empty-session) would rightly withhold
+    certification once. Tests of those checks do not use this fixture."""
+    from app.core import coverage_policy
+    monkeypatch.setattr(coverage_policy, "GAP_EXPECTED_ROWS", float("inf"))
+    monkeypatch.setattr(coverage_policy, "EMPTY_SESSION_MIN_MEDIAN_ROWS", float("inf"))
+
+
+CERTIFIED_PROVENANCE = None
+
+
+def certified_provenance():
+    """Provenance for a 'complete' coverage row written directly by a test that models a session
+    certified by the CURRENT collector (core/coverage_policy)."""
+    from app.core import coverage_policy
+    return {"certified_by": coverage_policy.CERTIFIER, "certified_at_utc": "2026-10-20T00:00:00+00:00"}
+
 BACKEND_DIR = Path(__file__).resolve().parents[1]
 if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))

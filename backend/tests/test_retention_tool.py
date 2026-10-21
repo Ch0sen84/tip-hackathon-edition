@@ -11,6 +11,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.conftest import certified_provenance
+
 from app.core import session_baseline
 from app.ingestion import IngestionCatalog
 from tests.test_session_curve_cache import EVIDENCE, T, dp_rows, flow_rows, sessions_before, utc_open_close
@@ -33,7 +35,8 @@ def db(tmp_path):
         cat.catalog_darkpool_observations(T, dp_rows(d, 120, rnd, ("z", "frac")))
         cat.catalog_options_flow_observations(T, flow_rows(d, 60, rnd))
         for ds in ("darkpool", "options_flow"):
-            cat.upsert_session_coverage(ds, T, d.isoformat(), "complete", o.isoformat(), c.isoformat(), 1, 1)
+            cat.upsert_session_coverage(ds, T, d.isoformat(), "complete", o.isoformat(), c.isoformat(), 1, 1,
+                                        provenance=certified_provenance())
     return path
 
 

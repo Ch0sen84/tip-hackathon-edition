@@ -17,7 +17,10 @@ nothing in this phase ever writes a row into them; Phase B populates them.
 """
 from __future__ import annotations
 
+import os
+import shutil
 import sqlite3
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import NamedTuple, Optional
@@ -642,6 +645,62 @@ CREATE INDEX IF NOT EXISTS idx_collection_diagnostics_session
 """,
 ))
 
+MIGRATIONS.append(Migration(
+    version=11,
+    name="coverage_settlement_and_provenance",
+    sql="""
+-- Release 3 (collector settlement and provenance). Additive only: every new
+-- column is NULL on existing rows, so no legacy coverage value is changed.
+--   proof_started_utc    earliest retrieval time of any walk contributing to the
+--                        proven interval. A session is certified COMPLETE only when
+--                        its whole [open, close] was walked at or after
+--                        close + the settlement lag (late-reported prints).
+--   certified_by         the collector rule set that certified a COMPLETE row;
+--                        NULL = not certified by this release (every pre-existing
+--                        'complete' row). Baselines use certified rows only.
+--   certified_at_utc     when certification happened.
+--   session_rows         deduplicated rows in [open, close] at certification.
+--   max_gap_s            largest interval without a row inside [open, close].
+--   gap_flag             'suspected' (an implausible gap withheld certification
+--                        once) | 'confirmed' (a second independent walk found the
+--                        same gap) | NULL.
+--   reverify_trigger     why the current walk replaced an earlier interval
+--                        (legacy | unsettled | suspected_gap | operator).
+--   rows_before_reverify rows in the window when that re-walk began.
+--   island_from_utc / island_through_utc  one proven interval ABOVE the from-open
+--                        interval (a page budget ran out walking down from the live
+--                        edge); the gap between them is filled by later walks.
+ALTER TABLE session_coverage ADD COLUMN proof_started_utc TEXT;
+ALTER TABLE session_coverage ADD COLUMN certified_by TEXT;
+ALTER TABLE session_coverage ADD COLUMN certified_at_utc TEXT;
+ALTER TABLE session_coverage ADD COLUMN session_rows INTEGER;
+ALTER TABLE session_coverage ADD COLUMN max_gap_s REAL;
+ALTER TABLE session_coverage ADD COLUMN gap_flag TEXT;
+ALTER TABLE session_coverage ADD COLUMN reverify_trigger TEXT;
+ALTER TABLE session_coverage ADD COLUMN rows_before_reverify INTEGER;
+ALTER TABLE session_coverage ADD COLUMN island_from_utc TEXT;
+ALTER TABLE session_coverage ADD COLUMN island_through_utc TEXT;
+-- One row per completed re-walk that replaced an earlier interval: how many
+-- rows the earlier collection had missed (late reports, legacy gaps).
+CREATE TABLE IF NOT EXISTS coverage_reconciliations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL,
+    dataset TEXT NOT NULL,
+    ticker TEXT NOT NULL,
+    session_date TEXT NOT NULL,
+    trigger TEXT NOT NULL,
+    rows_before INTEGER,
+    rows_after INTEGER,
+    new_rows INTEGER,
+    outcome TEXT NOT NULL,
+    certified_by TEXT,
+    detail_json TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_coverage_reconciliations_session
+    ON coverage_reconciliations(dataset, ticker, session_date);
+""",
+))
+
 # Migrations at or above this version take a fresh pre-migration backup of an
 # existing, non-empty database file before they are applied (in addition to
 # the one-time first-run backup), so upgrading a real Live install is always
@@ -678,22 +737,64 @@ def backup_db_file(db_path: str) -> Optional[str]:
     src = Path(db_path)
     if not src.exists():
         return None
+    latest = _latest_backup_of_unchanged_db(src)
+    if latest is not None:                     # a failed upgrade retried: the DB is unchanged since its backup
+        return str(latest)
+    size = src.stat().st_size
+    free = shutil.disk_usage(src.parent).free
+    need = int(size * 1.1) + (64 << 20)
+    if free < need:
+        raise RuntimeError(f"insufficient free space for the pre-migration backup of {src.name}: "
+                           f"{free} bytes free, {need} needed -- refusing to migrate without a backup")
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
     backup_path = src.with_name(f"{src.name}.pre-migration-{stamp}.bak")
     n = 1
     while backup_path.exists():  # never overwrite an earlier backup
         backup_path = src.with_name(f"{src.name}.pre-migration-{stamp}-{n}.bak")
         n += 1
-    src_conn = sqlite3.connect(str(src))
+    partial = backup_path.with_name(backup_path.name + ".partial")
     try:
-        dst_conn = sqlite3.connect(str(backup_path))
+        src_conn = sqlite3.connect(str(src))
         try:
-            src_conn.backup(dst_conn)
+            dst_conn = sqlite3.connect(str(partial))
+            try:
+                src_conn.backup(dst_conn)
+            finally:
+                dst_conn.close()
         finally:
-            dst_conn.close()
-    finally:
-        src_conn.close()
+            src_conn.close()
+        os.replace(partial, backup_path)          # a backup is visible only once complete
+    except BaseException:
+        try:
+            partial.unlink()
+        except OSError:
+            pass
+        raise
     return str(backup_path)
+
+
+def _schema_versions_of(path: Path) -> Optional[list]:
+    try:
+        c = sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True)
+        try:
+            return [r[0] for r in c.execute("SELECT version FROM schema_version ORDER BY version")]
+        finally:
+            c.close()
+    except sqlite3.Error:
+        return None
+
+
+def _latest_backup_of_unchanged_db(src: Path) -> Optional[Path]:
+    """The newest existing pre-migration backup, if the database has not been written since it was taken
+    and both are at the same schema state (PE-P2: a restart loop must not fill the volume with copies)."""
+    backups = sorted(src.parent.glob(f"{src.name}.pre-migration-*.bak"), key=lambda q: q.stat().st_mtime)
+    if not backups:
+        return None
+    latest = backups[-1]
+    if latest.stat().st_mtime < src.stat().st_mtime:
+        return None
+    current = _schema_versions_of(src)
+    return latest if current is not None and current == _schema_versions_of(latest) else None
 
 
 def _schema_version_table_exists(conn: sqlite3.Connection) -> bool:
@@ -727,7 +828,50 @@ def _applied_versions(conn: sqlite3.Connection) -> set:
     return {r[0] for r in rows}
 
 
+_MIGRATION_LOCK = threading.Lock()
+
+
+def _statements(sql: str):
+    """Splits a migration script into complete SQL statements (SQLite's own tokenizer decides)."""
+    buf = ""
+    for line in sql.splitlines(keepends=True):
+        buf += line
+        if sqlite3.complete_statement(buf):
+            if any(ln.strip() and not ln.strip().startswith("--") for ln in buf.splitlines()):
+                yield buf.strip()
+            buf = ""
+    if any(ln.strip() and not ln.strip().startswith("--") for ln in buf.splitlines()):
+        yield buf.strip()
+
+
+def _apply_atomically(conn: sqlite3.Connection, migration: "Migration") -> bool:
+    """One migration and its schema_version row in ONE transaction (PE-P1): a failure at any statement
+    leaves the database exactly as before. The applied check is repeated under the write lock, so a
+    concurrent runner on another connection never applies the same migration twice."""
+    if conn.in_transaction:
+        conn.commit()
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        if conn.execute("SELECT 1 FROM schema_version WHERE version = ?", (migration.version,)).fetchone():
+            conn.rollback()
+            return False
+        for stmt in _statements(migration.sql):
+            conn.execute(stmt)
+        conn.execute("INSERT INTO schema_version (version, name, applied_at) VALUES (?, ?, ?)",
+                     (migration.version, migration.name, _utcnow_iso()))
+        conn.commit()
+        return True
+    except BaseException:
+        conn.rollback()
+        raise
+
+
 def run_migrations(conn: sqlite3.Connection, db_path: str) -> list:
+    with _MIGRATION_LOCK:
+        return _run_migrations(conn, db_path)
+
+
+def _run_migrations(conn: sqlite3.Connection, db_path: str) -> list:
     """Applies every not-yet-applied migration from MIGRATIONS, in
     version order, each in its own transaction, recording it in
     `schema_version`. Takes one pre-migration backup (see
@@ -755,11 +899,6 @@ def run_migrations(conn: sqlite3.Connection, db_path: str) -> list:
     for migration in sorted(MIGRATIONS, key=lambda m: m.version):
         if migration.version in applied_already:
             continue
-        conn.executescript(migration.sql)
-        conn.execute(
-            "INSERT INTO schema_version (version, name, applied_at) VALUES (?, ?, ?)",
-            (migration.version, migration.name, _utcnow_iso()),
-        )
-        conn.commit()
-        newly_applied.append(migration.version)
+        if _apply_atomically(conn, migration):
+            newly_applied.append(migration.version)
     return newly_applied

@@ -158,8 +158,8 @@ SENSITIVE_MUTATING_REQUESTS = [
     ("delete", "/api/settings/uw-key", None),
     ("post", "/api/settings/ai-key", {"provider": "anthropic", "api_key": "fake-not-real"}),
     ("delete", "/api/settings/ai-key", None),
-    ("post", "/api/scheduler/run-once", {}),
-    ("post", "/api/scheduler/mode", {"mode": "dry_run"}),
+    ("post", "/api/scheduler/run-once", {"confirm": True}),
+    ("post", "/api/scheduler/mode", {"mode": "dry_run", "confirm": "dry_run"}),
     ("post", "/api/radar/discover", {"limit": 5}),
     ("post", "/api/investigate/FLUX", None),
 ]

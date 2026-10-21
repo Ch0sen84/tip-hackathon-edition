@@ -187,6 +187,31 @@ class SessionInfo:
     holiday_name: Optional[str] = None
 
 
+# Unscheduled full-day NYSE closures (national days of mourning, weather). No formula predicts these;
+# they are listed explicitly, and TIP_EXTRA_MARKET_CLOSURES (comma-separated ISO dates) adds future ones.
+SPECIAL_CLOSURES = {
+    date_cls(2004, 6, 11): "National Day of Mourning (President Reagan)",
+    date_cls(2007, 1, 2): "National Day of Mourning (President Ford)",
+    date_cls(2012, 10, 29): "Hurricane Sandy",
+    date_cls(2012, 10, 30): "Hurricane Sandy",
+    date_cls(2018, 12, 5): "National Day of Mourning (President G.H.W. Bush)",
+    date_cls(2025, 1, 9): "National Day of Mourning (President Carter)",
+}
+
+
+def _extra_closures() -> dict:
+    import os
+    out = {}
+    for part in (os.environ.get("TIP_EXTRA_MARKET_CLOSURES") or "").split(","):
+        part = part.strip()
+        if part:
+            try:
+                out[date_cls.fromisoformat(part)] = "operator-configured market closure"
+            except ValueError:
+                pass
+    return out
+
+
 def session_info(trading_date: date_cls) -> SessionInfo:
     """The single source of truth this module exposes, per Phase C's
     spec: given a calendar date, is it a real NYSE trading day, and if so
@@ -202,6 +227,9 @@ def session_info(trading_date: date_cls) -> SessionInfo:
         return SessionInfo(trading_date, False, None, None, False, None)
     if trading_date in holidays:
         return SessionInfo(trading_date, False, None, None, False, holidays[trading_date])
+    special = SPECIAL_CLOSURES.get(trading_date) or _extra_closures().get(trading_date)
+    if special:
+        return SessionInfo(trading_date, False, None, None, False, special)
 
     early_closes = nyse_early_closes_for_year(trading_date.year)
     is_early = trading_date in early_closes

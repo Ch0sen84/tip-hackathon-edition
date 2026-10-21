@@ -23,6 +23,7 @@ defaults to ./data/tip_hackathon.db, created automatically.
 from __future__ import annotations
 
 import os
+import logging
 import sqlite3
 import sys
 import tempfile
@@ -105,6 +106,8 @@ def assert_safe_test_db_path(db_path: str) -> None:
             f"or the real default."
         )
 
+
+_log = logging.getLogger(__name__)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS ticker_scan_log (
@@ -249,8 +252,17 @@ class QualifyingDaysStore:
         now = scanned_at or self._now()
         sd = decision.session_date
         with self._conn() as conn:
+            if self._persistent_conn is None:
+                conn.execute("BEGIN IMMEDIATE")        # read-then-write under the database write lock
             ep = self._latest_episode(conn, ticker)
             open_id = ep[0] if ep is not None and ep[5] is None else None
+            if decision.action == "open" and open_id is not None and not decision.expire_open_episode:
+                # PE-P3 defence in depth: never a second open episode for a ticker -- the decision was
+                # made from a stale context; leave the open episode as it is.
+                _log.warning("lifecycle: refusing to open a second episode for %s (episode %s is open)",
+                             ticker, open_id)
+                conn.rollback()
+                return
             if decision.expire_open_episode and open_id is not None:
                 conn.execute(
                     "UPDATE lifecycle_episodes SET closed_at = ?, closed_session = ?, close_reason = 'expired', "

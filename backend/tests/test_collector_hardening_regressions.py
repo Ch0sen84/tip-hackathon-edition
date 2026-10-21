@@ -58,7 +58,7 @@ def walk(uw, cat, pages, dataset="darkpool"):
 
 
 @pytest.mark.parametrize("budgets", [[1, 50], [1, 1, 1, 50], [2, 3, 50], [3, 1, 2, 1, 50]])
-def test_d1_resumed_dark_pool_walk_never_skips_the_boundary_second(cat, budgets):
+def test_d1_resumed_dark_pool_walk_never_skips_the_boundary_second(cat, budgets, no_gap_policy):
     rows = per_second(3, 2000)                        # 500-row pages end mid-second
     uw = PaginatedUW(darkpool=rows)
     first = walk(uw, cat, budgets[0])
@@ -109,7 +109,7 @@ def test_d2_pages_that_are_not_newest_first_are_rejected(cat):
     assert d["classification"] == "rows_out_of_order" and d["violations"]["out_of_order"] > 0
 
 
-def test_d2_equal_timestamps_in_any_order_are_not_out_of_order(cat):
+def test_d2_equal_timestamps_in_any_order_are_not_out_of_order(cat, no_gap_policy):
     rows = per_second(31, 2000)                       # many prints per second: equal, not increasing
     u = walk(PaginatedUW(darkpool=rows), cat, 50)
     assert u.coverage["status"] == "complete" and keys(cat) == {darkpool_print_key("ABCD", r) for r in rows}
@@ -133,7 +133,7 @@ def test_d3_routes_refuse_budgets_below_one_without_a_request(live):
     client = TestClient(live.app)
     for mp in (0, -5):
         assert client.post(f"/api/ticker/ABCD/baseline/backfill?max_pages={mp}").status_code == 400
-    assert client.post("/api/baseline/jobs", json={"tickers": ["ABCD"], "max_pages_per_ticker": 0}).status_code == 400
+    assert client.post("/api/baseline/jobs", json={"confirm": True, "tickers": ["ABCD"], "max_pages_per_ticker": 0}).status_code == 400
     assert not [u for u, _ in uw.calls if "/api/darkpool/" in u or "flow-alerts" in u]
     assert live.get_baseline_job_store().latest() is None
 
@@ -150,7 +150,7 @@ def test_d4_d6_pages_and_attempts_of_a_failing_step_are_charged(live, monkeypatc
         return real(*a, **k)
     monkeypatch.setattr(cat, "upsert_session_coverage", flaky)
     client = TestClient(live.app)
-    job = client.post("/api/baseline/jobs", json={"tickers": ["ABCD"], "step_pages": 10,
+    job = client.post("/api/baseline/jobs", json={"confirm": True, "tickers": ["ABCD"], "step_pages": 10,
                                                   "max_pages_per_ticker": 20}).json()["job"]
     live.get_baseline_job_runner().join(30)
     store = live.get_baseline_job_store()
@@ -229,7 +229,7 @@ def test_d4_leaving_live_mode_releases_the_unspent_reservation(live, monkeypatch
         return real_step(ticker, pages, datasets=datasets) if datasets else real_step(ticker, pages)
     monkeypatch.setattr(live, "_baseline_job_step", step)
     live._baseline_job_runner = None
-    job = client.post("/api/baseline/jobs", json={"tickers": ["ABCD"], "step_pages": 10,
+    job = client.post("/api/baseline/jobs", json={"confirm": True, "tickers": ["ABCD"], "step_pages": 10,
                                                   "max_pages_per_ticker": 40}).json()["job"]
     live.get_baseline_job_runner().join(30)
     j = live.get_baseline_job_store().get(job["id"])

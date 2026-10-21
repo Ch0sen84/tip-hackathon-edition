@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import os
 import random
+import re
 import threading
 import time
 from collections import defaultdict
@@ -202,6 +203,18 @@ class _CircuitState:
     open_until: float = 0.0
 
 
+# J-P1: a Retry-After longer than this is not slept on (a header must never park a thread for hours):
+# the call returns rate_limited at once and the caller decides.
+MAX_RETRY_AFTER_S = 60.0
+_TICKER_SEGMENT = re.compile(r"^[A-Z][A-Z0-9.\-]{0,9}$")
+
+
+def endpoint_family(path: str) -> str:
+    """'/api/darkpool/SPY' -> '/api/darkpool/{T}': the circuit breaker is keyed by endpoint family so a
+    provider-wide outage trips it once instead of every ticker paying every retry (J-P3)."""
+    return "/".join("{T}" if _TICKER_SEGMENT.match(seg) else seg for seg in path.split("/"))
+
+
 class CircuitBreaker:
     """Per-endpoint-path circuit breaker: after `threshold` consecutive
     failures (network error or 5xx/429 exhausting retries) to the SAME
@@ -219,12 +232,14 @@ class CircuitBreaker:
 
     def before_call(self, path: str, now: Optional[float] = None) -> None:
         now = time.monotonic() if now is None else now
+        path = endpoint_family(path)
         with self._lock:
             state = self._state[path]
             if state.open_until and now < state.open_until:
                 raise CircuitOpenError(path, state.open_until - now)
 
     def record_success(self, path: str) -> None:
+        path = endpoint_family(path)
         with self._lock:
             state = self._state[path]
             state.consecutive_failures = 0
@@ -232,6 +247,7 @@ class CircuitBreaker:
 
     def record_failure(self, path: str, now: Optional[float] = None) -> None:
         now = time.monotonic() if now is None else now
+        path = endpoint_family(path)
         with self._lock:
             state = self._state[path]
             state.consecutive_failures += 1
@@ -381,18 +397,21 @@ class UWRestClient:
         start = time.monotonic()
         while attempts < max_attempts:
             attempts += 1
+            network_error = None
             with self._gate.acquire(priority=uw_concurrency.current_priority()):
                 try:
                     resp = self.session.get(url, headers=self._headers(), params=clean_params, timeout=self.timeout)
                 except requests.RequestException as e:
-                    last_result = _unavailable(path, 0, f"{type(e).__name__}: {e}", ERROR)
-                    if attempts < max_attempts:
-                        self._sleep(self._backoff_delay(attempts - 1, None))
-                        continue
-                    self.circuit_breaker.record_failure(path)
-                    self.telemetry.record(RequestOutcome(path, None, "network_error", attempts,
-                                                           time.monotonic() - start, priority=_priority))
-                    return last_result
+                    network_error = e
+            if network_error is not None:                # the slot is released before any backoff sleep (J-P4)
+                last_result = _unavailable(path, 0, f"{type(network_error).__name__}: {network_error}", ERROR)
+                if attempts < max_attempts:
+                    self._sleep(self._backoff_delay(attempts - 1, None))
+                    continue
+                self.circuit_breaker.record_failure(path)
+                self.telemetry.record(RequestOutcome(path, None, "network_error", attempts,
+                                                       time.monotonic() - start, priority=_priority))
+                return last_result
 
             # 401/403 are DEFINITIVE, non-transient problems (bad
             # credentials / endpoint not on this tier) -- surfaced
@@ -411,8 +430,8 @@ class UWRestClient:
 
             if resp.status_code == 429:
                 last_result = _unavailable(path, 429, resp.text, ERROR)
-                if attempts < max_attempts:
-                    retry_after = self._parse_retry_after(resp)
+                retry_after = self._parse_retry_after(resp)
+                if attempts < max_attempts and (retry_after is None or retry_after <= MAX_RETRY_AFTER_S):
                     self._sleep(self._backoff_delay(attempts - 1, retry_after))
                     continue
                 self.circuit_breaker.record_failure(path)
@@ -439,14 +458,19 @@ class UWRestClient:
                                                        time.monotonic() - start, priority=_priority))
                 return _unavailable(path, resp.status_code, resp.text, ERROR)
 
+            try:
+                body = resp.json()
+            except ValueError:
+                # J-P2: an unparseable 200 is a provider failure, not a success
+                self.circuit_breaker.record_failure(path)
+                self.telemetry.record(RequestOutcome(path, resp.status_code, "malformed", attempts,
+                                                       time.monotonic() - start, priority=_priority))
+                return _unavailable(path, resp.status_code, resp.text, ERROR)
             self.circuit_breaker.record_success(path)
             outcome = "success" if attempts == 1 else "retried_success"
             self.telemetry.record(RequestOutcome(path, resp.status_code, outcome, attempts,
                                                    time.monotonic() - start, priority=_priority))
-            try:
-                return resp.json()
-            except ValueError:
-                return _unavailable(path, resp.status_code, resp.text, ERROR)
+            return body
 
         return last_result if last_result is not None else _unavailable(path, 0, "exhausted retries", ERROR)
 

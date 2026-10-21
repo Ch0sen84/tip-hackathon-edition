@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -59,7 +60,21 @@ def _parse_worker_count(raw: Optional[str]) -> Optional[int]:
         return None
 
 
-def detected_worker_count(env=None) -> int:
+def _workers_from_args(args) -> Optional[int]:
+    for i, a in enumerate(args):
+        value = None
+        if a in ("--workers", "-w"):
+            value = args[i + 1] if i + 1 < len(args) else ""
+        elif a.startswith("--workers="):
+            value = a.split("=", 1)[1]
+        elif a.startswith("-w") and len(a) > 2 and a[2:].isdigit():
+            value = a[2:]
+        if value is not None:
+            return _parse_worker_count(value) or 2
+    return None
+
+
+def detected_worker_count(env=None, argv=None) -> int:
     """Best-effort detection of how many worker processes this
     deployment is configured for. Returns 1 when nothing suggests
     otherwise (the honest default -- never guesses a bigger number than
@@ -71,18 +86,13 @@ def detected_worker_count(env=None) -> int:
         n = _parse_worker_count(env.get(name))
         if n is not None:
             counts.append(n)
-    cmd_args = env.get("GUNICORN_CMD_ARGS", "")
-    if "--workers" in cmd_args:
-        # GUNICORN_CMD_ARGS="--workers 4" style -- extract the integer
-        # that follows --workers if present; otherwise just flag >1 by
-        # treating an unparsed --workers as "at least 2" (fail safe, not
-        # fail open, when we can't parse the exact count).
-        parts = cmd_args.split()
-        try:
-            idx = parts.index("--workers")
-            counts.append(_parse_worker_count(parts[idx + 1]) or 2)
-        except (ValueError, IndexError):
-            counts.append(2)
+    # GUNICORN_CMD_ARGS ("--workers 4", "--workers=4", "-w 4", "-w4") and the process command line
+    # (uvicorn/gunicorn "--workers N" / "-w N"). An unparsable count is treated as "at least 2"
+    # (fail safe, not fail open). J-L2: "-w 4" and the command-line flag were previously missed.
+    for args in (env.get("GUNICORN_CMD_ARGS", "").split(), list(argv if argv is not None else sys.argv[1:])):
+        n = _workers_from_args(args)
+        if n is not None:
+            counts.append(n)
     if not counts:
         return 1
     return max(counts)

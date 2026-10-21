@@ -186,8 +186,11 @@ def test_a_retry_never_exceeds_the_page_budget_and_never_promotes(cat):
     uw = FaultyUW(darkpool=rows, faults={3: "above_cursor"})
     u = cover(uw, cat, pages=3)                                         # the bad page is the last one allowed
     assert uw.dp_calls == 3 and u.pages == 3
-    assert u.coverage["status"] == "unknown" and u.bounds_retries == 0
-    assert diags(cat)[-1]["action"] == "session_left_unknown"
+    # C-F7: the retry allowance was unused only because the budget ended -- not evidence of bad content,
+    # so the session stays re-walkable (partial), never unknown, and never promoted
+    assert u.coverage["status"] == "partial" and u.coverage["last_error"] == "page_budget_exhausted"
+    assert u.bounds_retries == 0
+    assert diags(cat)[-1]["action"] == "left_for_a_later_walk"
 
 
 def test_retries_zero_restores_the_previous_behaviour(cat, monkeypatch):
@@ -197,7 +200,7 @@ def test_retries_zero_restores_the_previous_behaviour(cat, monkeypatch):
     assert u.coverage["status"] == "unknown" and uw.dp_calls == 3
 
 
-def test_dense_same_second_boundaries_with_a_recovered_retry_skip_nothing(cat):
+def test_dense_same_second_boundaries_with_a_recovered_retry_skip_nothing(cat, no_gap_policy):
     rows = dense_day(per_second=31, every_minutes=1 / 60)               # 31 prints in every second
     uw = FaultyUW(darkpool=rows, faults={2: "at_cursor"})
     u = cover(uw, cat)
@@ -322,7 +325,8 @@ def test_migration_10_is_additive(cat):
         versions = [r[0] for r in conn.execute("SELECT version FROM schema_version ORDER BY version")]
         cols = [r[1] for r in conn.execute("PRAGMA table_info(collection_diagnostics)")]
         cov_cols = [r[1] for r in conn.execute("PRAGMA table_info(session_coverage)")]
-    assert versions == list(range(1, 11))
+    assert versions == list(range(1, 12))
     assert "detail_json" in cols
-    assert cov_cols == ["id", "dataset", "ticker", "session_date", "status", "covered_from_utc",
-                        "covered_through_utc", "pages_walked", "rows_seen", "last_error", "retrieved_at"]
+    # migration 10 did not touch session_coverage; migration 11 only APPENDS provenance columns
+    assert cov_cols[:11] == ["id", "dataset", "ticker", "session_date", "status", "covered_from_utc",
+                             "covered_through_utc", "pages_walked", "rows_seen", "last_error", "retrieved_at"]

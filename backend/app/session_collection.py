@@ -37,12 +37,17 @@ Coverage proof (no assumption that a print exists at the open)
   and a liquid session is COMPLETE only once every page has been walked.
 
 Status vocabulary (session_coverage.status) with reason codes (last_error):
-  complete     [open, close] provably collected
-  partial      a contiguous sub-interval only -- reasons:
-               session_in_progress | page_budget_exhausted
+  complete     [open, close] provably collected AND certified (core/coverage_policy):
+               walked entirely after close + settlement lag, gap check passed
+  partial      a contiguous sub-interval only, or a full interval not yet
+               certifiable -- reasons: session_in_progress | page_budget_exhausted |
+               awaiting_settlement | suspected_provider_gap
   unknown      coverage could not be established -- reasons:
                invalid_rows | bounds_not_honored | wrong_session_date |
-               rows_out_of_order | cursor_stuck | catalog_write_failed
+               rows_out_of_order | cursor_stuck
+  (a LOCAL catalog write failure is not a coverage finding: the collection
+   reports status "error" with detail catalog_write_failed and the stored
+   coverage is kept unchanged -- PE-P4)
   unavailable  the provider refuses this session -- reasons:
                provider_history_cutoff | not_entitled
 Transient provider failures (429/5xx/timeout/malformed) leave stored coverage
@@ -77,6 +82,21 @@ Resuming an interrupted walk (page budget)
   therefore re-reads that second (deduplicated) instead of skipping it. For
   flow (inclusive older_than) resume_from is the oldest instant itself and the
   resumed window [open, resume_from] re-reads it the same way.
+
+Settlement and provenance (Release 3, migration 11; core/coverage_policy.py)
+  An interval proven while the session was trading only extends FORWARD from
+  its checkpoint, so a print reported late -- after the walk had passed its
+  timestamp -- would never be fetched. A session is therefore certified only when
+  its whole [open, close] was walked at or after close + SETTLE_LAG
+  (`proof_started_utc` = earliest retrieval time of the contributing walks).
+  After settlement an earlier interval (walked before settlement, certified by
+  an earlier release, or withheld for a suspected gap) is not extended: it is
+  re-walked from scratch (rows are deduplicated; nothing is deleted or edited)
+  and the completed re-walk is logged in coverage_reconciliations with the
+  number of rows the earlier collection had missed. A full interval whose
+  longest row-free gap is implausible for the session's own activity rate is
+  withheld once (`suspected_provider_gap`) and certified only if a second,
+  independent walk reproduces the same gap (gap_flag 'confirmed').
 """
 from __future__ import annotations
 
@@ -90,6 +110,7 @@ from typing import Optional
 
 from .adapters.base import COLLECTION_OK
 from .adapters.live_uw_adapter import LiveUWAdapter, _normalize_flow_alert
+from .core import coverage_policy as policy
 from .core import trading_calendar as tc
 
 REPORTING_LAG = timedelta(seconds=60)  # newest minute of an open session may still be reported late
@@ -105,6 +126,7 @@ DIAGNOSTIC_SAMPLE_ROWS = 5
 # unknown reasons meaning the provider returned unusable content for the
 # session: backfills skip such sessions instead of re-walking them every step
 REJECTED_CONTENT_REASONS = ("invalid_rows", "bounds_not_honored", "wrong_session_date", "rows_out_of_order")
+REJECTED_RETRY_AFTER = timedelta(hours=24)
 _sleep = time.sleep          # patched by tests
 _log = logging.getLogger(__name__)
 
@@ -336,8 +358,9 @@ def _fetch_window(spec, client, catalog, ticker, session_date, lo, hi, budget, k
             detail_l = (detail or "").lower()
             if status == "unavailable_on_tier" and "historic" in detail_l:
                 return done("cutoff", "provider_history_cutoff")
-            if status in ("unavailable_on_tier", "unauthorized"):
-                return done("cutoff", "not_entitled", status)
+            # 401 / missing key / any other 403: a property of the CREDENTIAL or account at this moment,
+            # never of the session -- a failed collection that writes no coverage (key rotations, lapses
+            # and WAF blocks must not turn into permanently lost history)
             return done("failed", detail, status)
         data = body.get("data")
         if not isinstance(data, list):
@@ -361,7 +384,8 @@ def _fetch_window(spec, client, catalog, ticker, session_date, lo, hi, budget, k
                     "previous_page": {"oldest": _iso(prev_oldest) if prev_oldest else None,
                                       "newest_seen": _iso(newest_seen) if newest_seen else None},
                     "violations": page["violations"], "samples": page["samples"],
-                    "action": "retry_same_window" if will_retry else "session_left_unknown",
+                    "action": ("retry_same_window" if will_retry else
+                               "left_for_a_later_walk" if retries_left > 0 else "session_left_unknown"),
                     "retries_left_after": retries_left - 1 if will_retry else retries_left,
                 }
                 diag["classification"], diag["flags"] = _classify_violation(
@@ -374,6 +398,8 @@ def _fetch_window(spec, client, catalog, ticker, session_date, lo, hi, budget, k
                 if BOUNDS_RETRY_DELAY_S:
                     _sleep(BOUNDS_RETRY_DELAY_S)
                 continue                     # same lo/cursor; nothing from the rejected page was stored
+            if retries_left > 0:             # retry allowance unused only because the page budget ran out:
+                return done("budget", "page_budget_exhausted")   # not evidence of bad content
             return done("unverifiable", page["reason"])
         if attempt:
             recovered += 1
@@ -426,11 +452,25 @@ def _diagnostic_sink(catalog, kind: str):
     return sink
 
 
+def _session_times(catalog, dataset, ticker, open_utc, close_utc) -> list:
+    return [_parse(o.get("_event_time_utc")) for o in catalog.observations_between(dataset, ticker, open_utc, close_utc)]
+
+
+def _floor_second(dt: datetime) -> datetime:
+    return dt.replace(microsecond=0)
+
+
 def update_session_coverage(client, catalog, dataset: str, ticker: str, session_date: date,
                             now_utc: Optional[datetime] = None, max_pages: int = DEFAULT_SCAN_PAGES,
-                            kind: str = "on_demand") -> CoverageUpdate:
+                            kind: str = "on_demand", reverify: Optional[str] = None,
+                            preserve_on_incomplete: bool = False) -> CoverageUpdate:
     """Extend proven coverage of one session within `max_pages` requests.
-    Never raises on provider behaviour; never claims unproven coverage."""
+    Never raises on provider behaviour; never claims unproven coverage.
+
+    `reverify` (e.g. "operator") forces a fresh post-settlement walk even of a
+    certified session; with `preserve_on_incomplete` the stored coverage is
+    only replaced if that walk certifies the session (an unfinished or failed
+    reconciliation leaves the existing row untouched)."""
     spec = DATASETS[dataset]
     now_utc = now_utc or datetime.now(timezone.utc)
     sd = session_date.isoformat()
@@ -439,7 +479,10 @@ def update_session_coverage(client, catalog, dataset: str, ticker: str, session_
         return CoverageUpdate(dataset, ticker, sd, COLLECTION_OK, None, detail="not a trading session")
     open_utc = info.session_open_et.astimezone(timezone.utc)
     close_utc = info.session_close_et.astimezone(timezone.utc)
+    settle_at = close_utc + policy.SETTLE_LAG
     end = min(close_utc, now_utc - REPORTING_LAG)
+    if dataset == "darkpool":
+        end = _floor_second(end)              # second-resolution endpoint: never send fractional bounds
     if end <= open_utc:
         return CoverageUpdate(dataset, ticker, sd, COLLECTION_OK, catalog.get_session_coverage(dataset, ticker, sd),
                               detail="session has not opened yet")
@@ -447,12 +490,42 @@ def update_session_coverage(client, catalog, dataset: str, ticker: str, session_
     cov = catalog.get_session_coverage(dataset, ticker, sd) or {}
     if max_pages <= 0:                    # no budget: no request and no coverage write (keeps the checkpoint)
         return CoverageUpdate(dataset, ticker, sd, COLLECTION_OK, cov or None, detail="no page budget")
-    if cov.get("status") in ("unknown", "unavailable") and cov.get("last_error") in (
-            "provider_history_cutoff", "not_entitled"):
+    if cov.get("status") in ("unknown", "unavailable") and cov.get("last_error") == "provider_history_cutoff":
         return CoverageUpdate(dataset, ticker, sd, COLLECTION_OK, cov, detail=cov.get("last_error"))
+    if reverify and now_utc < settle_at:
+        return CoverageUpdate(dataset, ticker, sd, COLLECTION_OK, cov or None,
+                              detail="session not settled yet; reconciliation refused")
+    if policy.is_certified(cov) and not reverify:
+        return CoverageUpdate(dataset, ticker, sd, COLLECTION_OK, cov, detail="certified")
     usable = cov.get("status") in ("complete", "partial")
     c_from = _parse(cov.get("covered_from_utc")) if usable else None
     c_through = _parse(cov.get("covered_through_utc")) if usable else None
+    proof = _parse(cov.get("proof_started_utc")) if usable else None
+    i_from = _parse(cov.get("island_from_utc")) if usable else None
+    i_through = _parse(cov.get("island_through_utc")) if usable else None
+    if i_from is None or i_through is None or c_through is None:
+        i_from = i_through = None
+    carried = {"reverify_trigger": cov.get("reverify_trigger") if usable else None,
+               "rows_before_reverify": cov.get("rows_before_reverify") if usable else None,
+               "gap_flag": cov.get("gap_flag") if usable else None}
+
+    # after settlement an interval is only extended if it was itself walked after settlement
+    trigger = reverify
+    if trigger is None and usable and now_utc >= settle_at:
+        if policy.is_legacy_complete(cov):
+            trigger = "legacy"
+        elif cov.get("last_error") == "suspected_provider_gap":
+            trigger = "suspected_gap"
+        elif proof is None or proof < settle_at:
+            trigger = "unsettled"
+    if trigger is not None:
+        c_from = c_through = i_from = i_through = None
+        proof = now_utc
+        carried = {"reverify_trigger": trigger,
+                   "rows_before_reverify": len(_session_times(catalog, dataset, ticker, open_utc, close_utc)),
+                   "gap_flag": carried["gap_flag"] if trigger in ("suspected_gap", "operator") else None}
+    elif proof is None:
+        proof = now_utc
 
     budget, pages, rows = max_pages, 0, 0
     reason = None
@@ -468,44 +541,104 @@ def update_session_coverage(client, catalog, dataset: str, ticker: str, session_
     def result(*a, **k):
         return CoverageUpdate(*a, **k, **retry_stats)
 
-    def store(cov_status, frm, thr, why):
-        catalog.upsert_session_coverage(dataset, ticker, sd, cov_status, frm.isoformat() if frm else None,
-                                        thr.isoformat() if thr else None, pages, rows, why, kind=kind)
+    def reconciliation(outcome, rows_after=None, detail=None):
+        if carried["reverify_trigger"]:
+            catalog.record_coverage_reconciliation(
+                dataset, ticker, sd, carried["reverify_trigger"], carried["rows_before_reverify"], rows_after,
+                outcome, policy.CERTIFIER if outcome == "certified" else None, detail, kind=kind)
 
-    # 1) newest gap: (c_through, end], or the whole [open, end] if nothing usable yet
-    top_lo = c_through if c_through is not None else open_utc
+    def store(cov_status, frm, thr, why, certification=None):
+        if preserve_on_incomplete and cov_status != "complete":
+            reconciliation("not_certified_left_unchanged", detail={"status": cov_status, "reason": why})
+            return
+        keep = cov_status in ("complete", "partial")
+        island = keep and cov_status == "partial" and i_from is not None and i_through is not None
+        prov = {"proof_started_utc": proof.isoformat() if proof and keep else None,
+                "island_from_utc": i_from.isoformat() if island else None,
+                "island_through_utc": i_through.isoformat() if island else None,
+                **(carried if keep else {}), **(certification or {})}
+        catalog.upsert_session_coverage(dataset, ticker, sd, cov_status, frm.isoformat() if frm else None,
+                                        thr.isoformat() if thr else None, pages, rows, why, kind=kind,
+                                        provenance=prov)
+
+    def current():
+        return catalog.get_session_coverage(dataset, ticker, sd)
+
+    # 1) newest gap: (top of proven data, end], or the whole [open, end] if nothing usable yet
+    upper = i_through if i_through is not None else c_through
+    top_lo = upper if upper is not None else open_utc
     # [open, close] is INCLUSIVE (the baseline reads event_time <= close): at the close, an exclusive
     # upper bound (dark pool) must sit one cursor step above it or prints stamped at the close are lost
     top_hi = end + spec.cursor_step if end >= close_utc else end
-    if c_through is None or c_through < end:
+    if upper is None or upper < end:
         w = counted(_fetch_window(spec, client, catalog, ticker, session_date, top_lo, top_hi, budget, kind, sink))
         pages += w["pages"]; rows += w["rows"]; budget -= w["pages"]
         if w["outcome"] == "failed":
+            if preserve_on_incomplete:
+                reconciliation("not_certified_left_unchanged", detail={"status": w["status"], "reason": w["reason"]})
             return result(dataset, ticker, sd, w["status"], cov or None, pages=pages, rows_fetched=rows,
                           detail=w["reason"])
         if w["outcome"] == "cutoff":
             store("unavailable", None, None, w["reason"])
-            return result(dataset, ticker, sd, w["status"], catalog.get_session_coverage(dataset, ticker, sd),
-                          pages=pages, rows_fetched=rows, detail=w["reason"])
+            return result(dataset, ticker, sd, w["status"], current(), pages=pages, rows_fetched=rows,
+                          detail=w["reason"])
+        if w["outcome"] == "unverifiable" and w["reason"] == "catalog_write_failed":
+            return result(dataset, ticker, sd, "error", cov or None, pages=pages, rows_fetched=rows,
+                          detail="catalog_write_failed: local storage refused the rows; proven coverage kept")
         if w["outcome"] == "unverifiable":
             store("unknown", None, None, w["reason"])
-            return result(dataset, ticker, sd, COLLECTION_OK, catalog.get_session_coverage(dataset, ticker, sd),
-                          pages=pages, rows_fetched=rows, detail=w["reason"])
+            return result(dataset, ticker, sd, COLLECTION_OK, current(), pages=pages, rows_fetched=rows,
+                          detail=w["reason"])
         if w["outcome"] == "exhausted":
             if c_through is None:
                 c_from, c_through = open_utc, end
+            elif i_through is not None:
+                i_through = end                          # the island now reaches the live edge
             else:
                 c_through = end
-        else:  # budget: newest island [resume_from, end] (rows stay cataloged; older part re-walked later)
+        else:  # budget: newest island [resume_from, end] (rows stay cataloged; the gap below is filled later)
             resume = w["resume_from"]
             if resume is None:                           # defensive: no accepted page, nothing new proven
+                if preserve_on_incomplete:
+                    reconciliation("not_certified_left_unchanged", detail={"reason": w["reason"]})
                 return result(dataset, ticker, sd, COLLECTION_OK, cov or None, pages=pages, rows_fetched=rows,
                               detail=w["reason"])
-            if c_through is not None and resume <= c_through:
-                c_through = end                          # the island reaches the old checkpoint: contiguous
+            if c_through is None:
+                c_from, c_through = resume, end          # nothing proven yet: the island is the interval
+            elif i_through is not None and resume <= i_through:
+                i_through = end                          # reaches the existing island: it grows upward
+            elif i_through is None and resume <= c_through:
+                c_through = end                          # reaches the proven interval: contiguous
             else:
-                c_from, c_through = resume, end          # a gap may remain below the island: re-walked later
+                # C-F8: never discard the proven (from-open) interval; remember ONE island above it.
+                # An older island is dropped (its rows stay cataloged and are re-read by the gap fill).
+                i_from, i_through = resume, end
             reason = w["reason"]
+
+    # 1b) gap between the proven interval and the island: [c_through, i_from)
+    if i_from is not None and c_through is not None and budget > 0:
+        w = counted(_fetch_window(spec, client, catalog, ticker, session_date, c_through, i_from, budget, kind, sink))
+        pages += w["pages"]; rows += w["rows"]; budget -= w["pages"]
+        if w["outcome"] == "exhausted":
+            c_through, i_from, i_through = i_through, None, None
+        elif w["outcome"] == "budget":
+            if w["resume_from"] is not None:
+                i_from = w["resume_from"] if w["resume_from"] > c_through else i_from
+                if i_from <= c_through:
+                    c_through, i_from, i_through = i_through, None, None
+            reason = w["reason"]
+        elif w["outcome"] == "failed" or (w["outcome"] == "unverifiable" and w["reason"] == "catalog_write_failed"):
+            status, reason = (w["status"], w["reason"]) if w["outcome"] == "failed" else ("error", w["reason"])
+        elif w["outcome"] == "unverifiable":
+            store("unknown", None, None, w["reason"])
+            return result(dataset, ticker, sd, COLLECTION_OK, current(), pages=pages, rows_fetched=rows,
+                          detail=w["reason"])
+        else:
+            store("unavailable", None, None, w["reason"])
+            return result(dataset, ticker, sd, w["status"], current(), pages=pages, rows_fetched=rows,
+                          detail=w["reason"])
+    elif i_from is not None:
+        reason = reason or "page_budget_exhausted"
 
     # 2) backward gap: [open, c_from)
     if c_from is not None and c_from > open_utc and budget > 0:
@@ -517,28 +650,44 @@ def update_session_coverage(client, catalog, dataset: str, ticker: str, session_
         elif w["outcome"] == "budget":
             c_from = min(c_from, w["resume_from"]) if w["resume_from"] else c_from
             reason = w["reason"]
-        elif w["outcome"] == "failed":
-            status, reason = w["status"], w["reason"]   # keep what was proven so far
+        elif w["outcome"] == "failed" or (w["outcome"] == "unverifiable" and w["reason"] == "catalog_write_failed"):
+            # keep what was proven so far (a local write failure is not evidence about the provider)
+            status, reason = (w["status"], w["reason"]) if w["outcome"] == "failed" else ("error", w["reason"])
         elif w["outcome"] == "unverifiable":
             store("unknown", None, None, w["reason"])
-            return result(dataset, ticker, sd, COLLECTION_OK, catalog.get_session_coverage(dataset, ticker, sd),
-                          pages=pages, rows_fetched=rows, detail=w["reason"])
+            return result(dataset, ticker, sd, COLLECTION_OK, current(), pages=pages, rows_fetched=rows,
+                          detail=w["reason"])
         else:  # cutoff
             store("unavailable", None, None, w["reason"])
-            return result(dataset, ticker, sd, w["status"], catalog.get_session_coverage(dataset, ticker, sd),
-                          pages=pages, rows_fetched=rows, detail=w["reason"])
+            return result(dataset, ticker, sd, w["status"], current(), pages=pages, rows_fetched=rows,
+                          detail=w["reason"])
     elif c_from is not None and c_from > open_utc:
         reason = reason or "page_budget_exhausted"
 
+    certification = None
     if c_from is not None and c_from <= open_utc and c_through is not None and c_through >= close_utc:
-        cov_status, why = "complete", None
+        if proof < settle_at:
+            cov_status, why = "partial", "awaiting_settlement"
+        else:
+            times = _session_times(catalog, dataset, ticker, open_utc, close_utc)
+            max_gap, implausible = policy.gap_assessment(times, open_utc, close_utc)
+            if implausible and carried["gap_flag"] not in ("suspected", "confirmed"):
+                cov_status, why = "partial", "suspected_provider_gap"
+                reconciliation("suspected_provider_gap", len(times), {"max_gap_s": max_gap})
+                carried.update(gap_flag="suspected", reverify_trigger=None, rows_before_reverify=None)
+            else:
+                cov_status, why = "complete", None
+                reconciliation("certified", len(times), {"max_gap_s": max_gap})
+                certification = {"certified_by": policy.CERTIFIER, "certified_at_utc": now_utc.isoformat(),
+                                 "session_rows": len(times), "max_gap_s": max_gap,
+                                 "gap_flag": "confirmed" if implausible else None,
+                                 "reverify_trigger": None, "rows_before_reverify": None}
     else:
         cov_status = "partial"
         why = reason or ("session_in_progress" if c_through is not None and c_through < close_utc
                          else "page_budget_exhausted")
-    store(cov_status, c_from, c_through, why)
-    return result(dataset, ticker, sd, status, catalog.get_session_coverage(dataset, ticker, sd),
-                          pages=pages, rows_fetched=rows, detail=why)
+    store(cov_status, c_from, c_through, why, certification)
+    return result(dataset, ticker, sd, status, current(), pages=pages, rows_fetched=rows, detail=why)
 
 
 def backfill_baseline(client, catalog, dataset: str, ticker: str, evidence_session: date,
@@ -564,7 +713,7 @@ def backfill_baseline(client, catalog, dataset: str, ticker: str, evidence_sessi
 
     if tc.is_trading_day(evidence_session):
         cov = catalog.get_session_coverage(dataset, ticker, evidence_session.isoformat()) or {}
-        if budget > 0 and cov.get("status") not in ("complete", "unavailable"):
+        if budget > 0 and not policy.is_certified(cov) and cov.get("status") != "unavailable":
             u, cov = touch(evidence_session)
             if not u.ok:
                 return _backfill_result(catalog, dataset, ticker, evidence_session, max_pages, budget, results)
@@ -574,8 +723,9 @@ def backfill_baseline(client, catalog, dataset: str, ticker: str, evidence_sessi
         if budget <= 0:
             break
         cov = catalog.get_session_coverage(dataset, ticker, d.isoformat()) or {}
-        if cov.get("status") in ("complete", "unavailable") or (
-                cov.get("status") == "unknown" and cov.get("last_error") in REJECTED_CONTENT_REASONS):
+        if policy.is_certified(cov) or cov.get("status") == "unavailable" or (
+                cov.get("status") == "unknown" and cov.get("last_error") in REJECTED_CONTENT_REASONS
+                and not _rejection_expired(cov, now_utc)):
             if cov.get("status") == "unavailable":
                 break  # history cutoff: older sessions are unavailable too
             continue
@@ -585,8 +735,15 @@ def backfill_baseline(client, catalog, dataset: str, ticker: str, evidence_sessi
     return _backfill_result(catalog, dataset, ticker, evidence_session, max_pages, budget, results)
 
 
+def _rejection_expired(cov: dict, now_utc: datetime) -> bool:
+    """A session left unknown for rejected provider content is skipped by backfills, but only for
+    REJECTED_RETRY_AFTER: a transient provider fault must not exclude it forever (C-F7)."""
+    at = _parse(cov.get("retrieved_at"))
+    return at is None or now_utc - at >= REJECTED_RETRY_AFTER
+
+
 def _backfill_result(catalog, dataset, ticker, evidence_session, max_pages, budget, results):
     complete = sum(1 for c in catalog.list_session_coverage(dataset, ticker)
-                   if c["status"] == "complete" and c["session_date"] < evidence_session.isoformat())
+                   if policy.is_certified(c) and c["session_date"] < evidence_session.isoformat())
     return {"dataset": dataset, "ticker": ticker, "pages_used": max_pages - max(budget, 0),
             "sessions_touched": results, "complete_prior_sessions": complete}

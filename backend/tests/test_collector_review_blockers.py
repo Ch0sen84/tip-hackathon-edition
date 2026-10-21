@@ -181,8 +181,11 @@ def test_b2_budget_exhaustion_during_recovery_is_never_complete(cat):
     uw = FaultyUW(darkpool=rows, faults={2: "above_cursor", 4: "above_cursor"})
     u = cover(uw, cat, pages=4)                                     # 4th request is the 2nd bad page; no budget left
     assert uw.dp_calls == 4 and u.pages == 4
-    assert u.coverage["status"] == "unknown" and u.bounds_retries == 1 and u.bounds_recovered == 1
-    assert diags(cat)[-1]["action"] == "session_left_unknown"
+    # never complete; the 2nd bad page could not be retried only because the budget ended (C-F7): the
+    # session stays re-walkable (partial), it is not condemned as rejected content
+    assert u.coverage["status"] == "partial" and u.coverage["last_error"] == "page_budget_exhausted"
+    assert u.bounds_retries == 1 and u.bounds_recovered == 1
+    assert diags(cat)[-1]["action"] == "left_for_a_later_walk"
 
 
 # --- B3: exact page budget --------------------------------------------------------------
@@ -215,7 +218,7 @@ def test_b3_reviewer_repro_a_job_never_exceeds_its_page_cap(live, cap):
     """Reviewer: cap 11 -> step 1 = 10, step 2 gave BOTH datasets 1 page -> 12."""
     uw = live.use_uw(both_datasets_uw())
     client = TestClient(live.app)
-    job = client.post("/api/baseline/jobs", json={"tickers": ["ABCD"], "step_pages": 10,
+    job = client.post("/api/baseline/jobs", json={"confirm": True, "tickers": ["ABCD"], "step_pages": 10,
                                                   "max_pages_per_ticker": cap}).json()["job"]
     live.get_baseline_job_runner().join(60)
     j = live.get_baseline_job_store().get(job["id"])
@@ -304,7 +307,7 @@ def test_b3_logical_pages_and_http_attempts_are_reported_separately(live):
         dp += session_prints("ABCD", d, 10_000.0)
     uw = live.use_uw(FlakyTransportUW(darkpool=dp, static={"stock-state": STATE, "flow-alerts": FakeResponse(200, {"data": []})}))
     client = TestClient(live.app)
-    job = client.post("/api/baseline/jobs", json={"tickers": ["ABCD"], "step_pages": 10,
+    job = client.post("/api/baseline/jobs", json={"confirm": True, "tickers": ["ABCD"], "step_pages": 10,
                                                   "max_pages_per_ticker": 15}).json()["job"]
     live.get_baseline_job_runner().join(60)
     j = live.get_baseline_job_store().get(job["id"])
@@ -317,7 +320,7 @@ def test_b3_logical_pages_and_http_attempts_are_reported_separately(live):
 def test_b3_cumulative_accounting_per_dataset_and_http_attempts(live):
     uw = live.use_uw(both_datasets_uw())
     client = TestClient(live.app)
-    job = client.post("/api/baseline/jobs", json={"tickers": ["ABCD"], "step_pages": 10,
+    job = client.post("/api/baseline/jobs", json={"confirm": True, "tickers": ["ABCD"], "step_pages": 10,
                                                   "max_pages_per_ticker": 37}).json()["job"]
     live.get_baseline_job_runner().join(60)
     j = live.get_baseline_job_store().get(job["id"])

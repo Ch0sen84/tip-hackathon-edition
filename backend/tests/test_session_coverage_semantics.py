@@ -47,8 +47,11 @@ def test_early_close_session_is_complete_at_its_own_1pm_close(cat):
     day_after = date(2026, 11, 27)
     uw = PaginatedUW(darkpool=session_prints("ABCD", day_after, 1.0, end=time(13, 0)))
     u = cover(uw, cat, "darkpool", day_after, now=datetime(2026, 11, 27, 19, 0, tzinfo=timezone.utc))
-    assert u.coverage["status"] == "complete"
+    assert u.coverage["status"] == "partial" and u.coverage["last_error"] == "awaiting_settlement"
     assert u.coverage["covered_through_utc"].startswith("2026-11-27T18:00")   # 13:00 ET
+    u = cover(uw, cat, "darkpool", day_after, now=datetime(2026, 11, 27, 22, 0, tzinfo=timezone.utc))
+    assert u.coverage["status"] == "complete"                  # settled: certified at its own 1pm close
+    assert u.coverage["covered_through_utc"].startswith("2026-11-27T18:00")
 
 
 def test_quiet_session_with_no_print_at_the_open_is_complete(cat):
@@ -58,7 +61,7 @@ def test_quiet_session_with_no_print_at_the_open_is_complete(cat):
     assert u.coverage["status"] == "complete" and u.coverage["rows_seen"] == 3
 
 
-def test_session_with_zero_prints_is_complete_but_pre_listing_sessions_are_not_baseline(cat):
+def test_session_with_zero_prints_is_complete_but_pre_listing_sessions_are_not_baseline(cat, no_gap_policy):
     """Verified: a bounded, date-scoped window answered with [] is exhausted.
     Sessions before a ticker's first observed activity (e.g. pre-IPO) are
     excluded from the baseline so a new listing cannot look anomalous."""
@@ -142,7 +145,9 @@ def test_current_session_is_partial_until_after_the_close(cat):
     mid = cover(uw, cat, "darkpool", EVIDENCE, now=datetime(2026, 10, 16, 17, 0, tzinfo=timezone.utc))
     assert mid.coverage["status"] == "partial" and mid.coverage["last_error"] == "session_in_progress"
     after = cover(uw, cat, "darkpool", EVIDENCE, now=datetime(2026, 10, 16, 21, 0, tzinfo=timezone.utc))
-    assert after.coverage["status"] == "complete"
+    assert after.coverage["status"] == "partial" and after.coverage["last_error"] == "awaiting_settlement"
+    settled = cover(uw, cat, "darkpool", EVIDENCE, now=datetime(2026, 10, 17, 1, 0, tzinfo=timezone.utc))
+    assert settled.coverage["status"] == "complete" and settled.coverage["certified_by"]
 
 
 def test_partial_sessions_are_never_baseline_eligible(cat):

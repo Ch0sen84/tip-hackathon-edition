@@ -175,7 +175,7 @@ def test_update_check_route_returns_unable_to_check_on_mocked_failure(app_main, 
     monkeypatch.setenv("TIP_VERSION_FILE", str(f))
     client = TestClient(app_main.app)
     with patch.object(update_check.requests, "get", side_effect=requests.ConnectionError("down")):
-        resp = client.get("/api/settings/update-check")
+        resp = client.post("/api/settings/update-check")
     assert resp.status_code == 200
     assert resp.json()["status"] == update_check.STATUS_UNABLE_TO_CHECK
 
@@ -185,6 +185,6 @@ def test_update_check_route_unknown_version_when_nothing_baked_in(app_main, tmp_
     monkeypatch.setenv("TIP_VERSION_FILE", str(tmp_path / "missing"))
     monkeypatch.delenv("TIP_BUILD_COMMIT", raising=False)
     client = TestClient(app_main.app)
-    resp = client.get("/api/settings/update-check")
+    resp = client.post("/api/settings/update-check")
     assert resp.status_code == 200
     assert resp.json()["status"] == update_check.STATUS_UNKNOWN_VERSION

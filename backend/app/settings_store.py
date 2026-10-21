@@ -18,8 +18,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from threading import Lock
 from typing import Optional
@@ -101,6 +103,22 @@ def hash_key(api_key: Optional[str]) -> Optional[str]:
     return hashlib.sha256(api_key.encode("utf-8")).hexdigest()
 
 
+_log = logging.getLogger(__name__)
+
+
+def _fsync_dir(path: Path) -> None:
+    try:
+        fd = os.open(path, os.O_RDONLY)
+    except OSError:
+        return                                      # not supported (e.g. Windows): best effort
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
+
+
 class SettingsStore:
     """Thread-safe (within one process) JSON file store. One instance is
     created in main.py; tests may point a fresh instance at a tmp_path file
@@ -109,14 +127,33 @@ class SettingsStore:
     def __init__(self, path: str | os.PathLike):
         self.path = Path(path)
         self._lock = Lock()
+        self.recovery_notice: Optional[str] = None
+
+    def _quarantine(self, why: str) -> None:
+        """A settings file that cannot be read is MOVED aside, never overwritten: the saved keys stay
+        recoverable from the copy and the problem is surfaced (GET /api/settings -> settings_warning)."""
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        aside = self.path.with_name(f"{self.path.name}.corrupt-{stamp}")
+        try:
+            os.replace(self.path, aside)
+            self.recovery_notice = (f"settings file was unreadable ({why}); it was preserved as {aside.name} "
+                                    "and defaults are in use -- re-enter credentials or restore that file")
+        except OSError as exc:
+            self.recovery_notice = f"settings file is unreadable ({why}) and could not be moved aside: {exc}"
+        _log.error("settings: %s", self.recovery_notice)
 
     def _read(self) -> dict:
         if not self.path.exists():
             return _defaults()
         try:
-            with open(self.path, "r") as f:
+            with open(self.path, "r", encoding="utf-8") as f:
                 raw = json.load(f)
-        except (OSError, json.JSONDecodeError):
+            if not isinstance(raw, dict):
+                raise ValueError(f"top-level JSON is {type(raw).__name__}, not an object")
+        except FileNotFoundError:
+            return _defaults()
+        except (OSError, ValueError, UnicodeDecodeError) as exc:   # JSONDecodeError is a ValueError
+            self._quarantine(f"{type(exc).__name__}: {str(exc)[:120]}")
             return _defaults()
         data = _defaults()
         for key in _FIELDS:
@@ -129,13 +166,18 @@ class SettingsStore:
     def _write(self, data: dict) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         tmp_path = self.path.with_suffix(self.path.suffix + ".tmp")
-        with open(tmp_path, "w") as f:
+        # 0600 from creation (no window in which the keys are world-readable), fsync before the rename
+        fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump({k: data.get(k) for k in _FIELDS}, f)
+            f.flush()
+            os.fsync(f.fileno())
         os.replace(tmp_path, self.path)
         try:
             os.chmod(self.path, 0o600)
         except OSError:
             pass  # best-effort on platforms/filesystems that don't support chmod
+        _fsync_dir(self.path.parent)
 
     def get_all(self) -> dict:
         with self._lock:

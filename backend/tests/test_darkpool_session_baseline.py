@@ -261,7 +261,13 @@ def test_scheduler_runs_backfill_only_on_evaluating_cycles(tmp_path):
                              run_ticker_scan=lambda a, t: {}, run_baseline_backfill=lambda a: calls.append(a) or {"ok": 1})
     runner.run_once_with_depth("discovery_only")
     assert calls == []
-    out = runner.run_once_with_depth("discovery_plus_evaluation")
+    # FE-F3: a one-time "Discover & Evaluate Once" never runs the undisclosed historical backfill
+    runner.run_once_with_depth("discovery_plus_evaluation")
+    assert calls == []
+    # only a RECURRING evaluating cycle (mode enabled, explicitly armed) backfills
+    from datetime import datetime, timezone
+    runner.store.set_mode("enabled", actor="test")
+    runner._run_cycle(evaluate=True, now=datetime.now(timezone.utc), persist_next_run=True, reported_mode="enabled")
     assert len(calls) == 1
 
 

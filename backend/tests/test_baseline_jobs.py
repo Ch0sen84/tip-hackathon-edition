@@ -69,7 +69,7 @@ def live(app_main, monkeypatch, tmp_path):
 
 
 def run_job(m, client, **body):
-    job = client.post("/api/baseline/jobs", json={"tickers": ["ABCD"], "step_pages": 20, **body}).json()["job"]
+    job = client.post("/api/baseline/jobs", json={"confirm": True, "tickers": ["ABCD"], "step_pages": 20, **body}).json()["job"]
     m.get_baseline_job_runner().join(JOB_STOP_TIMEOUT_S)
     assert not m.get_baseline_job_runner().is_running(), "job did not finish within the timeout"
     return m.get_baseline_job_store().get(job["id"])
@@ -182,15 +182,15 @@ def test_one_active_job_live_only_and_auth_required(live, monkeypatch):
     client = TestClient(live.app)
     store = live.get_baseline_job_store()
     store.create(["ABCD"], 400, 20, requested_by="user")            # an active (running) job exists
-    assert client.post("/api/baseline/jobs", json={"tickers": ["ABCD"]}).status_code == 409
+    assert client.post("/api/baseline/jobs", json={"confirm": True, "tickers": ["ABCD"]}).status_code == 409
     anon = TestClient(live.app)
     anon.headers.pop("X-TIP-Auth", None)
-    assert anon.post("/api/baseline/jobs", json={"tickers": ["ABCD"]}).status_code == 401
+    assert anon.post("/api/baseline/jobs", json={"confirm": True, "tickers": ["ABCD"]}).status_code == 401
     assert anon.get("/api/baseline/overview").status_code == 401
     from app.adapters.synthetic_adapter import SyntheticDataAdapter
     monkeypatch.setattr(live, "get_adapter", lambda: SyntheticDataAdapter(live.settings.fixtures_dir))
     assert client.post("/api/baseline/jobs/1/cancel").status_code == 200    # cancel never needs Live
-    assert client.post("/api/baseline/jobs", json={"tickers": ["ABCD"]}).status_code == 400
+    assert client.post("/api/baseline/jobs", json={"confirm": True, "tickers": ["ABCD"]}).status_code == 400
 
 
 def test_job_and_interactive_refreshes_never_write_one_tickers_coverage_concurrently(live, monkeypatch, tmp_path):
@@ -213,7 +213,7 @@ def test_job_and_interactive_refreshes_never_write_one_tickers_coverage_concurre
                 active["n"] -= 1
 
     monkeypatch.setattr(session_collection, "update_session_coverage", tracked)
-    job = client.post("/api/baseline/jobs", json={"tickers": ["ABCD"], "step_pages": 10,
+    job = client.post("/api/baseline/jobs", json={"confirm": True, "tickers": ["ABCD"], "step_pages": 10,
                                                   "max_pages_per_ticker": 400}).json()["job"]
     for _ in range(4):
         assert client.post("/api/ticker/ABCD/refresh").status_code in (200, 409)
@@ -238,7 +238,7 @@ def test_default_step_bounds_requests_after_a_pause_to_ten(live, monkeypatch):
 
     monkeypatch.setattr(live, "_baseline_job_step", step_then_pause)
     live._baseline_job_runner = None
-    job = client.post("/api/baseline/jobs", json={"tickers": ["ABCD"]}).json()["job"]
+    job = client.post("/api/baseline/jobs", json={"confirm": True, "tickers": ["ABCD"]}).json()["job"]
     assert job["step_pages"] == baseline_jobs.DEFAULT_STEP_PAGES == 10
     live.get_baseline_job_runner().join(60)
     final = live.get_baseline_job_store().get(job["id"])

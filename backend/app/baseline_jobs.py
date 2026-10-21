@@ -37,6 +37,7 @@ from __future__ import annotations
 import json
 import logging
 import threading
+import time
 from datetime import datetime, timezone
 from typing import Callable, Optional
 
@@ -163,8 +164,12 @@ class BaselineJobRunner:
     def is_running(self) -> bool:
         return self._thread is not None and self._thread.is_alive()
 
-    def start(self, job_id: int) -> bool:
+    def start(self, job_id: int, wait_s: float = 5.0) -> bool:
+        """Starts the job thread. A previous thread that is only finishing (its final status is already
+        written) is waited for up to `wait_s` instead of being treated as busy (J1/J2)."""
         with self._lock:
+            if self.is_running():
+                self._thread.join(wait_s)
             if self.is_running():
                 return False
             self._thread = threading.Thread(target=self._run, args=(job_id,), name=f"baseline-job-{job_id}",
@@ -201,14 +206,42 @@ class BaselineJobRunner:
             return "history_cutoff"
         return None
 
+    def _settle_after_failure(self, job_id: int, last_error: str) -> None:
+        """A failed step never overrides the user's Cancel (J3), and a database error while recording the
+        failure is retried rather than leaving the job 'running' with no thread (J4; the watchdog in
+        reconcile_orphans covers anything left)."""
+        for attempt in range(3):
+            try:
+                if self.store.transition(job_id, ("cancel_requested",), "cancelled") is None:
+                    self.store.transition(job_id, ("running", "pause_requested"), "paused")
+                self.store.update(job_id, last_error=last_error)
+                return
+            except Exception:  # noqa: BLE001
+                _log.exception("baseline job %s: could not record the failure (attempt %s)", job_id, attempt + 1)
+                time.sleep(0.5 * (attempt + 1))
+
+    def reconcile_orphans(self) -> None:
+        """Watchdog: a job recorded as active while no job thread is alive (a crash between status writes,
+        a failed start) is put back to a resumable or final state, never left 'running' forever."""
+        if self.is_running():
+            return
+        job = self.store.latest()
+        if not job:
+            return
+        if job["status"] == "cancel_requested":
+            self.store.transition(job["id"], ("cancel_requested",), "cancelled")
+        elif job["status"] in ("running", "pause_requested"):
+            if self.store.transition(job["id"], ("running", "pause_requested"), "paused") is not None:
+                self.store.update(job["id"], last_error="paused: the job worker was not running -- resume to continue")
+
     def _run(self, job_id: int) -> None:
         try:
             self._loop(job_id)
         except JobBlocked as exc:
-            self.store.update(job_id, status="paused", last_error=str(exc))
+            self._settle_after_failure(job_id, str(exc))
         except Exception as exc:  # noqa: BLE001 -- never leave a job stuck "running"
             _log.exception("baseline job %s crashed", job_id)
-            self.store.update(job_id, status="paused", last_error=f"internal error: {exc}")
+            self._settle_after_failure(job_id, f"internal error: {exc}")
             if self.on_error:
                 self.on_error(exc)
 

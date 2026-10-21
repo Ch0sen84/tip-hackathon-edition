@@ -180,12 +180,28 @@ class SchedulerRunner:
             self._thread.join(timeout=timeout)
 
     def _loop(self) -> None:
+        # S4: a persisted dry_run/enabled mode never makes a provider request at process start: the first
+        # recurring cycle is at least one full interval after boot (a restart is not a user action).
+        boot_quiet_until = self._now_fn().timestamp() + self.scan_interval_s
         while not self._stop.is_set():
             try:
-                self.run_one_cycle_if_due()
+                if self._now_fn().timestamp() >= boot_quiet_until:
+                    self.run_one_cycle_if_due()
             except Exception:  # noqa: BLE001 -- the loop must never die from one bad cycle
                 logger.exception("scheduler: cycle failed")
             self._stop.wait(self.poll_interval_s)
+
+    def _abort_reason(self, recurring: bool, started_mode: Optional[str]) -> Optional[str]:
+        """Checked before every unit of provider work in a cycle (S1/S2)."""
+        if self._stop.is_set():
+            return "scheduler stopping"
+        if recurring:
+            mode = self.store.get_mode()
+            if mode != started_mode:
+                return f"mode changed to {mode!r} during the cycle"
+        if not self._ensure_lease(self._now_fn()):
+            return "lease lost during the cycle"
+        return None
 
     # --- the actual decision + one cycle ---------------------------------
 
@@ -266,7 +282,10 @@ class SchedulerRunner:
         try:
             if not self._ensure_lease(now):
                 return {"ran": False, "reason": "lease_not_held", "triggered_by": "run_once"}
-            outcome = self._run_cycle(evaluate=(mode == "enabled"), now=now, persist_next_run=True, reported_mode=mode)
+            # FE-F3: a manual run is never treated as a recurring cycle (no historical backfill, no
+            # mode-change abort) even though it keeps the legacy next_run_at bookkeeping.
+            outcome = self._run_cycle(evaluate=(mode == "enabled"), now=now, persist_next_run=True, reported_mode=mode,
+                                      manual=True)
             outcome["triggered_by"] = "run_once"
             return outcome
         finally:
@@ -341,7 +360,7 @@ class SchedulerRunner:
         return False
 
     def _run_cycle(self, evaluate: bool, now: datetime, persist_next_run: bool = True,
-                   reported_mode: Optional[str] = None) -> dict:
+                   reported_mode: Optional[str] = None, manual: bool = False) -> dict:
         """The one real cycle body, shared by every trigger path
         (automatic loop, legacy run_once, and the new decoupled
         run_once_with_depth). `evaluate` replaces the old `mode ==
@@ -359,10 +378,16 @@ class SchedulerRunner:
         candidates_evaluated = 0
         pause_reason = None
         backfill_result = None
+        recurring = (not manual) and persist_next_run and reported_mode in ("dry_run", "enabled")
+        lease_lost = False
         try:
             with uw_concurrency.background_priority():
                 disc = discovery_module.run_discovery(adapter, {})
             candidates = disc.get("candidates") or []
+            if disc.get("unavailable"):
+                # S3: a failed screener is a failed cycle, never an empty market snapshot
+                pause_reason = f"discovery unavailable: {disc.get('reason') or 'provider failure'}"
+                candidates = []
             # QA remediation D3: this snapshot persistence is now gated to
             # exclude a real SyntheticDataAdapter (demo mode) -- SAME
             # Demo/Live separation intent app/main.py's
@@ -380,7 +405,7 @@ class SchedulerRunner:
             # synthetic candidates into the SAME discovery_snapshots/
             # discovery_candidates tables Live data relies on --
             # contaminating real historical data with synthetic rows.
-            if not isinstance(adapter, SyntheticDataAdapter):
+            if not isinstance(adapter, SyntheticDataAdapter) and not pause_reason:
                 try:
                     catalog.catalog_discovery_snapshot(
                         filters={}, candidates=candidates, snapshot_at=disc.get("snapshot_at") or now.isoformat(),
@@ -396,6 +421,11 @@ class SchedulerRunner:
                     ticker = c.get("ticker")
                     if not ticker:
                         continue
+                    abort = self._abort_reason(recurring, reported_mode)
+                    if abort:
+                        pause_reason = abort
+                        lease_lost = abort.startswith("lease lost")
+                        break
                     try:
                         with uw_concurrency.background_priority():
                             self.run_ticker_scan(adapter, ticker)
@@ -405,7 +435,14 @@ class SchedulerRunner:
                         break  # storage guard paused mid-cycle -- stop evaluating further tickers
                     except Exception:  # noqa: BLE001 -- one bad ticker must never kill the whole cycle
                         logger.exception("scheduler: per-ticker evaluation failed for %s", ticker)
-            if evaluate and not pause_reason and self.run_baseline_backfill is not None:
+            # FE-F3: the historical backfill runs only in a RECURRING enabled cycle (never from a one-time
+            # run) and only when the operator opted in (main.py: TIP_SCHEDULER_BASELINE_BACKFILL)
+            if evaluate and recurring and not pause_reason and self.run_baseline_backfill is not None:
+                abort = self._abort_reason(recurring, reported_mode)
+                if abort:
+                    pause_reason = abort
+                    lease_lost = abort.startswith("lease lost")
+            if evaluate and recurring and not pause_reason and self.run_baseline_backfill is not None:
                 try:
                     with uw_concurrency.background_priority():
                         backfill_result = self.run_baseline_backfill(adapter)
@@ -423,10 +460,11 @@ class SchedulerRunner:
                 # 'disabled') rather than writing a new value OR nulling out
                 # a real one a still-armed recurring schedule depends on.
                 next_run_iso = self.store.get_state().get("next_run_at")
-            self.store.record_run_finished(
-                candidates_evaluated=candidates_evaluated, next_run_at=next_run_iso,
-                pause_reason=pause_reason, finished_at=self._now_fn().isoformat(),
-            )
+            if not lease_lost:                        # S2: another worker owns the state now: never overwrite it
+                self.store.record_run_finished(
+                    candidates_evaluated=candidates_evaluated, next_run_at=next_run_iso,
+                    pause_reason=pause_reason, finished_at=self._now_fn().isoformat(),
+                )
         return {
             "ran": True, "mode": reported_mode, "candidates_evaluated": candidates_evaluated,
             "pause_reason": pause_reason, "baseline_backfill": backfill_result,

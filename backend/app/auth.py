@@ -46,6 +46,28 @@ TOKEN_HEADER = "X-TIP-Auth"
 LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost", "::ffff:127.0.0.1"}
 
 
+def _write_secret_file(path: Path, value: str) -> None:
+    """SEC-8: the file is 0600 from creation (no window in which a token or code is readable by other
+    local users), fsynced, then atomically renamed into place."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(value)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp_path, path)
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass  # best-effort on platforms/filesystems that don't support chmod
+
+
+def _same_secret(expected: str, candidate: str) -> bool:
+    """Constant-time comparison that never raises: non-ASCII input (SEC-5) is compared as UTF-8 bytes."""
+    return hmac.compare_digest(expected.encode("utf-8"), str(candidate).encode("utf-8", "surrogatepass"))
+
+
 def is_loopback(host: Optional[str]) -> bool:
     """Pure, directly-unit-testable check -- never touches a request or
     the network. Deliberately a plain string-membership check (not a
@@ -85,19 +107,7 @@ class AuthTokenStore:
         return token
 
     def _write(self, token: str) -> None:
-        self.token_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = self.token_path.with_suffix(self.token_path.suffix + ".tmp")
-        with open(tmp_path, "w", encoding="utf-8") as f:
-            f.write(token)
-        try:
-            os.chmod(tmp_path, 0o600)
-        except OSError:
-            pass  # best-effort on platforms/filesystems that don't support chmod
-        os.replace(tmp_path, self.token_path)
-        try:
-            os.chmod(self.token_path, 0o600)
-        except OSError:
-            pass
+        _write_secret_file(Path(self.token_path), token)
 
     def reset_cache(self) -> None:
         """Forces the next get_or_create() to re-read (or regenerate) from
@@ -108,7 +118,7 @@ class AuthTokenStore:
     def matches(self, candidate: Optional[str]) -> bool:
         if not candidate:
             return False
-        return hmac.compare_digest(self.get_or_create(), candidate)
+        return _same_secret(self.get_or_create(), candidate)
 
 
 def default_token_path(settings_path: "str | os.PathLike") -> str:
@@ -190,21 +200,10 @@ class PairingCodeStore:
         self._code: Optional[str] = None
         self._expires_at: float = 0.0
         self._failed_attempts = 0
+        self.on_rotate = None              # callable(code): announces a rotated code (main.py logs it)
 
     def _write(self, code: str) -> None:
-        self.code_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = self.code_path.with_suffix(self.code_path.suffix + ".tmp")
-        with open(tmp_path, "w", encoding="utf-8") as f:
-            f.write(code)
-        try:
-            os.chmod(tmp_path, 0o600)
-        except OSError:
-            pass
-        os.replace(tmp_path, self.code_path)
-        try:
-            os.chmod(self.code_path, 0o600)
-        except OSError:
-            pass
+        _write_secret_file(Path(self.code_path), code)
 
     def _generate_locked(self) -> str:
         import time
@@ -217,6 +216,11 @@ class PairingCodeStore:
         self._expires_at = time.monotonic() + self.ttl_s
         self._failed_attempts = 0
         self._write(code)
+        if self.on_rotate is not None:
+            try:
+                self.on_rotate(code)
+            except Exception:  # noqa: BLE001 -- announcing a code must never break pairing
+                pass
         return code
 
     def current_code(self, force_new: bool = False) -> str:
@@ -243,19 +247,21 @@ class PairingCodeStore:
         import time
 
         with self._lock:
-            if self._failed_attempts >= PAIRING_CODE_MAX_FAILED_ATTEMPTS:
+            if self._code is None or time.monotonic() > self._expires_at:
+                # SEC-4: an expired code is replaced (and announced) instead of leaving pairing broken
+                self._generate_locked()
                 return False
-            if (
-                not candidate
-                or self._code is None
-                or time.monotonic() > self._expires_at
-            ):
+            if not candidate:
                 self._failed_attempts += 1
-                return False
-            if hmac.compare_digest(self._code, candidate):
+            elif _same_secret(self._code, candidate):
                 self._generate_locked()  # one-time use: rotate immediately on success
                 return True
-            self._failed_attempts += 1
+            else:
+                self._failed_attempts += 1
+            if self._failed_attempts >= PAIRING_CODE_MAX_FAILED_ATTEMPTS:
+                # SEC-3: too many wrong guesses rotate the code (announced in the log and the code file)
+                # instead of locking pairing out until the next restart
+                self._generate_locked()
             return False
 
     def reset_cache(self) -> None:

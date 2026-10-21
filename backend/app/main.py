@@ -66,7 +66,7 @@ from .core import dark_pool_baseline, discovery, lifecycle, scan_service, sessio
 from . import session_collection
 from . import baseline_jobs
 from .core import local_mode as local_mode_module
-from .core import scheduler_freshness, single_process_guard, uw_concurrency
+from .core import coverage_policy, scheduler_freshness, single_process_guard, uw_concurrency
 from .core.scheduler_store import InvalidModeError, MODES as SCHEDULER_MODES, SchedulerStore, new_worker_id
 from . import scheduler as scheduler_module
 from .core.candles import build_markers
@@ -157,6 +157,25 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# SEC-2: browser hardening on every response. No framing (clickjacking a Local Mode same-origin
+# request), scripts only from this origin (no inline script anywhere in the app), no MIME sniffing.
+SECURITY_HEADERS = {
+    "Content-Security-Policy": ("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+                                "img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; "
+                                "form-action 'self'; frame-ancestors 'none'"),
+    "X-Frame-Options": "DENY",
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "no-referrer",
+}
+
+
+@app.middleware("http")
+async def _security_headers(request: Request, call_next):
+    response = await call_next(request)
+    for k, v in SECURITY_HEADERS.items():
+        response.headers.setdefault(k, v)
+    return response
 
 # --- Local Mode / Network Mode (Fetch Metadata auth redesign) ----------
 #
@@ -420,6 +439,9 @@ class StorageIsolationError(RuntimeError):
     pass
 
 
+_singleton_lock = threading.RLock()
+
+
 def get_store(mode: Optional[str] = None) -> QualifyingDaysStore:
     """Lifecycle store for one data domain. Demo/Live isolation is
     storage-level: Live uses settings.db_path, Demo uses
@@ -440,10 +462,13 @@ def get_store(mode: Optional[str] = None) -> QualifyingDaysStore:
             "lifecycle data are required to live in separate databases."
         )
     if mode == "live":
-        if _store is None:
-            _store = QualifyingDaysStore(settings.db_path)
+        with _singleton_lock:                           # PE-P7: never two stores migrating one file at once
+            if _store is None:
+                _store = QualifyingDaysStore(settings.db_path)
         return _store
-    if _demo_store is None:
+    with _singleton_lock:
+        if _demo_store is not None:
+            return _demo_store
         _demo_store = QualifyingDaysStore(settings.demo_db_path)
         # Backfill the demo scenarios that need genuinely distinct
         # historical scan_date rows -- see seed_demo_history.py. DEMO STORE
@@ -464,8 +489,9 @@ def get_catalog() -> IngestionCatalog:
     _store/_adapter above; tests reset this via conftest's app_main
     fixture the same way."""
     global _catalog
-    if _catalog is None:
-        _catalog = IngestionCatalog(settings.db_path)
+    with _singleton_lock:
+        if _catalog is None:
+            _catalog = IngestionCatalog(settings.db_path)
     return _catalog
 
 
@@ -494,7 +520,10 @@ def get_scheduler_runner() -> scheduler_module.SchedulerRunner:
             get_adapter=get_adapter,
             get_catalog=get_catalog,
             run_ticker_scan=_scheduler_run_ticker_scan,
-            run_baseline_backfill=_scheduler_baseline_backfill,
+            # FE-F3: automatic historical collection is opt-in (default off); approved baseline jobs are the
+            # normal path. TIP_SCHEDULER_BASELINE_BACKFILL=1 restores the per-cycle backfill.
+            run_baseline_backfill=(_scheduler_baseline_backfill
+                                   if os.environ.get("TIP_SCHEDULER_BASELINE_BACKFILL", "0") == "1" else None),
         )
     return _scheduler_runner
 
@@ -551,12 +580,15 @@ def _on_startup() -> None:
     # so a stale code from a prior process lifetime is never silently
     # left live) and still log it, just at DEBUG, for the rare case an
     # operator is debugging Local Mode's own gate.
-    code = _pairing_store.current_code(force_new=True)
     network_mode_active = not local_mode_module.effective_local_mode(
         _BIND_HOST, _TIP_LOCAL_MODE_RAW
     )
     log = logging.getLogger(__name__)
     log_fn = log.warning if network_mode_active else log.debug
+    # SEC-3/SEC-4: a code rotated later (expiry, too many wrong guesses) is announced the same way
+    _pairing_store.on_rotate = lambda new_code: log_fn(
+        "TIP Hackathon Edition -- pairing code rotated (expiry or failed attempts); new code: %s", new_code)
+    code = _pairing_store.current_code(force_new=True)
     log_fn(
         "\n%s\nTIP Hackathon Edition -- Docker Desktop / browser pairing code: %s\n"
         "If the app's auto-bootstrap (GET /api/auth/bootstrap) fails in your browser "
@@ -657,8 +689,10 @@ def _baseline_report(ticker: str, session_date, as_of_utc) -> dict:
         b = session_baseline.compute(catalog, dataset, ticker, session_date, as_of_utc=as_of_utc)
         out[dataset] = {
             "baseline": b.as_metrics(),
-            "complete_prior_sessions": sum(1 for c in coverage if c["status"] == "complete"
+            "complete_prior_sessions": sum(1 for c in coverage if coverage_policy.is_certified(c)
                                            and c["session_date"] < session_date.isoformat()),
+            "legacy_uncertified_prior_sessions": sum(1 for c in coverage if coverage_policy.is_legacy_complete(c)
+                                                     and c["session_date"] < session_date.isoformat()),
             "coverage": coverage[-40:],
         }
     return out
@@ -865,53 +899,56 @@ def _run_scan(adapter: UWDataAdapter, store: QualifyingDaysStore, ticker: str, k
     else:
         stock_state = {"unavailable": True, "reason": collection_summary(collections["stock_state"])}
     collection_status = {name: c["status"] for name, c in collections.items()}
-    # Episode-scoped, NYSE-session-attributed lifecycle (core/lifecycle.py).
-    lifecycle_ctx = store.context(ticker, session_date.isoformat())
-    current_state = lifecycle_ctx.state if lifecycle_ctx.state is not None else lifecycle_ctx.display_state
-    qualifying_days = len(lifecycle_ctx.qualifying_sessions)
-    # Computed AFTER this scan's prints were cataloged by the collector, from
-    # verified session coverage only (core/session_baseline.py).
-    catalog_dark_pool_baseline = (_session_baseline_gate_inputs("darkpool", ticker, session_date, scanned_at)
-                                  if is_live else None)
-    options_flow_baseline = (_options_baseline(ticker, session_date, scanned_at) if is_live else None)
-    result = scan_service.evaluate_ticker_scan(
-        ticker=ticker,
-        flow_alerts=flow_alerts,
-        darkpool_trades=darkpool_trades,
-        current_state=current_state,
-        qualifying_days_count=qualifying_days,
-        price_move_pct=_price_move_pct(stock_state),
-        catalyst_identified=adapter.get_catalyst_identified(ticker),
-        catalog_dark_pool_baseline=catalog_dark_pool_baseline,
-        options_flow_baseline=options_flow_baseline,
-        collection_status=collection_status,
-        mode=_mode_of(adapter),
-        lifecycle_context=lifecycle_ctx,
-        session_date=session_date,
-        price_last=(stock_state or {}).get("last_price") if not (stock_state or {}).get("unavailable") else None,
-        # Demo fixtures are static: no evidence identity to compare.
-        evidence_fingerprint=(lifecycle.evidence_fingerprint(flow_alerts, darkpool_trades)
-                              if _mode_of(adapter) == "live" else None),
-    )
-    result["collection"] = {name: collection_summary(c) for name, c in collections.items()}
-    # When this scan's data was collected (newest per-source retrieval).
-    result["collected_at"] = max(c["retrieved_at"] for c in collections.values())
-    any_gate_passed = len(result["independent_gates_passed"]) > 0
-    try:
-        # An incomplete collection is recorded as an attempt in the catalog
-        # (below) but never written into lifecycle history: it is neither a
-        # qualifying nor a non-qualifying observation (apply() skips it).
-        store.apply(ticker, lifecycle.LifecycleDecision(**result["lifecycle"]), kind=kind,
-                    scanned_at=scanned_at.isoformat())
-    except StorageGuardPausedError as e:
-        if kind != "on_demand":
-            raise  # background caller: let it propagate for its own handling, never shaped as an HTTP 507
-        # Phase A storage guard: never a crash/500 -- a clear, structured
-        # 507 ("Insufficient Storage") disclosing exactly why new writes
-        # are paused. Nothing is deleted; this scan's evidence is still
-        # returned to the caller below, just not persisted to the
-        # qualifying-days history until free space recovers.
-        raise HTTPException(status_code=507, detail=str(e)) from e
+    # PE-P3: context -> evaluate -> apply under the per-ticker lock, so two concurrent scans of one ticker
+    # can never both decide 'open' from the same no-episode context (two open episodes).
+    with _collection_lock(ticker):
+        # Episode-scoped, NYSE-session-attributed lifecycle (core/lifecycle.py).
+        lifecycle_ctx = store.context(ticker, session_date.isoformat())
+        current_state = lifecycle_ctx.state if lifecycle_ctx.state is not None else lifecycle_ctx.display_state
+        qualifying_days = len(lifecycle_ctx.qualifying_sessions)
+        # Computed AFTER this scan's prints were cataloged by the collector, from
+        # verified session coverage only (core/session_baseline.py).
+        catalog_dark_pool_baseline = (_session_baseline_gate_inputs("darkpool", ticker, session_date, scanned_at)
+                                      if is_live else None)
+        options_flow_baseline = (_options_baseline(ticker, session_date, scanned_at) if is_live else None)
+        result = scan_service.evaluate_ticker_scan(
+            ticker=ticker,
+            flow_alerts=flow_alerts,
+            darkpool_trades=darkpool_trades,
+            current_state=current_state,
+            qualifying_days_count=qualifying_days,
+            price_move_pct=_price_move_pct(stock_state),
+            catalyst_identified=adapter.get_catalyst_identified(ticker),
+            catalog_dark_pool_baseline=catalog_dark_pool_baseline,
+            options_flow_baseline=options_flow_baseline,
+            collection_status=collection_status,
+            mode=_mode_of(adapter),
+            lifecycle_context=lifecycle_ctx,
+            session_date=session_date,
+            price_last=(stock_state or {}).get("last_price") if not (stock_state or {}).get("unavailable") else None,
+            # Demo fixtures are static: no evidence identity to compare.
+            evidence_fingerprint=(lifecycle.evidence_fingerprint(flow_alerts, darkpool_trades)
+                                  if _mode_of(adapter) == "live" else None),
+        )
+        result["collection"] = {name: collection_summary(c) for name, c in collections.items()}
+        # When this scan's data was collected (newest per-source retrieval).
+        result["collected_at"] = max(c["retrieved_at"] for c in collections.values())
+        any_gate_passed = len(result["independent_gates_passed"]) > 0
+        try:
+            # An incomplete collection is recorded as an attempt in the catalog
+            # (below) but never written into lifecycle history: it is neither a
+            # qualifying nor a non-qualifying observation (apply() skips it).
+            store.apply(ticker, lifecycle.LifecycleDecision(**result["lifecycle"]), kind=kind,
+                        scanned_at=scanned_at.isoformat())
+        except StorageGuardPausedError as e:
+            if kind != "on_demand":
+                raise  # background caller: let it propagate for its own handling, never shaped as an HTTP 507
+            # Phase A storage guard: never a crash/500 -- a clear, structured
+            # 507 ("Insufficient Storage") disclosing exactly why new writes
+            # are paused. Nothing is deleted; this scan's evidence is still
+            # returned to the caller below, just not persisted to the
+            # qualifying-days history until free space recovers.
+            raise HTTPException(status_code=507, detail=str(e)) from e
     result["stock_state"] = stock_state
     result["evidence_session"] = session_date.isoformat()
     # Session-to-date rows can be large: the response/catalog keep the newest
@@ -1082,11 +1119,31 @@ class ConfirmBody(BaseModel):
     confirm: bool = False
 
 
+def _scan_request_budget() -> dict:
+    """Upper bound of provider requests one ticker refresh makes: up to DEFAULT_SCAN_PAGES pages for each
+    of the two session datasets plus one stock-state request; each request may be re-attempted on a
+    transient failure (429/5xx/network) up to TIP_UW_MAX_RETRIES times."""
+    from .adapters import live_uw_adapter as _lua
+    per_ticker = 2 * int(session_collection.DEFAULT_SCAN_PAGES) + 1
+    attempts = _lua._env_int("TIP_UW_MAX_RETRIES", _lua.DEFAULT_MAX_RETRIES) + 1
+    return {"per_ticker_scan_requests": per_ticker, "attempts_per_request": attempts}
+
+
+def _request_is_authorized(request: Request) -> bool:
+    try:
+        require_auth(request)
+        return True
+    except HTTPException:
+        return False
+
+
 @app.get("/api/settings")
-def get_settings():
+def get_settings(request: Request):
     data = _settings_store.get_all()
     uw_key, uw_source = _effective_uw_key(data)
     ai_key = data.get("ai_api_key")
+    # SEC-6: key fingerprints (last 4) only for an authorized reader (Local Mode same-origin, or token)
+    show_fingerprints = _request_is_authorized(request)
     # Disclosure for item 10: if the UI-saved key was removed but a
     # .env-level key is still configured, the effective key silently
     # becomes that env key -- say so explicitly rather than letting the
@@ -1096,10 +1153,11 @@ def get_settings():
     return {
         "mode": data["mode"],
         "public_demo": settings.public_demo,
+        "settings_warning": _settings_store.recovery_notice,   # PE-P5: an unreadable file was preserved aside
         "uw": {
             "configured": bool(uw_key),
             "source": uw_source,  # "ui" | "env" | "none"
-            "last4": last4(uw_key),
+            "last4": last4(uw_key) if show_fingerprints else None,
             "last_test_result": _last_uw_test_result,
             "verified": _settings_store.is_key_verified(uw_key),
             "env_fallback_present": env_key_present,
@@ -1115,7 +1173,7 @@ def get_settings():
         "ai": {
             "configured": bool(ai_key),
             "provider": data.get("ai_provider"),
-            "last4": last4(ai_key),
+            "last4": last4(ai_key) if show_fingerprints else None,
             # Priority 5 fix (2026-10-15 round 3): "an AI provider key is
             # configured" and "which transport Investigate with AI will
             # actually use" are two separate facts and must not be
@@ -1137,6 +1195,9 @@ def get_settings():
             "tickers": _settings_store.get_watchlist(default=settings.live_watchlist),
             "max_size": MAX_WATCHLIST_SIZE,
         },
+        # FE-F12: the per-ticker budget the UI states before a refresh -- computed from the collector's
+        # real limits, never a hard-coded guess.
+        "request_budget": _scan_request_budget(),
         # Application Updates (2026-10-15): bundled here too so Settings
         # can render the "Installed version" line from the same call it
         # already makes -- no network call involved (see version.py).
@@ -1418,6 +1479,14 @@ def uw_request_diagnostics():
 
 class SchedulerModeBody(BaseModel):
     mode: str
+    confirm: Optional[str] = None          # FE-F1: must equal `mode` to arm dry_run / enabled
+
+
+def _confirmation_required(action: str, consequence: str, **facts) -> HTTPException:
+    """FE-F1: an action that makes provider requests (or arms recurring ones) is never one click. Without
+    an explicit confirmation the server answers 428 with the consequence and budget, and nothing is done."""
+    return HTTPException(status_code=428, detail={"confirmation_required": True, "action": action,
+                                                  "consequence": consequence, **facts})
 
 
 @app.get("/api/scheduler/status", dependencies=[Depends(require_auth)])
@@ -1470,6 +1539,7 @@ class RunOnceBody(BaseModel):
     # "Discover Once" / "Discover & Evaluate Once" UI buttons call, and
     # the only way a one-time run is possible while mode stays Disabled.
     depth: Optional[str] = None
+    confirm: bool = False                  # FE-F1: a one-time run makes real provider requests
 
 
 @app.post("/api/scheduler/run-once", dependencies=[Depends(require_auth)])
@@ -1483,12 +1553,24 @@ def scheduler_run_once(body: RunOnceBody = RunOnceBody()):
     rejected rather than queued, no RTH/market-hours gate applied here).
     """
     runner = get_scheduler_runner()
+    if body.depth is not None and body.depth not in scheduler_module.RUN_ONCE_DEPTHS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"depth must be one of {scheduler_module.RUN_ONCE_DEPTHS}, got {body.depth!r}",
+        )
+    # FE-F1: confirmation is required only for a run that will make provider requests. The legacy
+    # no-depth path while recurring mode is disabled is a refusal (no request), answered as before.
+    will_run = body.depth is not None or runner.store.get_mode() != "disabled"
+    if will_run and not body.confirm:
+        evaluates = (body.depth == scheduler_module.DEPTH_DISCOVERY_PLUS_EVALUATION
+                     or (body.depth is None and runner.store.get_mode() == "enabled"))
+        raise _confirmation_required(
+            "scheduler_run_once",
+            ("1 market screener request" + (f", then up to {runner.top_n} full ticker evaluations (each several "
+                                            "Unusual Whales requests; evaluations write signal records)"
+                                            if evaluates else "")) + ". Send confirm=true to proceed.",
+            depth=body.depth, top_n=runner.top_n, evaluates=evaluates)
     if body.depth is not None:
-        if body.depth not in scheduler_module.RUN_ONCE_DEPTHS:
-            raise HTTPException(
-                status_code=400,
-                detail=f"depth must be one of {scheduler_module.RUN_ONCE_DEPTHS}, got {body.depth!r}",
-            )
         result = runner.run_once_with_depth(body.depth)
     else:
         result = runner.run_once()
@@ -1506,6 +1588,16 @@ def set_scheduler_mode(body: SchedulerModeBody):
     if body.mode not in SCHEDULER_MODES:
         raise HTTPException(status_code=400, detail=f"mode must be one of {SCHEDULER_MODES}")
     runner = get_scheduler_runner()
+    if body.mode != "disabled" and body.confirm != body.mode:
+        per_cycle = ("1 market screener request per cycle (discovery only)" if body.mode == "dry_run" else
+                     f"1 screener request plus up to {runner.top_n} full ticker evaluations per cycle"
+                     + (" plus a historical baseline backfill" if runner.run_baseline_backfill is not None else ""))
+        raise _confirmation_required(
+            f"scheduler_mode:{body.mode}",
+            f"Arms RECURRING background Unusual Whales requests during market hours every "
+            f"{int(runner.scan_interval_s // 60)} minutes until disabled: {per_cycle}. "
+            "Evaluations write signal records. Send confirm equal to the mode to proceed.",
+            mode=body.mode, interval_s=runner.scan_interval_s, top_n=runner.top_n)
     state = runner.store.set_mode(body.mode, actor="authenticated_user")
     return {"mode": state["mode"], "updated_at": state["updated_at"], "updated_by": state["updated_by"]}
 
@@ -1605,14 +1697,16 @@ def get_version():
     return {**info, "repo_url": f"https://github.com/{_update_check.GITHUB_REPO}"}
 
 
-@app.get("/api/settings/update-check")
+@app.post("/api/settings/update-check", dependencies=[Depends(require_auth)])
 def get_update_check():
     """Checks the PUBLIC GitHub repo for newer commits than the baked-in
     installed commit. ONE unauthenticated outbound call to GitHub per
     request -- no credential of this app's is ever sent. Deliberately not
     called automatically by the frontend; the user must click "Check for
     Updates". Never raises: any network/rate-limit/shape failure comes
-    back as status=unable_to_check, see update_check.py."""
+    back as status=unable_to_check, see update_check.py.
+    An authenticated POST (J-G2 / SEC-7): an outbound request must never be triggerable by a cross-site
+    GET (an <img> tag on any web page)."""
     info = _version.get_build_info()
     return _update_check.check_for_updates(info.get("commit"))
 
@@ -2331,6 +2425,69 @@ def ticker_baseline_backfill(ticker: str, max_pages: int = 60):
         _baseline_backfill_lock.release()
 
 
+RECONCILE_MAX_PAGES = 200
+
+
+class ReconcileBody(BaseModel):
+    dataset: str
+    session_date: str
+    max_pages: int = 100
+    confirm: bool = False
+
+
+@app.post("/api/ticker/{ticker}/baseline/reconcile", dependencies=[Depends(require_auth)])
+def ticker_baseline_reconcile(ticker: str, body: ReconcileBody):
+    """Explicit, authenticated, bounded re-walk of ONE settled prior session (real UW requests, at most
+    `max_pages`, clamped to RECONCILE_MAX_PAGES), even if it is already certified: finds prints reported
+    after settlement and later cancellations. The stored coverage is replaced only if the re-walk
+    certifies the session; an unfinished or failed reconciliation changes nothing. Every attempt is logged
+    in coverage_reconciliations (GET /api/diagnostics/coverage-reconciliations)."""
+    adapter = get_adapter()
+    ticker = _validate_ticker_for_analysis(adapter, ticker)
+    if not isinstance(adapter, LiveUWAdapter):
+        raise HTTPException(status_code=400, detail="Reconciliation is only available in Live Mode.")
+    if body.dataset not in BASELINE_DATASETS:
+        raise HTTPException(status_code=400, detail=f"dataset must be one of {list(BASELINE_DATASETS)}")
+    try:
+        d = date.fromisoformat(body.session_date)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="session_date must be YYYY-MM-DD")
+    now = _utcnow()
+    if not trading_calendar.is_trading_day(d) or d >= trading_calendar.evidence_session_date(now):
+        raise HTTPException(status_code=400, detail="session_date must be a PRIOR trading session")
+    if int(body.max_pages) < 1:
+        raise HTTPException(status_code=400, detail="max_pages must be at least 1.")
+    budget = min(int(body.max_pages), RECONCILE_MAX_PAGES)
+    if not body.confirm:
+        raise _confirmation_required(
+            "coverage_reconciliation",
+            f"Re-walks {body.dataset} {d.isoformat()} for {ticker}: up to {budget} Unusual Whales pages. "
+            "Send confirm=true to proceed.", max_pages=budget)
+    if not _baseline_backfill_lock.acquire(blocking=False):
+        raise HTTPException(status_code=409, detail="A baseline backfill or reconciliation is already running.")
+    try:
+        catalog = get_catalog()
+        with _collection_lock(ticker):
+            u = session_collection.update_session_coverage(
+                adapter.client, catalog, body.dataset, ticker, d, now_utc=now, max_pages=budget,
+                kind="on_demand", reverify="operator", preserve_on_incomplete=True)
+        recs = [r for r in catalog.list_coverage_reconciliations(body.dataset, ticker, limit=20)
+                if r["session_date"] == d.isoformat()]
+        return {"ticker": ticker, "dataset": body.dataset, "session_date": d.isoformat(), "max_pages": budget,
+                "collection": u.summary(), "reconciliation": recs[0] if recs else None,
+                "coverage": catalog.get_session_coverage(body.dataset, ticker, d.isoformat())}
+    finally:
+        _baseline_backfill_lock.release()
+
+
+@app.get("/api/diagnostics/coverage-reconciliations", dependencies=[Depends(require_auth)])
+def coverage_reconciliations(dataset: Optional[str] = None, ticker: Optional[str] = None, limit: int = 200):
+    """Completed re-walks (legacy, unsettled, suspected-gap, operator) and how many rows each found
+    that the earlier collection had missed. Reads the local catalog only."""
+    return {"reconciliations": get_catalog().list_coverage_reconciliations(
+        dataset, ticker.upper() if ticker else None, limit=limit)}
+
+
 # --- User-initiated baseline building (Phase 4; app/baseline_jobs.py) ---------
 _baseline_job_store: Optional[baseline_jobs.BaselineJobStore] = None
 _baseline_job_runner: Optional[baseline_jobs.BaselineJobRunner] = None
@@ -2351,8 +2508,9 @@ def _baseline_job_step(ticker: str, pages: int, datasets=None) -> dict:
     adapter = get_adapter()
     if not isinstance(adapter, LiveUWAdapter):
         raise baseline_jobs.JobBlocked("paused: the app is no longer in Live Mode -- switch back to Live and resume")
-    with _baseline_backfill_lock:
-        result = _run_baseline_backfill(adapter, ticker, pages, "on_demand", datasets=datasets)
+    # J-L1: a long-running job is background work: background provider priority and storage-guard threshold
+    with _baseline_backfill_lock, uw_concurrency.background_priority():
+        result = _run_baseline_backfill(adapter, ticker, pages, "background", datasets=datasets)
     # A provider history cutoff found by an EARLIER step or job is already recorded
     # in coverage; report it so the job labels the ticker honestly.
     catalog = get_catalog()
@@ -2370,6 +2528,7 @@ def get_baseline_job_runner() -> baseline_jobs.BaselineJobRunner:
 
 
 class BaselineJobBody(BaseModel):
+    confirm: bool = False                  # FE-F1: the 428 answer states the total page budget first
     tickers: Optional[list] = None
     scope: Optional[str] = None                         # "watchlist"
     max_pages_per_ticker: int = baseline_jobs.DEFAULT_MAX_PAGES_PER_TICKER
@@ -2392,22 +2551,25 @@ def _coverage_overview(ticker: str, session_date) -> dict:
         prior = [c for c in cov if c["session_date"] < session_date.isoformat()]
         counts: dict = {}
         for c in prior:
-            k = c["status"] + (f":{c['last_error']}" if c.get("last_error") else "")
+            k = coverage_policy.status_key(c)
             counts[k] = counts.get(k, 0) + 1
-        complete = sum(1 for c in prior if c["status"] == "complete")
+        complete = sum(1 for c in prior if coverage_policy.is_certified(c))
+        legacy = sum(1 for c in prior if coverage_policy.is_legacy_complete(c))
         cutoff = next((c["session_date"] for c in sorted(prior, key=lambda c: c["session_date"], reverse=True)
                        if c["status"] == "unavailable"), None)
         ev = next((c for c in cov if c["session_date"] == session_date.isoformat()), None)
         need = dark_pool_baseline.BASELINE_READY_MIN
         if complete < need:
-            why = (f"{complete} of {need} complete prior sessions collected"
+            why = (f"{complete} of {need} certified complete prior sessions collected"
+                   + (f"; {legacy} legacy session(s) await re-verification" if legacy else "")
                    + (f"; provider history ends before {cutoff}" if cutoff else "")
                    + ("" if cutoff else " -- build the baseline to collect more"))
         elif not ev or ev["status"] not in ("complete", "partial"):
             why = "history is sufficient; the current session has not been collected from the open yet (refresh)"
         else:
             why = "history is sufficient"
-        out[dataset] = {"complete_prior_sessions": complete, "required_sessions": need,
+        out[dataset] = {"complete_prior_sessions": complete, "legacy_uncertified_prior_sessions": legacy,
+                        "required_sessions": need,
                         "coverage_counts": counts, "history_cutoff_before": cutoff,
                         "evidence_session_coverage": (ev or {}).get("status"), "insufficient_reason": why}
     return out
@@ -2431,14 +2593,20 @@ def baseline_overview():
 
 @app.get("/api/baseline/jobs/current", dependencies=[Depends(require_auth)])
 def baseline_job_current():
-    """Latest job and its progress. Never a provider request."""
-    return {"job": get_baseline_job_store().latest(), "job_thread_alive": get_baseline_job_runner().is_running()}
+    """Latest job and its progress. Never a provider request, never a write."""
+    job = get_baseline_job_store().latest()
+    alive = get_baseline_job_runner().is_running()
+    return {"job": job, "job_thread_alive": alive,
+            # J1 watchdog, read-only: an active status with no worker is shown as such (any POST repairs it)
+            "job_orphaned": bool(job and job["status"] in ("running", "pause_requested", "cancel_requested")
+                                 and not alive)}
 
 
 @app.post("/api/baseline/jobs", dependencies=[Depends(require_auth)])
 def baseline_job_create(body: BaselineJobBody):
     """Explicit, user-initiated, bounded historical baseline build."""
     adapter = _require_live_adapter()
+    get_baseline_job_runner().reconcile_orphans()
     if body.scope == "watchlist":
         raw = adapter.get_universe() or []
     elif body.tickers:
@@ -2454,6 +2622,14 @@ def baseline_job_create(body: BaselineJobBody):
         raise HTTPException(status_code=400, detail="Between 1 and 20 tickers.")
     if int(body.max_pages_per_ticker) < 1:              # never turn a 0/negative budget into a request
         raise HTTPException(status_code=400, detail="max_pages_per_ticker must be at least 1.")
+    if not body.confirm:
+        per = max(1, min(int(body.max_pages_per_ticker), baseline_jobs.MAX_PAGES_PER_TICKER_CAP))
+        raise _confirmation_required(
+            "baseline_job",
+            f"Collects historical sessions for {len(tickers)} ticker(s): up to {per} Unusual Whales pages per "
+            f"ticker, {per * len(tickers)} pages in total, in the background until done, paused or cancelled. "
+            "Send confirm=true to proceed.",
+            tickers=tickers, max_pages_per_ticker=per, total_pages=per * len(tickers))
     lo, hi = baseline_jobs.STEP_PAGES_RANGE
     lookback = session_collection.BACKFILL_LOOKBACK_SESSIONS
     try:
@@ -2464,12 +2640,17 @@ def baseline_job_create(body: BaselineJobBody):
             target_sessions=max(dark_pool_baseline.BASELINE_READY_MIN, min(int(body.target_sessions), lookback)))
     except baseline_jobs.JobConflict as exc:
         raise HTTPException(status_code=409, detail=str(exc))
-    get_baseline_job_runner().start(job["id"])
-    return {"job": job}
+    store = get_baseline_job_store()
+    if not get_baseline_job_runner().start(job["id"]):
+        # J1: never leave a job recorded as running without a worker
+        store.transition(job["id"], ("running",), "paused")
+        store.update(job["id"], last_error="paused: the previous job worker was still finishing -- resume to start")
+    return {"job": store.get(job["id"])}
 
 
 def _baseline_job_transition(job_id: int, allowed: tuple, to: str, start: bool = False) -> dict:
     store = get_baseline_job_store()
+    get_baseline_job_runner().reconcile_orphans()
     if store.get(job_id) is None:
         raise HTTPException(status_code=404, detail="No such baseline job.")
     if start:
@@ -2478,6 +2659,7 @@ def _baseline_job_transition(job_id: int, allowed: tuple, to: str, start: bool =
     if job is None:
         raise HTTPException(status_code=409, detail=f"Job is not in a state that allows this ({store.get(job_id)['status']}).")
     if start and not get_baseline_job_runner().start(job_id):
+        store.transition(job_id, ("running",), "paused")          # J2: undo the transition, never orphan it
         raise HTTPException(status_code=409, detail="A baseline job thread is still finishing; try again shortly.")
     return {"job": store.get(job_id)}
 
@@ -2914,14 +3096,38 @@ def investigate_ticker(ticker: str):
 
     adapter = get_adapter()
     store = get_store(_mode_of(adapter))
+    # FE-F2: Investigate never runs or SAVES an evaluation of its own (it used to call _run_scan, which
+    # collected, evaluated and persisted lifecycle/evaluation records even when the AI call then failed).
+    # It reads the latest CACHED evaluation as context -- zero adapter calls here.
     try:
-        scan = _run_scan(adapter, store, safe_ticker)
+        scan, _freshness = _cached_scan_for_ticker(get_catalog(), store, safe_ticker)
+    except Exception:  # noqa: BLE001
+        scan = None
+    if scan:
         evidence = _to_evidence_item(scan)
-        evidence["qualifying_days_count"] = scan["qualifying_days_count"]
-        evidence["confidence"] = scan["confidence"]
-    except Exception:
-        evidence = {"ticker": safe_ticker, "note": "Market Radar evidence unavailable; investigating ticker alone."}
+        evidence["qualifying_days_count"] = scan.get("qualifying_days_count")
+        evidence["confidence"] = scan.get("confidence")
+    else:
+        evidence = {"ticker": safe_ticker,
+                    "note": "No cached TIP evaluation for this ticker; investigating the ticker alone."}
+    if not _investigate_lock(safe_ticker).acquire(blocking=False):
+        raise HTTPException(status_code=409, detail=f"An investigation of {safe_ticker} is already running.")
+    try:
+        return _investigate_run(safe_ticker, evidence, ai_provider, ai_key, uw_key)
+    finally:
+        _investigate_lock(safe_ticker).release()
 
+
+_investigate_locks: dict = {}
+_investigate_locks_guard = threading.Lock()
+
+
+def _investigate_lock(ticker: str) -> threading.Lock:
+    with _investigate_locks_guard:
+        return _investigate_locks.setdefault(ticker, threading.Lock())
+
+
+def _investigate_run(safe_ticker, evidence, ai_provider, ai_key, uw_key):
     try:
         result = ai_orchestrator.investigate(
             ticker=safe_ticker,
@@ -3009,4 +3215,14 @@ if _FRONTEND_DIR.exists():
     def _serve_index():
         return HTMLResponse(_index_html_with_cache_busting())
 
-    app.mount("/", StaticFiles(directory=str(_FRONTEND_DIR)), name="frontend")
+    class _ProductionStaticFiles(StaticFiles):
+        """SEC-9: serves the app's own assets only -- never the test harnesses kept in frontend/."""
+
+        async def get_response(self, path, scope):
+            name = path.replace("\\", "/").rsplit("/", 1)[-1]
+            if name.startswith("test_") or name.endswith((".py", ".mjs", ".md")):
+                from starlette.exceptions import HTTPException as _StarletteHTTPException
+                raise _StarletteHTTPException(status_code=404)
+            return await super().get_response(path, scope)
+
+    app.mount("/", _ProductionStaticFiles(directory=str(_FRONTEND_DIR)), name="frontend")

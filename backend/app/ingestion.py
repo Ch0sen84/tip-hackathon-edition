@@ -265,6 +265,10 @@ def _num(v):
         return v
 
 
+def _is_canceled(trade: dict) -> bool:
+    return trade.get("canceled") in (True, "true", "True", 1)
+
+
 def darkpool_print_key(ticker: str, trade: dict) -> str:
     """Verified-unique, re-fetch-stable identity of one UW dark-pool print."""
     return "dp:" + fingerprint(
@@ -331,7 +335,7 @@ class IngestionCatalog:
         if self._persistent_conn is not None:
             yield self._persistent_conn
             return
-        conn = sqlite3.connect(self.db_path)
+        conn = sqlite3.connect(self.db_path, timeout=30)
         try:
             yield conn
         finally:
@@ -420,6 +424,16 @@ class IngestionCatalog:
                 )
                 if cur.rowcount:
                     inserted += 1
+                elif _is_canceled(trade):
+                    # C-F3: a print stored earlier and now reported CANCELED. Raw rows are append-only:
+                    # record the cancellation as its own row (idempotent key); _iter_window then excludes
+                    # every version of that print, and the window signature changes (cache rebuild).
+                    cur = conn.execute(
+                        "INSERT OR IGNORE INTO darkpool_observations "
+                        "(source_id, ticker, event_time, retrieved_at, raw_json) VALUES (?, ?, ?, ?, ?)",
+                        (f"{source_id}#canceled", ticker, event_time, retrieved_at, json.dumps(trade, default=str)))
+                    if cur.rowcount:
+                        inserted += 1
             conn.commit()
         return inserted
 
@@ -1027,50 +1041,101 @@ class IngestionCatalog:
 
     # --- session coverage (signal-integrity remediation) -------------------
 
+    # columns added by migration 11 (settlement + provenance); NULL on legacy rows
+    COVERAGE_PROVENANCE = ("proof_started_utc", "certified_by", "certified_at_utc", "session_rows", "max_gap_s",
+                           "gap_flag", "reverify_trigger", "rows_before_reverify", "island_from_utc",
+                           "island_through_utc")
+    _COVERAGE_COLS = ("session_date", "status", "covered_from_utc", "covered_through_utc", "pages_walked",
+                      "rows_seen", "last_error", "retrieved_at") + COVERAGE_PROVENANCE
+
+    def _coverage_row(self, dataset: str, ticker: str, row) -> dict:
+        return {"dataset": dataset, "ticker": ticker, **dict(zip(self._COVERAGE_COLS, row))}
+
     def get_session_coverage(self, dataset: str, ticker: str, session_date: str) -> Optional[dict]:
         with self._conn() as conn:
             row = conn.execute(
-                "SELECT status, covered_from_utc, covered_through_utc, pages_walked, rows_seen, last_error, "
-                "retrieved_at FROM session_coverage WHERE dataset = ? AND ticker = ? AND session_date = ?",
-                (dataset, ticker, session_date)).fetchone()
-        if not row:
-            return None
-        return {"dataset": dataset, "ticker": ticker, "session_date": session_date, "status": row[0],
-                "covered_from_utc": row[1], "covered_through_utc": row[2], "pages_walked": row[3],
-                "rows_seen": row[4], "last_error": row[5], "retrieved_at": row[6]}
+                f"SELECT {', '.join(self._COVERAGE_COLS)} FROM session_coverage "
+                "WHERE dataset = ? AND ticker = ? AND session_date = ?", (dataset, ticker, session_date)).fetchone()
+        return self._coverage_row(dataset, ticker, row) if row else None
 
     def upsert_session_coverage(self, dataset: str, ticker: str, session_date: str, status: str,
                                 covered_from_utc: Optional[str], covered_through_utc: Optional[str],
                                 pages_walked: int, rows_seen: int, last_error: Optional[str] = None,
-                                kind: str = ON_DEMAND) -> None:
+                                kind: str = ON_DEMAND, provenance: Optional[dict] = None) -> None:
+        """Writes the WHOLE coverage state of one session. `provenance` holds the
+        migration-11 columns; any not given are written NULL, so a 'complete' row
+        is only ever certified when the caller says so explicitly."""
         if status not in ("complete", "partial", "unknown", "unavailable"):
             raise ValueError(f"invalid session coverage status: {status!r}")
+        prov = dict(provenance or {})
+        unknown = set(prov) - set(self.COVERAGE_PROVENANCE)
+        if unknown:
+            raise ValueError(f"unknown coverage provenance fields: {sorted(unknown)}")
+        if status != "complete":
+            prov["certified_by"] = prov["certified_at_utc"] = None
+        pv = [prov.get(k) for k in self.COVERAGE_PROVENANCE]
         self._check_guard(kind)
+        cols = ", ".join(self.COVERAGE_PROVENANCE)
+        sets = ", ".join(f"{k}=excluded.{k}" for k in self.COVERAGE_PROVENANCE)
         with self._conn() as conn:
             conn.execute(
                 "INSERT INTO session_coverage (dataset, ticker, session_date, status, covered_from_utc, "
-                "covered_through_utc, pages_walked, rows_seen, last_error, retrieved_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                f"covered_through_utc, pages_walked, rows_seen, last_error, retrieved_at, {cols}) "
+                f"VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, {', '.join('?' * len(pv))}) "
                 "ON CONFLICT(dataset, ticker, session_date) DO UPDATE SET status=excluded.status, "
                 "covered_from_utc=excluded.covered_from_utc, covered_through_utc=excluded.covered_through_utc, "
                 "pages_walked=session_coverage.pages_walked + excluded.pages_walked, "
-                "rows_seen=excluded.rows_seen, last_error=excluded.last_error, retrieved_at=excluded.retrieved_at",
+                "rows_seen=excluded.rows_seen, last_error=excluded.last_error, retrieved_at=excluded.retrieved_at, "
+                + sets,
                 (dataset, ticker, session_date, status, covered_from_utc, covered_through_utc,
-                 pages_walked, rows_seen, last_error, utcnow_iso()))
+                 pages_walked, rows_seen, last_error, utcnow_iso(), *pv))
             conn.commit()
+
+    def record_coverage_reconciliation(self, dataset: str, ticker: str, session_date: str, trigger: str,
+                                       rows_before: Optional[int], rows_after: Optional[int], outcome: str,
+                                       certified_by: Optional[str], detail: Optional[dict] = None,
+                                       kind: str = ON_DEMAND) -> None:
+        self._check_guard(kind)
+        new_rows = (rows_after - rows_before) if rows_before is not None and rows_after is not None else None
+        with self._conn() as conn:
+            conn.execute(
+                "INSERT INTO coverage_reconciliations (created_at, dataset, ticker, session_date, trigger, "
+                "rows_before, rows_after, new_rows, outcome, certified_by, detail_json) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (utcnow_iso(), dataset, ticker, session_date, trigger, rows_before, rows_after, new_rows, outcome,
+                 certified_by, json.dumps(detail or {}, sort_keys=True, default=str)))
+            conn.commit()
+
+    def list_coverage_reconciliations(self, dataset: Optional[str] = None, ticker: Optional[str] = None,
+                                      limit: int = 200) -> list:
+        clauses, args = [], []
+        for col, val in (("dataset", dataset), ("ticker", ticker)):
+            if val:
+                clauses.append(f"{col} = ?")
+                args.append(val)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT id, created_at, dataset, ticker, session_date, trigger, rows_before, rows_after, new_rows, "
+                f"outcome, certified_by, detail_json FROM coverage_reconciliations {where} ORDER BY id DESC LIMIT ?",
+                (*args, max(1, min(int(limit), 1000)))).fetchall()
+        keys = ("id", "created_at", "dataset", "ticker", "session_date", "trigger", "rows_before", "rows_after",
+                "new_rows", "outcome", "certified_by")
+        return [{**dict(zip(keys, r[:11])), "detail": json.loads(r[11] or "{}")} for r in rows]
 
     # --- collector diagnostics (migration 10; Phase 9) -------------------------
     DIAGNOSTICS_MAX_ROWS = 5000
 
     def record_collection_diagnostic(self, diag: dict, kind: str = ON_DEMAND) -> bool:
         """Stores one sanitized rejected-page diagnostic (session_collection
-        builds it: bounds, timestamps and counts only). Bounded: once the table
-        holds DIAGNOSTICS_MAX_ROWS rows, further diagnostics are only logged.
-        Returns whether the row was stored."""
+        builds it: bounds, timestamps and counts only). Bounded ring buffer
+        (PE-P8): the table keeps the newest DIAGNOSTICS_MAX_ROWS rows; the oldest
+        are dropped in the same transaction. Returns whether the row was stored."""
         self._check_guard(kind)
         with self._conn() as conn:
-            if conn.execute("SELECT COUNT(*) FROM collection_diagnostics").fetchone()[0] >= self.DIAGNOSTICS_MAX_ROWS:
-                return False
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute("DELETE FROM collection_diagnostics WHERE id IN (SELECT id FROM collection_diagnostics "
+                         "ORDER BY id DESC LIMIT -1 OFFSET ?)", (self.DIAGNOSTICS_MAX_ROWS - 1,))
             conn.execute(
                 "INSERT INTO collection_diagnostics (created_at, dataset, ticker, session_date, reason, classification, "
                 "action, walk_id, page_in_window, attempt, detail_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -1096,12 +1161,9 @@ class IngestionCatalog:
     def list_session_coverage(self, dataset: str, ticker: str) -> list:
         with self._conn() as conn:
             rows = conn.execute(
-                "SELECT session_date, status, covered_from_utc, covered_through_utc, pages_walked, rows_seen, "
-                "last_error, retrieved_at FROM session_coverage WHERE dataset = ? AND ticker = ? "
+                f"SELECT {', '.join(self._COVERAGE_COLS)} FROM session_coverage WHERE dataset = ? AND ticker = ? "
                 "ORDER BY session_date", (dataset, ticker)).fetchall()
-        return [{"dataset": dataset, "ticker": ticker, "session_date": r[0], "status": r[1],
-                 "covered_from_utc": r[2], "covered_through_utc": r[3], "pages_walked": r[4],
-                 "rows_seen": r[5], "last_error": r[6], "retrieved_at": r[7]} for r in rows]
+        return [self._coverage_row(dataset, ticker, r) for r in rows]
 
     @staticmethod
     def _window_date_range(start_utc: datetime, end_utc: datetime) -> tuple:
@@ -1122,6 +1184,7 @@ class IngestionCatalog:
                 f"SELECT event_time, raw_json FROM {table} WHERE ticker = ? AND event_time >= ? AND event_time < ? "
                 f"ORDER BY event_time", (ticker, lo, hi)).fetchall()
         seen = set()
+        parsed = []
         for event_time, raw_json in rows:
             ts = _parse_iso_dt(str(event_time).replace("Z", "+00:00"))
             if ts is None or ts < start_utc or ts > end_utc:
@@ -1130,10 +1193,17 @@ class IngestionCatalog:
                 data = json.loads(raw_json) if raw_json else {}
             except (json.JSONDecodeError, TypeError):
                 continue
+            parsed.append((ts, data))
+        # a print reported canceled in ANY stored version is excluded in every version (C-F3)
+        canceled = ({darkpool_print_key(ticker, d) for _t, d in parsed if _is_canceled(d)}
+                    if dataset == "darkpool" else set())
+        for ts, data in parsed:
             if dataset == "darkpool":
-                if data.get("canceled") in (True, "true", "True", 1):
+                if _is_canceled(data):
                     continue
                 key = darkpool_print_key(ticker, data)
+                if key in canceled:
+                    continue
             else:
                 key = ("i", data.get("id")) if data.get("id") is not None else (
                     "f", data.get("created_at"), _num(data.get("total_premium")), data.get("type"))

@@ -96,7 +96,7 @@ def test_generative_jobs_respect_budget_isolation_and_policy(live, monkeypatch, 
     cap, step = rng.randint(0, 25), rng.choice([10, 11, 20])
     tag = f"seed={seed} cap={cap} step={step} history={history}"
 
-    r = client.post("/api/baseline/jobs", json={"tickers": ["ABCD"], "max_pages_per_ticker": cap, "step_pages": step})
+    r = client.post("/api/baseline/jobs", json={"confirm": True, "tickers": ["ABCD"], "max_pages_per_ticker": cap, "step_pages": step})
     if cap < 1:
         assert r.status_code == 400 and logical(uw) == 0, tag
         return
