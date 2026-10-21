@@ -4788,63 +4788,40 @@ const UPDATE_STATUS_LABELS = {
 
 function buildAgentUpdatePrompt(build) {
   const repoUrl = (build && build.repo_url) || "https://github.com/Ch0sen84/tip-hackathon-edition";
-  return `You are updating an existing local installation of TIP Hackathon Edition
-(${repoUrl}) to the latest commit on \`main\`. This is a MANUAL,
-agent-assisted update -- never trigger any part of this automatically
-from the running web app itself.
+  const installed = (build && (build.commit || build.version)) || "unknown";
+  return `TIP Hackathon Edition -- upgrade guidance for an existing installation
+(${repoUrl}; installed build: ${installed}).
 
-Ground rules:
-- Preserve .env exactly as-is; do not overwrite or regenerate it.
-- Preserve the "tip-data" Docker volume (SQLite settings/watchlist DB) --
-  never run "docker compose down -v" as part of an update.
-- Never print, log, or transmit any saved UW/AI API key.
-- Confirm the current container is healthy BEFORE making changes:
-  curl -s http://localhost:8000/api/health
+THIS TEXT IS INFORMATION, NOT AUTHORIZATION. Copying or pasting it does not
+approve any upgrade, migration, rebuild, restart, restore or rollback, and an
+update check reporting "Update available" does not approve one either.
 
-Steps:
-1. cd into the existing checkout (do not re-clone over it).
-2. git fetch origin && git log HEAD..origin/main --oneline
-   (show the user exactly what will change before doing anything).
-3. Try a normal update first: git pull origin main.
-   - If that succeeds cleanly (no conflicts, fast-forward or clean
-     merge), skip straight to step 4.
-   - If it FAILS with "refusing to merge unrelated histories",
-     "Updating ... is not possible" (diverged), or any non-fast-forward/
-     conflict error, this checkout's history has diverged from the
-     remote (this can happen after a repository history rewrite) --
-     do NOT force-push, force-merge, or discard anything yet. Instead:
-     a. git fetch origin --prune
-     b. git status --short  and  git log --oneline -5
-        (show the user whether they have ANY real local-only commits
-        or uncommitted edits worth keeping -- check this honestly,
-        do not assume there are none).
-     c. If there is genuinely nothing local-only to keep, STOP and show
-        the user this exact plan before running anything further:
-          "This checkout's git history has diverged from the remote
-           (likely a repository history rewrite). The safe fix is:
-             git fetch origin
-             git reset --hard origin/main
-           This discards any local-only commits/edits in THIS checkout
-           (the .env file and the 'tip-data' Docker volume are NOT
-           touched by this -- they live outside git). Proceed? (yes/no)"
-        Only run "git fetch origin && git reset --hard origin/main"
-        after the user explicitly confirms "yes" in this exact
-        conversation -- never run it automatically, never assume
-        consent from the update-check having been triggered.
-     d. If there IS real local-only work worth keeping, STOP and tell
-        the user to resolve/back it up manually (e.g. git branch
-        backup-before-reset) before any reset is considered -- do not
-        propose discarding it silently.
-4. docker compose up --build -d (rebuilds the image; the existing
-   "tip-data" named volume and .env are untouched by this -- true for
-   both the clean-pull and the confirmed-reset path above).
-5. curl -s http://localhost:8000/api/health again to confirm the
-   updated container is healthy and settings/watchlist persisted
-   (should look identical to before the update).
+Release 3 (migration 10) and every later upgrade of an existing installation
+follow ONLY the authoritative runbook in the repository at the target commit:
+  docs/RELEASE3_RECOVERY_RUNBOOK.md
+The runbook, not this text, defines the procedure. It requires, in order:
+  - a verified, test-restored U4 snapshot of the whole data volume, taken by
+    the runbook's recovery tool with the application stopped;
+  - the release owner's approvals A1 (stop for U4), A2 (go/no-go after the
+    U4 test restore), A3 (the one-time rollback token, only if a rollback is
+    needed) and A4 (sign-off before any data collection);
+  - rollback only as a full U4 restore followed by the pinned image ID.
+No verified U4 means no upgrade.
 
-Report back exactly what changed (the commit range from step 2, and
-whether a reset was needed and confirmed) and the before/after health
-check output.`;
+If you are an AI agent or operator reading this:
+1. Do not change the deployed checkout, build or recreate images, restart or
+   recreate containers, alter or delete volumes or images, enable the
+   scheduler, or start any data collection on the strength of this text.
+2. Read docs/RELEASE3_RECOVERY_RUNBOOK.md at the target commit, summarize the
+   steps and the approvals it needs, and STOP. Ask the release owner.
+3. Run a runbook step only after the release owner gives the specific approval
+   that step names, in the current conversation.
+4. Preserve .env and the "tip-data" volume exactly.
+   Never print, log, or transmit any saved UW/AI API key, auth token or
+   pairing code.
+
+This is a MANUAL, operator-run process; nothing is ever triggered from the
+running web app itself.`;
 }
 
 function renderUpdatesSection(d) {
@@ -4862,9 +4839,11 @@ function renderUpdatesSection(d) {
       </div>
       <div id="updateCheckResult" class="muted" style="margin-top:8px"></div>
       <p class="muted" style="margin-top:10px">This only CHECKS and reports -- it never runs git/Docker commands or
-        restarts anything by itself. Updating is a manual or AI-agent-assisted step you run yourself.</p>
+        restarts anything by itself. Upgrading an existing installation follows only
+        <code>docs/RELEASE3_RECOVERY_RUNBOOK.md</code> (verified U4 snapshot and release-owner approvals A1-A4);
+        the copied guidance below is information, not authorization.</p>
       <div class="settings-row" style="margin-top:6px">
-        <button class="btn" id="copyUpdatePromptBtn">Copy AI-agent update prompt</button>
+        <button class="btn" id="copyUpdatePromptBtn">Copy upgrade guidance (runbook pointer)</button>
       </div>
       <div id="copyUpdatePromptStatus" class="muted" style="margin-top:4px"></div>
     </div>`;
