@@ -56,12 +56,17 @@ No confidence value is calibrated or predictive (see [TRADING_VALIDITY.md](TRADI
     a print at the open.
   - Each page's bounds, session date and cursor progress are checked.
   - Statuses (with reason codes):
-    - `complete`
-    - `partial`: `session_in_progress`, `page_budget_exhausted`
+    - `complete`: `[open, close]` proven **and certified** (see *Settlement certification* below)
+    - `partial`: `session_in_progress`, `page_budget_exhausted`, `awaiting_settlement`,
+      `suspected_provider_gap`
     - `unknown`: `invalid_rows`, `bounds_not_honored`, `wrong_session_date`, `rows_out_of_order`,
-      `cursor_stuck`, `catalog_write_failed`
-    - `unavailable`: `provider_history_cutoff`, `not_entitled`
-  - A transient provider failure leaves coverage unchanged.
+      `cursor_stuck`
+    - `unavailable`: `provider_history_cutoff` (UW's 403 `historic_data_access_missing` only).
+      `not_entitled` appears only on rows written by earlier releases; such a session is probed again.
+  - A transient provider failure leaves coverage unchanged. **401 and any other 403 are transient
+    failures** (a revoked or mistyped key must not mark history unavailable).
+  - A **local** catalog write failure (disk full, locked database, storage guard) is reported as a failed
+    collection (`catalog_write_failed`) and the stored coverage is kept unchanged.
   - **Rejected pages.** Every row of a page is validated before any row is stored. One invalid row rejects the
     whole page: nothing from it is stored, and an invalid short page never proves a window exhausted.
     - `invalid_rows`: a row that is not an object, carries another ticker, or has a missing or unparseable
@@ -81,9 +86,39 @@ No confidence value is calibrated or predictive (see [TRADING_VALIDITY.md](TRADI
       includes prices, sizes, ids, raw rows or pages, or credentials. Read it with
       `GET /api/diagnostics/collection-bounds` (local, zero UW calls). Nothing reads diagnostics to decide
       coverage, eligibility or signals.
+  - **Settlement certification (migration 11).** UW can report prints late. A session therefore becomes
+    `complete` only through a full `[open, close]` walk that **starts at or after close + settlement lag**
+    (`TIP_COVERAGE_SETTLE_MINUTES`, default 180, clamped 30..1440).
+    - Before that, a finished walk is `partial / awaiting_settlement`. After it, a session that is unsettled,
+      legacy (see below) or suspected of a gap is walked again **from scratch**, not extended.
+    - **Gap check.** If the largest gap between consecutive rows is at least `TIP_COVERAGE_GAP_MIN_MINUTES`
+      (default 20) *and* the session's own average rate predicts ≥ 50 rows in it, the session is withheld
+      once (`suspected_provider_gap`). A second settled walk certifies it if it finds the same data, so a
+      thin ticker is never stuck.
+    - **Provenance.** Each certified row records `certified_by` (`settled-v1`), `certified_at_utc`,
+      `proof_started_utc`, `session_rows`, `max_gap_s` and, for a re-walk, what triggered it and how many
+      rows were stored before. Every post-settlement re-walk is logged in `coverage_reconciliations` with the
+      number of rows it newly found (`GET /api/diagnostics/coverage-reconciliations`, local, zero UW calls).
+    - **Legacy rows.** A `complete` row written by an earlier release has no certifier. It is shown as
+      `complete:legacy_uncertified`, is **not** counted toward any baseline and is **never modified** until
+      an approved baseline job or reconciliation re-walks it.
+    - **Reconciliation.** `POST /api/ticker/{t}/baseline/reconcile` (authenticated, Live only, one prior
+      settled session, at most 200 pages, confirmation required) re-walks a session even if it is
+      certified. It replaces the stored row only if the re-walk certifies; otherwise nothing changes.
+    - **Guarantee.** After certification, the catalog holds every row the provider reported for the session
+      by `proof_started_utc` and nothing that was not reported by `certified_at_utc` (verified against an
+      authoritative synthetic ledger, including a 24-seed property test). A row first reported *during* a
+      multi-step settled walk, or after it, is found by a later reconciliation.
+  - **Cancellations.** A print later re-reported as canceled is stored as an additional canceled version;
+    every version of a canceled print is excluded from sessions and baselines. Corrections (a changed price
+    or size under the same identity) are not detected: UW's behaviour is unverified and `tracking_id` is not
+    unique.
+  - **Rejected sessions** (every retry rejected) are skipped by backfills for 24 hours, then walked again. A
+    rejection on the last page of a budget is treated as an exhausted budget, not as a rejected session.
   - **Session window.** `[open, close]` is inclusive, as the baseline reads it. A dark-pool walk that reaches
     the close requests `older_than = close + 1 s` (exclusive, second resolution), so prints stamped exactly
-    at the close are collected. While a session is in progress, the live edge stays `now − 60 s` (exclusive).
+    at the close are collected. While a session is in progress, the live edge stays `now − 60 s` (exclusive),
+    floored to a whole second for dark pool.
   - **Resuming an interrupted walk.** When a walk stops on its page budget, the checkpoint's `covered_from`
     is the bound the next request would have used, not the oldest row seen.
     - Dark pool: the oldest second + 1 s. Prints sharing that second may not all have fit on the last page,
@@ -104,13 +139,24 @@ No confidence value is calibrated or predictive (see [TRADING_VALIDITY.md](TRADI
     and spend later steps on the other dataset. Eligibility, the 30-session lookback and the 20-session
     requirement are unchanged. Current-session evidence is still collected by every Live refresh.
   - Sessions before a ticker's first observed activity (pre-listing) are excluded from the baseline.
+  - **Only certified sessions count.** Legacy, partial and awaiting-settlement sessions are excluded, and the
+    report says how many legacy sessions are waiting for re-verification.
+  - **Implausibly empty sessions.** A certified session with zero activity *after* the ticker's first activity
+    is excluded (`excluded_implausible_empty`) when the median active session has ≥ 20 rows; for thin tickers
+    a quiet day stays a genuine zero.
+  - **Market calendar.** Unscheduled closures (e.g. national days of mourning, 2012 storm days, 2025-01-09)
+    are not trading sessions; more can be added with `TIP_EXTRA_MARKET_CLOSURES` (comma-separated dates).
 - **No look-ahead.** Only sessions strictly before the evidence session are eligible.
 - **Data hygiene.** Dark-pool prints are identified by `(tracking_id, executed_at, price, size, volume)`.
   UW `tracking_id` alone is **not** unique (verified live). Canceled prints are excluded.
 - **How coverage grows:**
   - every Live refresh (small page budget for the evidence session),
-  - each evaluating scheduler cycle (bounded, rotating watchlist backfill),
-  - `POST /api/ticker/{t}/baseline/backfill` (authenticated, budget-clamped).
+  - approved baseline jobs (`POST /api/baseline/jobs`; the server answers 428 with the total page budget until
+    the request is confirmed),
+  - `POST /api/ticker/{t}/baseline/backfill` (authenticated, budget-clamped),
+  - reconciliations (above),
+  - the scheduler's rotating watchlist backfill **only if** `TIP_SCHEDULER_BASELINE_BACKFILL=1`, and only on
+    recurring evaluating cycles; never from a one-time run. It is off by default.
   `GET /api/ticker/{t}/baseline` reports coverage with zero UW calls.
 - **Demo** uses labeled fixture inputs (`demo_fixture_baseline`, `demo_fixture_snapshot_threshold`).
 
@@ -154,3 +200,8 @@ No confidence value is calibrated or predictive (see [TRADING_VALIDITY.md](TRADI
 - **Basic plan rate limits and the exact history cutoff** were not probed (≥ ~30 sessions verified
   accessible).
 - **`catalyst_identified` is unsupported in Live** (no verification workflow).
+- **After upgrading to schema 11, existing sessions are legacy.** Baselines report `insufficient` until
+  approved baseline jobs re-verify ≥ 20 sessions per ticker and dataset. Nothing is re-walked automatically.
+- **Settlement lag and gap thresholds are heuristics.** UW's late-report window is not documented; 180 minutes
+  covers what was observed. Reconciliation is the remedy for anything later.
+- **Corrections** of already-stored prints are not detected (see *Cancellations*).

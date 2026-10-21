@@ -41,10 +41,19 @@ Confidence and lifecycle labels are rule-based evidence-coverage descriptions, *
 A Live **Refresh** collects only the current evidence session. Prior sessions are collected by one of the
 paths below; with none of them, the gates stay "insufficient" indefinitely.
 
+A prior session counts only once it is **certified**: walked in full at least `TIP_COVERAGE_SETTLE_MINUTES`
+(default 180) after its close, so prints the provider reports late are included. Sessions collected by an
+earlier release are shown as **legacy, needs re-verification** and are not counted until a build re-walks
+them; after upgrading, an existing install therefore reports "insufficient" until you build baselines again.
+Nothing is re-walked automatically. Details: [docs/SIGNAL_INTEGRITY_RULES.md](docs/SIGNAL_INTEGRITY_RULES.md)
+section 4.
+
 0. **Settings → Historical baselines (Live)** (recommended). Shows each watchlist ticker's collected dark-pool
    and options-flow sessions against the 20-session requirement, and why it is still insufficient (including a
    provider history cutoff). **Build baseline** (one ticker) or **Build baselines for the whole watchlist** starts
    a bounded job:
+   - before anything is sent, the app shows the total page budget the server computed and asks you to
+     confirm (the API refuses an unconfirmed job with HTTP 428);
    - 10 UW pages per step, at most 400 per ticker per build (click **Build** again to continue a busy
      ticker), stopping at 20 complete sessions;
    - **Pause** and **Cancel** are cooperative: they take effect when the step in progress finishes, not
@@ -67,9 +76,14 @@ paths below; with none of them, the gates stay "insufficient" indefinitely.
    ```
 
    (Local Mode accepts these headers only on a loopback-bound install; adjust the port to your `BIND_PORT`.)
-2. **Scheduler `enabled`.** Each evaluating cycle during market hours also backfills
-   `TIP_BASELINE_BACKFILL_PAGES` pages for `TIP_BASELINE_BACKFILL_TICKERS_PER_CYCLE` rotating watchlist
-   tickers. `disabled` and `dry_run` never backfill.
+2. **Scheduler `enabled`, opt-in only.** With `TIP_SCHEDULER_BASELINE_BACKFILL=1` (default off), each
+   recurring evaluating cycle during market hours also backfills `TIP_BASELINE_BACKFILL_PAGES` pages for
+   `TIP_BASELINE_BACKFILL_TICKERS_PER_CYCLE` rotating watchlist tickers. `disabled`, `dry_run` and every
+   one-time run never backfill.
+3. **Reconciliation of one settled session.** `POST /api/ticker/{t}/baseline/reconcile` with
+   `{"dataset": "darkpool", "session_date": "YYYY-MM-DD", "max_pages": 100, "confirm": true}` re-walks one
+   prior session (at most 200 pages) to pick up prints reported after it was certified. Without
+   `"confirm": true` it answers 428 with the budget and does nothing.
 
 Measured cost for one SPY-scale ticker (about 50,000 dark-pool prints and 15,000 flow alerts per session):
 - about 2,800–4,200 UW pages for 20 sessions, about 4,200–6,300 for the full 30-session lookback;
@@ -562,7 +576,7 @@ BUILD_COMMIT=$(git rev-parse HEAD) BUILD_VERSION=$(git describe --tags --always)
 If you build with a plain `docker compose build` (no version args), the
 app honestly shows "unknown installed version" rather than guessing.
 
-**The four states** `GET /api/settings/update-check` (and the Settings
+**The four states** `POST /api/settings/update-check` (authenticated; and the Settings
 UI) can report:
 
 | State | Meaning |
@@ -633,7 +647,11 @@ explicit setting from a prior version keeps it, never silently resets
 or silently turns it on).
 
 Three modes, settable via `POST /api/scheduler/mode` (requires
-`X-TIP-Auth` like every other mutating route):
+`X-TIP-Auth` like every other mutating route). `dry_run` and `enabled` arm
+recurring provider requests, so the request must also carry `"confirm"`
+equal to the mode (e.g. `{"mode": "enabled", "confirm": "enabled"}`);
+otherwise the server answers 428 with the per-cycle request budget and
+changes nothing. `disabled` needs no confirmation:
 
 * `disabled` -- zero background UW calls, ever.
 * `dry_run` -- one bounded screener call per cycle, writes a discovery
@@ -690,7 +708,11 @@ lock, so a second `run-once` call while one is already executing (or
 while the automatic loop happens to be mid-cycle) gets a `409` --
 rejected outright, never queued for later. Calling `run-once` while the
 scheduler's mode is `disabled` returns `{"ran": false, "reason":
-"disabled"}` -- set `dry_run` or `enabled` first.
+"disabled"}` -- set `dry_run` or `enabled` first. Any `run-once` that will
+make provider requests (every call with a `depth`, and the no-depth call
+while the mode is not `disabled`) must carry `"confirm": true`; otherwise
+it answers 428 with the request budget and runs nothing. A one-time run
+never backfills history.
 
 ### Single-process by design
 
