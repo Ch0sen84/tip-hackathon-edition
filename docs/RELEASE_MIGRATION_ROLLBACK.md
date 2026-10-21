@@ -117,6 +117,98 @@ port or a local replay:
 - **Retention is never run by the app.** `prune` is a double-opt-in prototype; do not run it on deployed data
   without a separate decision.
 
+## Release 3: collector reliability (migration 10)
+
+**Migration 10** is additive: it creates `collection_diagnostics` plus an index. Migrations ≥ 7 take an automatic `*.pre-migration-*.bak` first; on the current ~555 MB DB that is about 0.6 GB.
+
+The **[R]** marks are explained in the legend at the end of this section.
+
+### Rollback limits (mandatory)
+- **Code-only rollback** to the 147e315 image is allowed **only when it is proven that the candidate made no collector request and no collection write.** The proof is the database check below.
+  - It returns all zeros only if no observation, coverage, diagnostic or baseline-job write happened after migration 10 was applied.
+  - App telemetry is *not* proof: it resets on every restart.
+- **After any candidate collection activity, rollback must restore the exact verified pre-upgrade snapshot** (step U4). Do not use a code-only rollback.
+  - Reason (rehearsed): 147e315 re-walks sessions Release 3 left `unknown: invalid_rows` / `rows_out_of_order` and certifies them `complete` under its lenient filter. It also keeps every row and coverage change Release 3 wrote.
+
+Code-only proof. Run it with the app stopped, in a throwaway container mounting the volume read-only. All four counts must be 0:
+```sql
+-- A = (SELECT applied_at FROM schema_version WHERE version = 10)
+SELECT (SELECT COUNT(*) FROM darkpool_observations     WHERE retrieved_at > A)
+     + (SELECT COUNT(*) FROM options_flow_observations WHERE retrieved_at > A) AS observations_after,
+       (SELECT COUNT(*) FROM session_coverage          WHERE retrieved_at > A) AS coverage_after,
+       (SELECT COUNT(*) FROM collection_diagnostics)                          AS diagnostics,
+       (SELECT COUNT(*) FROM baseline_jobs             WHERE created_at   > A) AS jobs_after;
+```
+
+### Scheduler startup safety (why the check is required)
+- Every app startup starts the scheduler thread (`main._on_startup` → `SchedulerRunner.start`). Its behaviour depends only on the persisted `scheduler_state.mode`:
+
+  | Mode | Behaviour |
+  |---|---|
+  | `disabled` | Does nothing |
+  | `dry_run` | One discovery (screener) request per cycle during market hours |
+  | `enabled` | Discovery **plus per-ticker evaluations** and the watchlist baseline-backfill slice |
+
+- A baseline job paused by a restart does **not** stop the scheduler. An `enabled` persisted mode would therefore collect and evaluate after an upgrade or rollback even though every job is paused.
+- So the persisted mode must be checked **before** starting the candidate **and before** starting the rollback image, and again **after** startup.
+
+### Operator runbook
+
+Names:
+- container `tip-hackathon-edition-tip-hackathon-1`;
+- volume `tip-hackathon-edition_tip-data`;
+- `<BK>` is a new backup directory on the host.
+
+Every command runs on the host with `MSYS_NO_PATHCONV=1` under Git Bash.
+
+#### Upgrade
+| Step | Action |
+|---|---|
+| U1 | Record the running build (`GET /api/settings/version` → `147e315`) and image ID. Tag it for a pinned rollback: `docker tag <image id> tip-hackathon-edition-tip-hackathon:rollback-147e315`. |
+| U2 [R] | Stop the app: `docker stop tip-hackathon-edition-tip-hackathon-1`. |
+| U3 [R] | List sidecars while stopped: `tip_hackathon.db-wal`, `-shm`, `-journal`. **Never delete them.** A stopped database's `-wal` can hold committed data; the full-volume snapshot below captures them with the DB. |
+| U4 [R] | Full-volume snapshot, checksum and manifest. This is **the only restore point**. Record its path and SHA-256. `docker run --rm --network none -v tip-hackathon-edition_tip-data:/src:ro -v "<BK>:/dst" python:3.11-slim sh -c 'tar -C /src -cpf /dst/tip-data-pre-upgrade.tar . && cd /dst && sha256sum tip-data-pre-upgrade.tar > tip-data-pre-upgrade.tar.sha256'`. Also record a manifest (schema version, `integrity_check`, row counts of `darkpool_observations`, `options_flow_observations`, `session_coverage`, `signal_evaluations`, `baseline_jobs`) from a read-only container. |
+| U5 [R] | Persisted scheduler check (read-only, app stopped): `SELECT mode FROM scheduler_state` must be **`disabled`**. If it is not, stop and resolve it **before** any startup. |
+| U6 | Build the candidate with `tools/build_with_version.sh` (stamps the commit) and start it. Migration 10 runs at startup. |
+| U7 [R] | After startup, with **no** refresh, backfill, job or scan:<br>• `GET /api/scheduler/status` = `disabled`;<br>• `GET /api/diagnostics/uw-requests` totals = 0 (re-read after a few seconds);<br>• no baseline job running;<br>• schema 10;<br>• a new `*.pre-migration-*.bak` exists. |
+
+#### Rollback
+| Step | Action |
+|---|---|
+| R0 | Decide the type: run the code-only proof (app stopped). Any non-zero count means **full restore**. |
+| R1 [R] | Stop the app. |
+| R2 [R] | Preserve the failed post-upgrade volume for forensics: `tar -C /src -cpf /dst/tip-data-post-upgrade-forensic.tar .` plus its `sha256sum`, into a separate directory. |
+| R3 [R] | Identify the restore point **only** by the U4 path and checksum: `cd <BK> && sha256sum -c tip-data-pre-upgrade.tar.sha256`. **Never choose among `*.pre-migration-*.bak` files by name or time.** The `.bak` is a DB-only fallback and is used only if the U4 snapshot is unavailable *and* its own recorded checksum is verified. |
+| R4 [R] | Restore **into the existing volume** (app stopped). Empty it completely, including `-wal` / `-shm` sidecars, settings and tokens, then extract the snapshot: `docker run --rm --network none -v tip-hackathon-edition_tip-data:/d -v "<BK>:/b:ro" python:3.11-slim sh -c 'find /d -mindepth 1 -delete && tar -C /d -xpf /b/tip-data-pre-upgrade.tar'` |
+| R5 [R] | Verify, read-only: `integrity_check` = ok; schema max = **9**; `settings.json` and `.auth_token` present; no sidecars that were absent from the snapshot; row counts **equal the U4 manifest**; `scheduler_state.mode` = **`disabled`** (the persisted check before the rollback startup). |
+| R6 [R] | Start the **pinned** 147e315 image (`…:rollback-147e315`, or by image ID). Never start `latest`. |
+| R7 [R] | Validate with no provider-triggering action (no refresh, backfill, job, scan or chart refresh): version `147e315`, schema 9, scheduler `disabled`, UW totals 0 (re-read), no job running. |
+
+**Legend.** **[R]** = rehearsed on 2026-10-20 in a disposable Docker environment:
+- a copy of the deployed schema-9 DB plus synthetic settings and token files;
+- the candidate run against a local fake provider on an internal network, so it really collected;
+- the code-only proof correctly refused (1,603 observations, 4 coverage rows and 1 job after migration 10), and in a separate run correctly permitted with zero writes;
+- R4 removed simulated stray `-wal` / `-shm` files;
+- R5 matched the manifest exactly;
+- R6 started by pinned image ID.
+
+**Not rehearsed:** U1's tag, U6's `build_with_version.sh` (the rehearsal built with `git archive`), and the production Compose file.
+
+### Evaluation hold (release-level prohibition)
+Deploying Release 3 does **not** re-verify sessions certified by earlier releases. `session_coverage` has no collector-version column, so the engine accepts every legacy `complete` session.
+
+Until legacy sessions are revalidated by corrected collection, or quarantined and excluded under an approved policy, **no evaluation may consume them**. In practice:
+- no `POST /api/ticker/{t}/refresh` / scan for an affected ticker;
+- no `run-once`;
+- the scheduler stays `disabled`.
+
+Affected records today (deployed DB, read-only inventory):
+- SPY: 26 `darkpool` `complete` sessions (D1 and D5) and 20 `options_flow` `complete` sessions (certified without whole-page validation);
+- the session collected while in progress (late-report limitation);
+- the 46 derived `session_value_curves` built from them.
+
+Nothing in this release changes evaluations, confidence rules or lifecycle state.
+
 ## Rollback
 - **Code.** Redeploy the 05c47ca image. The extra tables are ignored by the old code, and the migrations
   never modify legacy tables. Rows the new version wrote while running (new evaluations, observations) stay,
