@@ -541,7 +541,7 @@ tools/check_deployment_binding.sh <your-compose-project-name>
 This fails loudly if the container is published on `0.0.0.0`/`::` (every
 interface) unless you explicitly set `ALLOW_PUBLIC_BIND=1` first.
 
-> **Upgrading an existing deployment to Release 3 (migration 10)?** Follow only
+> **Upgrading an existing deployment to Release 3 (migrations 10 and 11)?** Follow only
 > [docs/RELEASE3_RECOVERY_RUNBOOK.md](docs/RELEASE3_RECOVERY_RUNBOOK.md): it requires a verified full-volume
 > U4 snapshot and release-owner approvals A1-A4 before the upgrade, and is the only supported rollback.
 > Builds older than Release 3 still offer a generic "AI-agent update prompt" with direct rebuild steps: never
