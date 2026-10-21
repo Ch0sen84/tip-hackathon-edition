@@ -694,7 +694,13 @@ def update_session_coverage(client, catalog, dataset: str, ticker: str, session_
                 reconciliation("suspected_provider_gap", len(times),
                                {"max_gap_s": max_gap, "suspected_at": now_utc.isoformat()})
                 carried.update(gap_flag="suspected", reverify_trigger=None, rows_before_reverify=None)
-            elif (implausible and carried["gap_flag"] == "suspected" and suspected_at is not None
+            elif implausible and carried["gap_flag"] == "suspected" and suspected_at is None:
+                # R3B-7: no suspicion on record (an earlier build did not log first-walk suspicions, or the
+                # record fell out of the log window): the waiting period starts now -- never confirm blind
+                cov_status, why = "partial", "suspected_provider_gap"
+                reconciliation("suspected_provider_gap", len(times),
+                               {"max_gap_s": max_gap, "suspected_at": now_utc.isoformat(), "relogged": True})
+            elif (implausible and carried["gap_flag"] == "suspected"
                   and now_utc - suspected_at < policy.GAP_CONFIRM_AFTER):
                 cov_status, why = "partial", "suspected_provider_gap"     # too soon to call the gap genuine
             else:
@@ -746,7 +752,7 @@ def backfill_baseline(client, catalog, dataset: str, ticker: str, evidence_sessi
         if budget <= 0:
             break
         cov = catalog.get_session_coverage(dataset, ticker, d.isoformat()) or {}
-        if policy.is_certified(cov) or _is_cutoff(cov) or (
+        if policy.is_certified(cov) or _is_cutoff(cov) or _awaiting_gap_confirmation(catalog, cov, now_utc) or (
                 cov.get("status") == "unknown" and cov.get("last_error") in BACKOFF_REASONS
                 and not _rejection_expired(cov, now_utc)):
             if _is_cutoff(cov):
@@ -768,6 +774,15 @@ def _suspected_at(catalog, dataset, ticker, sd) -> Optional[datetime]:
              if r.get("session_date") == sd and r.get("outcome") == "suspected_provider_gap"]
     times = [t for t in times if t is not None]
     return max(times) if times else None
+
+
+def _awaiting_gap_confirmation(catalog, cov: dict, now_utc: datetime) -> bool:
+    """R3B-3: a suspected-gap session cannot be confirmed before GAP_CONFIRM_AFTER, so re-walking it sooner
+    only spends pages; backfills and jobs pass over it (and spend their budget on other sessions)."""
+    if cov.get("status") != "partial" or cov.get("last_error") != "suspected_provider_gap":
+        return False
+    at = _suspected_at(catalog, cov.get("dataset"), cov.get("ticker"), cov.get("session_date"))
+    return at is not None and now_utc - at < policy.GAP_CONFIRM_AFTER
 
 
 def _is_cutoff(cov: dict) -> bool:

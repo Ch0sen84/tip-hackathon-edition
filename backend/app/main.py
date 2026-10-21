@@ -2467,7 +2467,7 @@ _baseline_backfill_lock = threading.Lock()
 
 
 @app.post("/api/ticker/{ticker}/baseline/backfill", dependencies=[Depends(require_auth)])
-def ticker_baseline_backfill(ticker: str, max_pages: int = 60, confirm: bool = False):
+def ticker_baseline_backfill(ticker: str, max_pages: int = 60, confirm: str = ""):
     """Explicit, authenticated, bounded backfill of COMPLETE session coverage
     for prior trading sessions (real UW requests, at most `max_pages`,
     clamped to BACKFILL_MAX_PAGES_PER_REQUEST)."""
@@ -2478,7 +2478,7 @@ def ticker_baseline_backfill(ticker: str, max_pages: int = 60, confirm: bool = F
     if int(max_pages) < 1:                               # never turn a 0/negative budget into a request
         raise HTTPException(status_code=400, detail="max_pages must be at least 1.")
     budget = max(1, min(int(max_pages), BACKFILL_MAX_PAGES_PER_REQUEST))
-    if not confirm:                                     # S2-2: same contract as reconcile and jobs
+    if confirm != "true":                               # S2-2 / R3B-5: exactly ?confirm=true, nothing coerced
         raise _confirmation_required(
             "baseline_backfill",
             f"Collects prior sessions for {ticker} from Unusual Whales now: up to {budget} pages.",
@@ -2589,7 +2589,8 @@ def _baseline_job_step(ticker: str, pages: int, datasets=None) -> dict:
     # in coverage; report it so the job labels the ticker honestly.
     catalog = get_catalog()
     for dataset, r in result.items():
-        r["history_cutoff"] = any(c["status"] == "unavailable" for c in catalog.list_session_coverage(dataset, ticker))
+        r["history_cutoff"] = any(session_collection._is_cutoff(c)                       # R3B-9
+                                  for c in catalog.list_session_coverage(dataset, ticker))
     return result
 
 
@@ -2631,7 +2632,7 @@ def _coverage_overview(ticker: str, session_date) -> dict:
         complete = coverage_policy.usable_prior_count(prior, session_date.isoformat())   # C2-5
         legacy = sum(1 for c in prior if coverage_policy.is_legacy_complete(c))
         cutoff = next((c["session_date"] for c in sorted(prior, key=lambda c: c["session_date"], reverse=True)
-                       if c["status"] == "unavailable"), None)
+                       if session_collection._is_cutoff(c)), None)                  # R3B-9
         ev = next((c for c in cov if c["session_date"] == session_date.isoformat()), None)
         need = dark_pool_baseline.BASELINE_READY_MIN
         if complete < need:
@@ -2751,14 +2752,14 @@ def baseline_job_resume(job_id: int, body: Optional[ConfirmBody] = None):
         # S2-2: resuming restarts provider spending; state what is left of the approved budget first
         per = int(job.get("max_pages_per_ticker") or 0)
         progress = job.get("progress") or {}
-        left = sum(max(0, per - int((progress.get(t) or {}).get("pages_used") or 0))
-                   for t in (job.get("tickers") or [])
-                   if (progress.get(t) or {}).get("state") not in ("done", "complete", "cutoff", "target_reached"))
+        active = [t for t in (job.get("tickers") or [])
+                  if (progress.get(t) or {}).get("state", "pending") in ("pending", "running")]
+        left = sum(max(0, per - int((progress.get(t) or {}).get("pages_used") or 0)) for t in active)
         raise _confirmation_required(
             "baseline_job_resume",
             f"Resumes the historical collection: up to {left} more Unusual Whales pages across "
-            f"{len(job.get('tickers') or [])} ticker(s), in the background until done, paused or cancelled.",
-            remaining_pages=left)
+            f"{len(active)} ticker(s), in the background until done, paused or cancelled.",
+            remaining_pages=left, tickers=active)
     return _baseline_job_transition(job_id, ("paused",), "running", start=True)
 
 

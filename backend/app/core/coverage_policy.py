@@ -41,15 +41,17 @@ def _env_minutes(name: str, default: int, lo: int, hi: int) -> int:
 # explicit reconciliation walk.
 SETTLE_LAG = timedelta(minutes=_env_minutes("TIP_COVERAGE_SETTLE_MINUTES", 180, 30, 1440))
 
-# Gap check (C2-1): an interval without any row is "implausible" when it is at least GAP_MIN long AND the
-# session's rate OUTSIDE its long gaps predicts at least GAP_EXPECTED_ROWS rows in it -- for one gap, or
-# summed over all long gaps (several medium outages). P(no row) ~ exp(-25) under a Poisson model, still
-# negligible allowing for intraday seasonality (a midday lull is a few times quieter than the average).
-# The rate excludes the gaps themselves, so an outage cannot hide itself by lowering the average.
+# Gap check (C2-1, R3B-1/2): activity is measured in ACTIVE MINUTES (minutes with at least one row), so an
+# opening burst or a closing cross of hundreds of prints counts as one or two minutes and cannot make an
+# ordinary midday lull look like an outage. A gap of at least GAP_MIN is "implausible" when the share of
+# active minutes OUTSIDE the tested gap(s) predicts at least GAP_EXPECTED_ACTIVE_MINUTES active minutes
+# inside them (one gap, or the k largest together: several medium outages). A session silent for more than
+# half of its span after a clearly active stretch is implausible too, however short that stretch was.
 GAP_MIN = timedelta(minutes=_env_minutes("TIP_COVERAGE_GAP_MIN_MINUTES", 5, 2, 390))
-GAP_EXPECTED_ROWS = 25.0
-GAP_MIN_ROWS = 50                     # a rate needs at least this many rows behind it
-GAP_MIN_OBSERVED_S = 3600.0           # ... observed over at least an hour outside the tested gaps
+GAP_EXPECTED_ACTIVE_MINUTES = 15.0
+GAP_MIN_ACTIVE_MINUTES = 20           # fewer active minutes than this: a thin ticker, its outages undetectable
+GAP_MIN_OBSERVED_MINUTES = 60.0       # a rate is taken from at least an hour of trading outside the gaps
+GAP_EXPECTED_ROWS = GAP_EXPECTED_ACTIVE_MINUTES   # kept for tests that switch the check off (no_gap_policy)
 # C2-2: a suspected gap is confirmed (certified as genuine) only by a walk at least this long after the
 # walk that suspected it, so a provider backfill has time to arrive -- never by an immediate re-click.
 GAP_CONFIRM_AFTER = timedelta(hours=_env_minutes("TIP_COVERAGE_GAP_CONFIRM_HOURS", 12, 1, 72))
@@ -64,6 +66,11 @@ def is_certified(cov) -> bool:
     return bool(cov) and cov.get("status") == "complete" and cov.get("certified_by") in ACCEPTED_CERTIFIERS
 
 
+# Legacy rows (R3B-8, documented trade-off): a legacy 'complete' row is never certified, never counted, and
+# never touched by evidence collection or by a walk before settlement. A SETTLED re-walk of it by an approved
+# job or backfill records its progress in the same row (status partial, reverify_trigger 'legacy') because a
+# busy session needs many job steps; no observation is ever deleted, and the row was not counted before
+# either. The re-walk's start and its outcome are kept in the row's provenance and in coverage_reconciliations.
 def is_legacy_complete(cov) -> bool:
     return bool(cov) and cov.get("status") == "complete" and cov.get("certified_by") not in ACCEPTED_CERTIFIERS
 
@@ -81,26 +88,29 @@ def gap_assessment(event_times, open_utc, close_utc) -> tuple:
     if span <= 0:
         return 0.0, False
     points = [open_utc] + sorted(event_times) + [close_utc]
-    gaps = sorted(((b - a).total_seconds() for a, b in zip(points, points[1:])), reverse=True)
-    max_gap = gaps[0]
-    if len(event_times) < GAP_MIN_ROWS:
-        return max_gap, False          # too few rows to estimate a rate: a thin ticker's outage is undetectable
-    # Test the k largest gaps (k = 1..5) against the rate observed OUTSIDE those k gaps: one long outage, or
-    # a few medium ones together. Regular sparse trading (every gap similar) never qualifies, because the
-    # rate outside k typical gaps predicts about k rows in them.
-    implausible = False
+    max_gap = max((b - a).total_seconds() for a, b in zip(points, points[1:]))
+    threshold = GAP_EXPECTED_ROWS          # == GAP_EXPECTED_ACTIVE_MINUTES unless a test disabled the check
+    # active minutes, as offsets from the open; gaps between consecutive active minutes (plus the edges)
+    mins = sorted({int((t - open_utc).total_seconds() // 60) for t in event_times})
+    span_min = span / 60.0
+    if len(mins) < GAP_MIN_ACTIVE_MINUTES or threshold == float("inf"):
+        return max_gap, False
+    marks = [0.0] + [float(m) for m in mins] + [span_min]
+    gaps = sorted((max(0.0, b - a - 1.0) for a, b in zip(marks, marks[1:])), reverse=True)   # empty minutes
+    gap_min = GAP_MIN.total_seconds() / 60.0
+    if gaps[0] >= gap_min and gaps[0] >= span_min / 2:
+        return max_gap, True               # silent for most of the session after clearly active trading
     for k in range(1, min(5, len(gaps)) + 1):
         top = gaps[:k]
-        if top[-1] < GAP_MIN.total_seconds():
+        if top[-1] < gap_min:
             break
-        outside = span - sum(top)
-        if outside < GAP_MIN_OBSERVED_S:
-            break                      # the rate would be extrapolated from too short a stretch of trading
-        rate = len(event_times) / outside
-        if rate * sum(top) >= GAP_EXPECTED_ROWS * (1 if k == 1 else 2):
-            implausible = True
+        outside = span_min - sum(top)
+        if outside < GAP_MIN_OBSERVED_MINUTES:
             break
-    return max_gap, implausible
+        expected = len(mins) / outside * sum(top)     # active minutes the outside rate predicts inside
+        if expected >= threshold * (1 if k == 1 else 2):
+            return max_gap, True
+    return max_gap, False
 
 
 def usable_prior_count(covs, before_iso: str, max_history: int = 60) -> int:

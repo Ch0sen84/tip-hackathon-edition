@@ -203,7 +203,7 @@ def _append_manifest(archive_dir: Path, entry: dict) -> None:
 def cmd_archive(db, keep, archive_dir: Path):
     from app.ingestion import IngestionCatalog
     cat = IngestionCatalog(db)
-    conn = sqlite3.connect(db)
+    conn = sqlite3.connect(db, timeout=30)
     done, skipped = 0, []
     existing = _manifest(archive_dir)
     for dataset, ticker, sd in _candidates(conn, keep):
@@ -260,7 +260,7 @@ def cmd_prune(db, keep, archive_dir: Path, confirmed: bool):
     from app.ingestion import IngestionCatalog
     cat = IngestionCatalog(db)
     manifest = _manifest(archive_dir)
-    conn = sqlite3.connect(db, isolation_level=None)
+    conn = sqlite3.connect(db, isolation_level=None, timeout=30)
     cited = {ds: _cited_ids(conn, t) for ds, t in TABLES.items()}
     pruned, skipped = [], []
     for dataset, ticker, sd in _candidates(conn, keep):
@@ -308,7 +308,7 @@ def cmd_prune(db, keep, archive_dir: Path, confirmed: bool):
 def cmd_restore(db, archive_dir: Path, only=None):
     from app.ingestion import IngestionCatalog
     cat = IngestionCatalog(db)
-    conn = sqlite3.connect(db, isolation_level=None)
+    conn = sqlite3.connect(db, isolation_level=None, timeout=30)
     restored = []
     for (dataset, ticker, sd), e in sorted(_manifest(archive_dir).items()):
         if only and sd != only:

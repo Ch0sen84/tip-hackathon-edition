@@ -798,10 +798,10 @@ def _pid_alive(pid: int) -> bool:
         return True
     try:
         import ctypes
-        k32 = ctypes.windll.kernel32
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
         h = k32.OpenProcess(0x1000, False, pid)          # PROCESS_QUERY_LIMITED_INFORMATION
         if not h:
-            return False
+            return ctypes.get_last_error() == 5           # ERROR_ACCESS_DENIED: it exists, we may not query it
         try:
             code = ctypes.c_ulong()
             return bool(k32.GetExitCodeProcess(h, ctypes.byref(code))) and code.value == 259   # STILL_ACTIVE

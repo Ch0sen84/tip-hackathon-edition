@@ -286,13 +286,39 @@ def _is_state_marker(source_id) -> bool:
     return "#canceled" in str(source_id) or "#reinstated@" in str(source_id)
 
 
+def _reader_key(ticker: str, t: dict, source_id) -> tuple:
+    """Print identity for the cache readers; a row without print identity fields is its own print (keyed
+    by its stored id, marker suffixes stripped)."""
+    if t.get("executed_at") is None and t.get("tracking_id") is None:
+        return ("sid", str(source_id).split("#", 1)[0])
+    return ("print", darkpool_print_key(ticker, t))
+
+
+def _current_versions(ticker: str, versions) -> list:
+    """C-F3 / P2-5 / C2-3 / R3B-4: one entry per print, carrying its NEWEST stored version (highest row id),
+    and none for a print whose newest version is canceled -- the same rule _iter_window applies, so a print
+    first stored canceled and later reinstated is served everywhere. `versions` is a list of
+    (row_id, trade, source_id, extra) in output order; returns [(trade, extra)] of the chosen versions."""
+    latest: dict = {}
+    for row_id, t, sid, _x in versions:
+        k = _reader_key(ticker, t, sid)
+        if k not in latest or row_id > latest[k][0]:
+            latest[k] = (row_id, t)
+    seen, out = set(), []
+    for _row_id, t, sid, extra in versions:
+        k = _reader_key(ticker, t, sid)
+        if k in seen:
+            continue
+        seen.add(k)
+        newest = latest[k][1]
+        if not _is_canceled(newest):
+            out.append((newest, extra))
+    return out
+
+
 def _current_prints(ticker: str, versions) -> list:
-    """The stored observations minus every print CURRENTLY canceled and minus the state-marker rows
-    (C-F3 / P2-5 / C2-3). `versions` is a list of (row_id, trade, source_id). Ordinary rows are passed
-    through as before (no other de-duplication: that is _iter_window's job)."""
-    canceled = _canceled_print_keys(ticker, [(i, t) for i, t, _sid in versions])
-    return [t for _i, t, sid in versions
-            if not _is_state_marker(sid) and not _is_canceled(t) and darkpool_print_key(ticker, t) not in canceled]
+    """`versions`: (row_id, trade, source_id); returns the current version of every print not canceled."""
+    return [t for t, _x in _current_versions(ticker, [(i, t, sid, None) for i, t, sid in versions])]
 
 
 def darkpool_print_key(ticker: str, trade: dict) -> str:
@@ -1038,10 +1064,8 @@ class IngestionCatalog:
                 parsed.append((row_id, event_time, json.loads(raw_json) if raw_json else {}, sid))
             except (json.JSONDecodeError, TypeError):
                 parsed.append((row_id, event_time, {}, sid))
-        canceled = _canceled_print_keys(ticker, [(i, d) for i, _e, d, _s in parsed if d])
-        for _row_id, event_time, data, sid in parsed:
-            if _is_state_marker(sid) or (data and (_is_canceled(data) or darkpool_print_key(ticker, data) in canceled)):
-                continue                                     # P2-5 / C2-3: no marker rows, no canceled print
+        chosen = _current_versions(ticker, [(i, d, sid, e) for i, e, d, sid in parsed])   # R3B-4
+        for data, event_time in chosen:
             date_key = (event_time or "")[:10]
             premium = 0.0
             if data:

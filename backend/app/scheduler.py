@@ -391,7 +391,9 @@ class SchedulerRunner:
                 if isinstance(why, dict):
                     why = why.get("message") or why.get("status") or "provider failure"
                 pause_reason = (f"last cycle failed: market screener unavailable ({str(why or 'provider failure')[:160]}); "
-                                "nothing was cataloged and the next scheduled cycle retries")
+                                "nothing was cataloged; "
+                                + ("the next scheduled cycle retries" if recurring
+                                   else "this was a one-time run -- run it again to retry"))
                 candidates = []
             # QA remediation D3: this snapshot persistence is now gated to
             # exclude a real SyntheticDataAdapter (demo mode) -- SAME
