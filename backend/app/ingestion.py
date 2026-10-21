@@ -369,7 +369,12 @@ class IngestionCatalog:
                         alert.get("type"),
                     )
                 )
-                event_time = alert.get("created_at") or retrieved_at
+                # Evidence time is the provider's own timestamp. A row without a
+                # parseable one is not evidence: never stamp it with the retrieval
+                # time (it would be counted inside whatever session that falls in).
+                event_time = alert.get("created_at")
+                if _parse_iso_dt(event_time) is None:
+                    continue
                 cur = conn.execute(
                     "INSERT OR IGNORE INTO options_flow_observations "
                     "(source_id, ticker, event_time, retrieved_at, raw_json) VALUES (?, ?, ?, ?, ?)",
@@ -405,7 +410,9 @@ class IngestionCatalog:
                 # same-size prints that 05c47ca's value fingerprint collapsed
                 # (437 real prints lost in the captured DB).
                 source_id = trade.get("id") or trade.get("trade_id") or darkpool_print_key(ticker, trade)
-                event_time = trade.get("executed_at") or retrieved_at
+                event_time = trade.get("executed_at")
+                if _parse_iso_dt(event_time) is None:   # not evidence: never use the retrieval time
+                    continue
                 cur = conn.execute(
                     "INSERT OR IGNORE INTO darkpool_observations "
                     "(source_id, ticker, event_time, retrieved_at, raw_json) VALUES (?, ?, ?, ?, ?)",

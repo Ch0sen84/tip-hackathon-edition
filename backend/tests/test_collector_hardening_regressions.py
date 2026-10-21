@@ -237,3 +237,50 @@ def test_d4_leaving_live_mode_releases_the_unspent_reservation(live, monkeypatch
     assert j["status"] == "paused" and "Live Mode" in j["last_error"]
     assert j["pages_used"] == provider == j["progress"]["ABCD"]["pages_used"]       # step 2's 10 pages released
     assert "reserved_pages" not in j["progress"]["ABCD"]
+
+
+# --- D7: unvalidated side door into baseline evidence --------------------------------------
+class ChartUW(PaginatedUW):
+    """The chart refresh route fetches ONE undated dark-pool page and a flow page through the
+    adapter (not the session collector) and catalogs them into the same observation tables."""
+
+    def get(self, url, headers=None, params=None, timeout=None):
+        if "/api/darkpool/" in url and not (params or {}).get("date"):
+            self.calls.append((url, dict(params or {})))
+            return FakeResponse(200, {"data": [
+                {"ticker": "ABCD", "price": "1", "size": 1, "premium": "99999999", "tracking_id": "NO-TS", "volume": 1},
+                {"ticker": "ABCD", "executed_at": "not-a-time", "price": "1", "size": 1, "premium": "1",
+                 "tracking_id": "BAD-TS", "volume": 2}]})
+        if "flow-alerts" in url and not (params or {}).get("newer_than"):
+            self.calls.append((url, dict(params or {})))
+            return FakeResponse(200, {"data": [{"id": "NO-TS-ALERT", "ticker": "ABCD", "type": "call", "total_premium": 1e9}]})
+        return super().get(url, headers, params, timeout)
+
+
+def test_d7_rows_without_a_provider_timestamp_never_become_evidence(live, monkeypatch):
+    """Was (147e315 .. f016d9e): a row with no executed_at/created_at was stored with
+    event_time = retrieval time and counted inside that session's window (chart refresh
+    during market hours). Now it is never cataloged."""
+    from app import ingestion
+    from tests.test_baseline_jobs import EVIDENCE, STATE
+    from tests.uw_fakes import ok
+    in_session = datetime.combine(EVIDENCE, time(11, 0), tzinfo=NY).astimezone(timezone.utc).isoformat()
+    monkeypatch.setattr(ingestion, "utcnow_iso", lambda: in_session)
+    live.use_uw(ChartUW(darkpool=session_prints("ABCD", EVIDENCE, 1.0), static={"stock-state": STATE, "ohlc": ok([])}))
+    assert TestClient(live.app).post("/api/ticker/ABCD/ohlc/refresh?timeframe=1d").status_code == 200
+    with live.get_catalog()._conn() as c:
+        bad = c.execute("SELECT COUNT(*) FROM darkpool_observations WHERE raw_json LIKE '%NO-TS%' OR raw_json LIKE '%BAD-TS%'").fetchone()[0]
+        bad += c.execute("SELECT COUNT(*) FROM options_flow_observations WHERE raw_json LIKE '%NO-TS-ALERT%'").fetchone()[0]
+    assert bad == 0
+    lo = datetime.combine(EVIDENCE, time(9, 30), tzinfo=NY).astimezone(timezone.utc)
+    hi = datetime.combine(EVIDENCE, time(16, 0), tzinfo=NY).astimezone(timezone.utc)
+    assert not [o for o in live.get_catalog().observations_between("darkpool", "ABCD", lo, hi)
+                if o.get("tracking_id") in ("NO-TS", "BAD-TS")]
+
+
+def test_d7_valid_rows_from_other_writers_are_still_cataloged(cat):
+    t = iso(OPEN + timedelta(minutes=5))
+    assert cat.catalog_darkpool_observations("ABCD", [{"ticker": "ABCD", "executed_at": t, "price": "1", "size": 1,
+                                                       "premium": "1", "tracking_id": "ok", "volume": 1},
+                                                      {"ticker": "ABCD", "price": "1", "tracking_id": "no-ts"}]) == 1
+    assert cat.catalog_options_flow_observations("ABCD", [{"id": "a1", "created_at": t}, {"id": "a2"}]) == 1

@@ -400,7 +400,7 @@ def test_storage_guard_rejects_ondemand_write_when_critical(tmp_path, monkeypatc
         lambda path: DiskUsage(total=10_000 * 1024 * 1024, used=9_999 * 1024 * 1024, free=1 * 1024 * 1024),
     )
     with pytest.raises(StorageGuardPausedError):
-        cat.catalog_darkpool_observations("SPY", [{"id": "t1", "executed_at": "x"}], kind=ONDEMAND)
+        cat.catalog_darkpool_observations("SPY", [{"id": "t1", "executed_at": "2026-10-15T14:00:00Z"}], kind=ONDEMAND)
 
 
 def test_storage_guard_background_pauses_earlier_than_ondemand(tmp_path, monkeypatch):
@@ -414,10 +414,10 @@ def test_storage_guard_background_pauses_earlier_than_ondemand(tmp_path, monkeyp
     # 1000MB free: allowed on-demand, paused in background -- same
     # contract as app/storage_guard.py's own tests, exercised here
     # through the NEW ingestion write path.
-    inserted = cat.catalog_darkpool_observations("SPY", [{"id": "t1", "executed_at": "x"}], kind=ONDEMAND)
+    inserted = cat.catalog_darkpool_observations("SPY", [{"id": "t1", "executed_at": "2026-10-15T14:00:00Z"}], kind=ONDEMAND)
     assert inserted == 1
     with pytest.raises(StorageGuardPausedError):
-        cat.catalog_darkpool_observations("SPY", [{"id": "t2", "executed_at": "y"}], kind=BACKGROUND)
+        cat.catalog_darkpool_observations("SPY", [{"id": "t2", "executed_at": "2026-10-15T14:00:01Z"}], kind=BACKGROUND)
 
 
 def test_ingestion_job_checkpoint_resume_avoids_double_insert(tmp_path):
