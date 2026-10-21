@@ -14,7 +14,8 @@ What it records (never file contents -- only metadata and SHA-256):
     database plus its -wal/-shm/-journal sidecars (the volume itself is never
     opened by SQLite: with sidecars present SQLite would need to write the -shm
     index, and a read-only mount forbids it): integrity_check, foreign_key_check,
-    schema_version rows, migration-10 objects, persisted scheduler mode and
+    schema_version rows, every schema object (type, name, table) and every
+    table's column names, migration-10 objects, persisted scheduler mode and
     active baseline jobs.
 
 Exit codes: 0 ok; 2 strict check failed; 3 internal error. Stdlib only.
@@ -96,7 +97,12 @@ def examine_sqlite(root, rel):
         facts = {"sidecars": sidecars,
                  "integrity_check": [r[0] for r in c.execute("pragma integrity_check")],
                  "foreign_key_violations": len(c.execute("pragma foreign_key_check").fetchall())}
-        tables = {r[0] for r in c.execute("select name from sqlite_master where type in ('table','index')")}
+        objects = sorted([r[0], r[1], r[2]] for r in c.execute(
+            "select type, name, tbl_name from sqlite_master where name not like 'sqlite_%'"))
+        tables = {o[1] for o in objects if o[0] in ("table", "index")}
+        facts["objects"] = objects
+        facts["columns"] = {o[1]: [r[1] for r in c.execute(f"pragma table_info([{o[1]}])")]
+                            for o in objects if o[0] == "table"}
         if "schema_version" in tables:
             facts["schema_versions"] = [[r[0], r[1]] for r in
                                         c.execute("select version, name from schema_version order by version")]

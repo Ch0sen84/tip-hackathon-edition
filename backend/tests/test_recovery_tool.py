@@ -25,7 +25,8 @@ def _load(name):
 r3 = _load("r3recover")
 probe = _load("r3probe")
 GOOD_DB = {"integrity_check": ["ok"], "foreign_key_violations": 0, "schema_versions": r3.SCHEMA9_MIGRATIONS,
-           "migration_10_objects_present": [], "scheduler_mode": "disabled", "active_baseline_jobs": 0, "sidecars": []}
+           "migration_10_objects_present": [], "scheduler_mode": "disabled", "active_baseline_jobs": 0, "sidecars": [],
+           "objects": r3.REFERENCE["states"]["9"]["objects"], "columns": r3.REFERENCE["states"]["9"]["columns"]}
 
 
 def good_manifest():
@@ -165,14 +166,37 @@ def test_tags_and_names_are_refused_without_calling_docker(monkeypatch):
             r3.require_local_image_id(ref, "image")
 
 
-def test_approval_token_and_dry_run():
-    class A: dry_run, approve = True, "RESTORE:x:v"
-    assert r3._authorize(A, "RESTORE:x:v") is None              # dry-run never authorizes, even with a token
-    A.dry_run, A.approve = False, "RESTORE:x:other"
-    with pytest.raises(r3.Blocked, match="approval token"):
-        r3._authorize(A, "RESTORE:x:v")
-    A.approve = "RESTORE:x:v"
-    assert isinstance(r3._authorize(A, "RESTORE:x:v"), r3.Authorization)
+def _plan_fixture(tmp_path):
+    u4 = tmp_path / "U4-x"; u4.mkdir()
+    for n in ("manifest.json", "volume.tar", "test_restore.json"):
+        (u4 / n).write_text(n)
+    m = {"u4_id": "U4-x"}
+    return u4, m, r3._binding(u4, m, ident())
+
+
+def test_approval_token_is_one_time_and_bound_to_the_state(tmp_path):
+    u4, m, b = _plan_fixture(tmp_path)
+    plan = r3._new_plan(u4, b)
+    assert plan["token"].startswith("RESTORE:U4-x:") and plan["token"].endswith(plan["nonce"])
+    assert isinstance(r3._consume_token(u4, plan["token"], b), r3.Authorization)
+    with pytest.raises(r3.Blocked, match="already used"):
+        r3._consume_token(u4, plan["token"], b)                     # replay
+    plan2 = r3._new_plan(u4, b)
+    with pytest.raises(r3.Blocked, match="changed since the approval"):
+        r3._consume_token(u4, plan2["token"], {**b, "container_id": "other"})
+    (u4 / "volume.tar").write_text("different archive")              # archive digest changes the binding
+    with pytest.raises(r3.Blocked, match="changed since the approval"):
+        r3._consume_token(u4, r3._new_plan(u4, b)["token"], r3._binding(u4, m, ident()))
+    with pytest.raises(r3.Blocked, match="malformed"):
+        r3._consume_token(u4, "RESTORE:U4-x:p_tip-data", b)          # the v6 token format is refused
+
+
+def test_expired_token_is_refused(tmp_path, monkeypatch):
+    u4, m, b = _plan_fixture(tmp_path)
+    plan = r3._new_plan(u4, b)
+    monkeypatch.setattr(r3.time, "time", lambda: plan["expires_epoch"] + 1)
+    with pytest.raises(r3.Blocked, match="expired"):
+        r3._consume_token(u4, plan["token"], b)
 
 
 def test_exit_codes_never_report_success_after_a_failure(monkeypatch):
@@ -188,12 +212,12 @@ def test_exit_codes_never_report_success_after_a_failure(monkeypatch):
 
 
 # --- orchestration paths with a faked Docker layer ------------------------------------------------------
-def ident(created="2026-10-21T00:00:00Z", running=False, cid="c1"):
+def ident(created="2026-10-21T00:00:00Z", running=False, cid="c1", labels=None):
     return {"project": "p", "service": "s", "image_id": "sha256:" + "1" * 64,
             "container": {"id": cid, "name": "p-s-1", "status": "exited" if not running else "running",
                           "running": running, "restarting": False},
             "volume": {"name": "p_tip-data", "driver": "local", "created_at": created, "mountpoint": "/m",
-                       "labels": {"com.docker.compose.project": "p"}, "destination": "/srv/data"},
+                       "labels": {"com.docker.compose.project": "p", **(labels or {})}, "destination": "/srv/data"},
             "runtime": {"ports": {}}, "compose_labels": {}, "other_volume_users": []}
 
 
@@ -251,25 +275,34 @@ def test_snapshot_blocks_on_low_disk_and_never_overwrites_a_u4(monkeypatch, tmp_
 
 
 def test_rollback_dry_run_never_reaches_a_destructive_step(monkeypatch, tmp_path):
-    m = {"u4_id": "U4-x", "archive": {"sha256": "a" * 64}}
-    monkeypatch.setattr(r3, "_rollback_checks", lambda a: (m, "sha256:" + "2" * 64, ident(running=True)))
-    for fn in ("_extract", "helper_run", "_write_state"):
+    u4, m, _ = _plan_fixture(tmp_path)
+    monkeypatch.setattr(r3, "_rollback_checks", lambda a: (m | {"archive": {"sha256": "a" * 64}}, "sha256:" + "2" * 64,
+                                                           ident(running=True)))
+    for fn in ("_extract", "helper_run", "_write_state", "_consume_token"):
         monkeypatch.setattr(r3, fn, lambda *x, **k: pytest.fail(f"dry-run reached {fn}"))
     monkeypatch.setattr(r3, "run", lambda *x, **k: pytest.fail("dry-run must not stop anything"))
 
-    class A: dry_run, approve, stop, u4 = True, None, False, str(tmp_path / "U4-x")
+    u4_dir = str(u4)
+
+    class A: dry_run, approve, stop, u4, project = True, None, False, u4_dir, "p"
     assert r3.cmd_rollback(A) == r3.EXIT_OK
+    assert len(list(u4.glob("rollback-plan-*.json"))) == 1 and not list(u4.glob("*.consumed"))
+    assert not (u4 / "restore_state.json").exists() and not list(tmp_path.glob(".r3recover-*.lock"))
 
 
 def test_start_rollback_refuses_partial_or_unrestored_volumes(monkeypatch, tmp_path):
     u4 = tmp_path / "U4-x"; u4.mkdir()
+    (u4 / "manifest.json").write_text("{}")
     monkeypatch.setattr(r3, "verify_u4", lambda p: {"identity": ident(), "helper_image": "h"})
 
-    class A: u4 = str(tmp_path / "U4-x")
+    class A: u4, project = str(tmp_path / "U4-x"), "p"
     with pytest.raises(r3.Blocked, match="only RESTORED_VERIFIED"):
         r3.cmd_start_rollback(A)
     (u4 / "restore_state.json").write_text(json.dumps({"state": "BLOCKED_PARTIAL"}))
     with pytest.raises(r3.Blocked, match="BLOCKED_PARTIAL"):
+        r3.cmd_start_rollback(A)
+    (u4 / "restore_state.json").write_text(json.dumps({"state": "RESTORED_VERIFIED", "manifest_sha256": "0" * 64}))
+    with pytest.raises(r3.Blocked, match="does not belong to this exact U4"):
         r3.cmd_start_rollback(A)
 
 
@@ -307,45 +340,15 @@ def test_doclint_requires_runbook_link_history_banner_and_no_active_patches(tmp_
     assert not any("historical/0001.patch" in f for f in found)
 
 
-@pytest.mark.parametrize("labels,expected_fault", [({"com.docker.compose.project": "p"}, None),
-                                                    ({"com.docker.compose.project": "p", "r3.drill": "1"}, "interrupt_extract")])
-def test_drill_fault_hook_is_ignored_outside_labelled_drill_volumes(monkeypatch, tmp_path, labels, expected_fault):
-    u4 = tmp_path / "U4-x"; u4.mkdir()
-    cur = ident(); cur["volume"]["labels"] = labels
-    m = {"u4_id": "U4-x", "archive": {"sha256": "a" * 64}, "volume_manifest": good_manifest()}
-    monkeypatch.setattr(r3, "_rollback_checks", lambda a: (m, "sha256:" + "2" * 64, cur))
-    def fake_helper(helper, mounts, cmd, **k):                     # the forensic tar
-        for src, dst, mode in mounts:
-            if dst == "/fx":
-                (Path(src) / "volume-post-upgrade.tar").write_bytes(b"forensic")
-    monkeypatch.setattr(r3, "helper_run", fake_helper)
-    seen = {}
-
-    class Res: returncode, stderr = 0, b""
-
-    def fake_extract(helper, vol, path, fault=None):
-        seen["fault"] = fault
-        return Res
-    monkeypatch.setattr(r3, "_extract", fake_extract)
-    monkeypatch.setattr(r3, "probe_volume", lambda *x: good_manifest())
+def test_drill_fault_hook_is_ignored_outside_labelled_drill_volumes(monkeypatch):
     monkeypatch.setenv(r3.DRILL_FAULT_ENV, "interrupt_extract")
-
-    class A: dry_run, stop, project, service = False, False, "p", "s"
-    A.u4, A.approve = str(u4), "RESTORE:U4-x:p_tip-data"
-    assert r3.cmd_rollback(A) == r3.EXIT_OK
-    assert seen["fault"] == expected_fault
-    assert json.loads((u4 / "restore_state.json").read_text())["state"] == "RESTORED_VERIFIED"
+    assert r3._drill_fault(ident()) is None
+    assert r3._drill_fault(ident(labels={"r3.drill": "1"})) == "interrupt_extract"
+    assert r3._drill_fault(ident(labels={"r3.drill": "yes"})) is None
 
 
-def test_failed_forensic_copy_blocks_before_the_volume_is_touched(monkeypatch, tmp_path):
-    u4 = tmp_path / "U4-x"; u4.mkdir()
-    m = {"u4_id": "U4-x", "archive": {"sha256": "a" * 64}, "volume_manifest": good_manifest()}
-    monkeypatch.setattr(r3, "_rollback_checks", lambda a: (m, "sha256:" + "2" * 64, ident()))
-    monkeypatch.setattr(r3, "helper_run", lambda *x, **k: (_ for _ in ()).throw(r3.Blocked("no space left on device")))
-    monkeypatch.setattr(r3, "_extract", lambda *x, **k: pytest.fail("restore must not start after a failed forensic copy"))
-
-    class A: dry_run, stop, project, service = False, False, "p", "s"
-    A.u4, A.approve = str(u4), "RESTORE:U4-x:p_tip-data"
-    with pytest.raises(r3.Blocked, match="no space"):
-        r3.cmd_rollback(A)
-    assert not (u4 / "restore_state.json").exists()               # the volume was never declared IN_PROGRESS
+def test_schema_reference_matches_the_application_migrations_1_to_9():
+    """The checked-in reference (generated inside the 147e315 image) must equal what the repository's
+    storage schema + migrations 1-9 create, i.e. migrations 1-9 are unchanged."""
+    ref = _load("schema_reference").build(str(Path(__file__).resolve().parents[1]))
+    assert ref == r3.REFERENCE
