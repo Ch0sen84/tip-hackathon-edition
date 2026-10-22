@@ -104,8 +104,13 @@ check("chart caption no longer claims markers are the gates' exact inputs", () =
                                       raw: {}, transition_rule: "no_qualifying_evidence_yet" });
   assert.ok(!html.includes("from the same flow_alerts/darkpool_trades the gates use"));
   assert.ok(html.includes("not necessarily the exact snapshot"));
-  assert.ok(X.markerProvenanceText({ marker_sources: { origin: "catalog", options_flow: { row_count: 3 }, darkpool: { row_count: 9 } } })
-    .includes("all cataloged UW observations"));
+  const cat = X.markerProvenanceText({ marker_sources: { origin: "catalog", options_flow: { row_count: 3 }, darkpool: { row_count: 9 } } });
+  assert.ok(cat.includes("3 cataloged flow alerts") && cat.includes("9 cataloged dark-pool prints") && !cat.includes("not drawn"), cat);
+  // Live P0: a certified history is far too large to draw; the caption must say only the newest are drawn
+  const big = X.markerProvenanceText({ marker_sources: { origin: "catalog",
+    options_flow: { row_count: 1000, total: 226418, truncated: true }, darkpool: { row_count: 1000, total: 269953, truncated: true } } });
+  assert.ok(big.includes("the newest 1000 of 226418 cataloged flow alerts") && big.includes("the newest 1000 of 269953")
+    && big.includes("not drawn"), big);
   const live = X.markerProvenanceText({ marker_sources: { origin: "live_fetch",
     options_flow: { ok: false, status: "error", row_count: 0 }, darkpool: { ok: true, row_count: 5 } } });
   assert.ok(/unavailable data, not absent activity/.test(live), live);

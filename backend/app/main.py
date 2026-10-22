@@ -726,6 +726,11 @@ def _baseline_report(ticker: str, session_date, as_of_utc) -> dict:
     return out
 
 
+# Live P0: at most this many stored observations per kind are drawn on the Ticker Analysis chart (newest
+# first); the response discloses the true totals (see _ticker_ohlc_impl).
+CHART_MARKERS_PER_KIND = max(1, min(int(os.environ.get("TIP_CHART_MARKERS_PER_KIND", "1000") or 1000), 5000))
+
+
 def _allocate_pages(max_pages: int, datasets) -> dict:
     """Exact split of a logical page budget: quotient to every dataset, the
     remainder one page each to the first datasets (BASELINE_DATASETS order).
@@ -2993,16 +2998,24 @@ def _ticker_ohlc_impl(ticker: str, timeframe: str, limit: int, range: Optional[s
         # it can never cause a live call to "fill in" a longer range.
         catalog = get_catalog()
         candles = catalog.get_cached_price_bars(ticker, timeframe, limit=limit)
-        flow_alerts = catalog.get_cached_flow_observations(ticker)
-        darkpool_trades = catalog.get_cached_darkpool_observations(ticker)
+        # Live P0 (real-provider qualification): once a ticker has certified history the catalog holds
+        # hundreds of thousands of observations (SPY: ~500,000 for 21 sessions), and drawing every one
+        # made this response ~58 MB and froze Ticker Analysis. The chart now draws the NEWEST
+        # CHART_MARKERS_PER_KIND per kind and discloses the true totals. Baselines and gates never read
+        # these markers, so no signal input changes.
+        flow_alerts = catalog.get_cached_flow_observations(ticker, limit=CHART_MARKERS_PER_KIND)
+        darkpool_trades = catalog.get_cached_darkpool_observations(ticker, limit=CHART_MARKERS_PER_KIND)
         cached_at = catalog.get_price_bars_cached_at(ticker, timeframe)
-        # Marker provenance: a cache read shows EVERY cataloged observation
-        # for this ticker (all scans/refreshes so far), which is generally a
-        # wider set than any single signal evaluation's snapshot.
+        totals = {"options_flow": catalog.count_cached_observations("options_flow", ticker),
+                  "darkpool": catalog.count_cached_observations("darkpool", ticker)}
+        # Marker provenance: a cache read draws the newest cataloged observations for this ticker (all
+        # scans/refreshes so far), generally a wider set than any single signal evaluation's snapshot.
         marker_sources = {
             "origin": "catalog",
-            "options_flow": {"row_count": len(flow_alerts)},
-            "darkpool": {"row_count": len(darkpool_trades)},
+            "options_flow": {"row_count": len(flow_alerts), "total": totals["options_flow"],
+                             "truncated": totals["options_flow"] > len(flow_alerts)},
+            "darkpool": {"row_count": len(darkpool_trades), "total": totals["darkpool"],
+                         "truncated": totals["darkpool"] > len(darkpool_trades)},
         }
         # Honest: an empty cache is reported as genuinely unavailable
         # (never fabricated/padded), with a reason that makes clear this

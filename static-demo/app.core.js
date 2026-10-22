@@ -2199,7 +2199,14 @@ function markerProvenanceText(ohlc) {
   if (!ms) return "";
   const n = (s) => (s && (s.row_count != null ? s.row_count : "?"));
   if (ms.origin === "catalog") {
-    return `Markers: all cataloged UW observations for this ticker (${n(ms.options_flow)} flow alerts, ${n(ms.darkpool)} dark-pool prints, across every scan/refresh so far).`;
+    // Live P0: a ticker with certified history has hundreds of thousands of stored observations; the chart
+    // draws only the newest of each kind and says so (the baselines use every stored observation).
+    const part = (s, label) => (s && s.truncated
+      ? `the newest ${n(s)} of ${s.total} ${label}`
+      : `${n(s)} ${label}`);
+    const truncated = (ms.options_flow && ms.options_flow.truncated) || (ms.darkpool && ms.darkpool.truncated);
+    return `Markers: ${part(ms.options_flow, "cataloged flow alerts")} and ${part(ms.darkpool, "cataloged dark-pool prints")} for this ticker, across every scan/refresh so far.`
+      + (truncated ? " Older observations stay stored and are used by the baselines; they are not drawn on this chart." : "");
   }
   const bad = ["options_flow", "darkpool"].filter((k) => ms[k] && ms[k].ok === false)
     .map((k) => `${k === "options_flow" ? "flow alerts" : "dark-pool prints"}: ${ms[k].status}`);

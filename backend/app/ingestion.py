@@ -740,28 +740,51 @@ class IngestionCatalog:
             return None
         return bool(row[0])
 
-    def get_cached_flow_observations(self, ticker: str) -> list[dict]:
-        """Every real cataloged options-flow-alert raw_json for `ticker`,
-        deserialized back to the exact normalized dict shape
+    def get_cached_flow_observations(self, ticker: str, limit: Optional[int] = None) -> list[dict]:
+        """Every real cataloged options-flow-alert raw_json for `ticker`
+        (or, with `limit`, only the newest `limit` by event time), oldest
+        first, deserialized back to the exact normalized dict shape
         catalog_options_flow_observations was given -- the same shape
         `build_markers` already consumes from a live fetch."""
         with self._conn() as conn:
-            rows = conn.execute(
-                "SELECT raw_json FROM options_flow_observations WHERE ticker = ? ORDER BY event_time ASC",
-                (ticker,),
-            ).fetchall()
+            if limit is None:
+                rows = conn.execute(
+                    "SELECT raw_json FROM options_flow_observations WHERE ticker = ? ORDER BY event_time ASC",
+                    (ticker,),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT raw_json FROM options_flow_observations WHERE ticker = ? "
+                    "ORDER BY event_time DESC, id DESC LIMIT ?", (ticker, max(0, int(limit))),
+                ).fetchall()[::-1]
         return [json.loads(r[0]) for r in rows if r[0]]
 
-    def get_cached_darkpool_observations(self, ticker: str) -> list[dict]:
-        """Every real cataloged dark-pool-trade raw_json for `ticker`,
-        same shape contract as get_cached_flow_observations above."""
+    def get_cached_darkpool_observations(self, ticker: str, limit: Optional[int] = None) -> list[dict]:
+        """Every real cataloged dark-pool-trade raw_json for `ticker` (or,
+        with `limit`, the prints among the newest `limit` stored rows, with
+        their newest versions), same shape contract as
+        get_cached_flow_observations above."""
         with self._conn() as conn:
-            rows = conn.execute(
-                "SELECT id, raw_json, source_id FROM darkpool_observations WHERE ticker = ? "
-                "ORDER BY event_time ASC, id ASC",
-                (ticker,),
-            ).fetchall()
+            if limit is None:
+                rows = conn.execute(
+                    "SELECT id, raw_json, source_id FROM darkpool_observations WHERE ticker = ? "
+                    "ORDER BY event_time ASC, id ASC",
+                    (ticker,),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT id, raw_json, source_id FROM darkpool_observations WHERE ticker = ? "
+                    "ORDER BY event_time DESC, id DESC LIMIT ?", (ticker, max(0, int(limit))),
+                ).fetchall()[::-1]
         return _current_prints(ticker, [(r[0], json.loads(r[1]), r[2]) for r in rows if r[1]])
+
+    def count_cached_observations(self, dataset: str, ticker: str) -> int:
+        """Number of stored observations of `dataset` for `ticker` (dark-pool cancel/reinstate version rows
+        are not separate prints and are not counted). A cheap COUNT for honest chart disclosures."""
+        table = "darkpool_observations" if dataset == "darkpool" else "options_flow_observations"
+        extra = " AND source_id NOT LIKE '%#%'" if dataset == "darkpool" else ""
+        with self._conn() as conn:
+            return int(conn.execute(f"SELECT COUNT(*) FROM {table} WHERE ticker = ?{extra}", (ticker,)).fetchone()[0])
 
     def get_price_bars_cached_at(self, ticker: str, timeframe: str) -> Optional[str]:
         """Most recent REAL retrieved_at among this ticker/timeframe's
