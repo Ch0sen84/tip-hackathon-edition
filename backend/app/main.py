@@ -728,7 +728,15 @@ def _baseline_report(ticker: str, session_date, as_of_utc) -> dict:
 
 # Live P0: at most this many stored observations per kind are drawn on the Ticker Analysis chart (newest
 # first); the response discloses the true totals (see _ticker_ohlc_impl).
-CHART_MARKERS_PER_KIND = max(1, min(int(os.environ.get("TIP_CHART_MARKERS_PER_KIND", "1000") or 1000), 5000))
+def _chart_markers_per_kind() -> int:
+    try:                                   # R7-7: a typo falls back to the default instead of failing at import
+        value = int(os.environ.get("TIP_CHART_MARKERS_PER_KIND", "1000") or 1000)
+    except ValueError:
+        value = 1000
+    return max(1, min(value, 5000))
+
+
+CHART_MARKERS_PER_KIND = _chart_markers_per_kind()
 
 
 def _allocate_pages(max_pages: int, datasets) -> dict:
@@ -3008,14 +3016,18 @@ def _ticker_ohlc_impl(ticker: str, timeframe: str, limit: int, range: Optional[s
         cached_at = catalog.get_price_bars_cached_at(ticker, timeframe)
         totals = {"options_flow": catalog.count_cached_observations("options_flow", ticker),
                   "darkpool": catalog.count_cached_observations("darkpool", ticker)}
+        # R7-3: "truncated" means the newest-N query hit its limit, not "fewer prints drawn than stored" (a
+        # canceled print is stored but never drawn as live)
+        cut = {d: catalog.count_cached_observations(d, ticker, include_versions=True) > CHART_MARKERS_PER_KIND
+               for d in ("options_flow", "darkpool")}
         # Marker provenance: a cache read draws the newest cataloged observations for this ticker (all
         # scans/refreshes so far), generally a wider set than any single signal evaluation's snapshot.
         marker_sources = {
             "origin": "catalog",
             "options_flow": {"row_count": len(flow_alerts), "total": totals["options_flow"],
-                             "truncated": totals["options_flow"] > len(flow_alerts)},
+                             "truncated": cut["options_flow"]},
             "darkpool": {"row_count": len(darkpool_trades), "total": totals["darkpool"],
-                         "truncated": totals["darkpool"] > len(darkpool_trades)},
+                         "truncated": cut["darkpool"]},
         }
         # Honest: an empty cache is reported as genuinely unavailable
         # (never fabricated/padded), with a reason that makes clear this

@@ -75,7 +75,8 @@ No confidence value is calibrated or predictive (see [TRADING_VALIDITY.md](TRADI
       exactly at the exclusive upper bound is the exception: it is outside the window by its own timestamp,
       so it is dropped (never stored) and the page is accepted. The real endpoint returns such rows on some
       pages; that second always belongs to the previous page (cursor = its oldest row + 1 s) or lies past
-      the window. `wrong_session_date`: a dark-pool row off the
+      the window, and while a session is in progress its proven edge stops 1 s below the walk's end so the
+      next walk re-reads that second. `wrong_session_date`: a dark-pool row off the
       session date.
     - `rows_out_of_order`: rows that are not newest-first. Equal timestamps in any order are fine. The cursor
       relies on a full page being the *newest* rows of its window.

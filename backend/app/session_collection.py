@@ -377,6 +377,10 @@ def _fetch_window(spec, client, catalog, ticker, session_date, lo, hi, budget, k
         if not isinstance(data, list):
             return done("failed", "data is not a list", "malformed")
         page = _inspect_page(spec, data, ticker, session_date, lo, cursor)
+        if page["violations"].get("boundary_dropped"):        # R7-6: keep a trace of the provider behaviour
+            _log.info("collector: %s %s %s dropped %d row(s) stamped at the exclusive bound %s (page %d)",
+                      spec.name, ticker, session_date.isoformat(), page["violations"]["boundary_dropped"],
+                      _iso(cursor), window_page + 1)
         if page["reason"]:
             will_retry = retries_left > 0 and pages < budget
             if on_diagnostic is not None:
@@ -596,7 +600,13 @@ def update_session_coverage(client, catalog, dataset: str, ticker: str, session_
     # [open, close] is INCLUSIVE (the baseline reads event_time <= close): at the close, an exclusive
     # upper bound (dark pool) must sit one cursor step above it or prints stamped at the close are lost
     top_hi = end + spec.cursor_step if end >= close_utc else end
-    if upper is None or upper < end:
+    # R7-2: while the session is in progress, record the proven edge one cursor step (dark pool: 1 s) BELOW
+    # `end`, so the next walk re-reads that boundary second (rows are deduplicated). A row stamped exactly at
+    # `end` is dropped by the page check (outside the window by its own timestamp); if the provider rounds
+    # sub-second times it may be a genuine print just before `end`, and the re-read stores it. Settled walks
+    # (end = close, top_hi = close + 1 s) are unchanged.
+    edge = end - spec.cursor_step if end < close_utc else end
+    if upper is None or upper < edge:            # R7-2: nothing new to prove until the edge can advance
         w = counted(_fetch_window(spec, client, catalog, ticker, session_date, top_lo, top_hi, budget, kind, sink))
         pages += w["pages"]; rows += w["rows"]; budget -= w["pages"]
         if w["outcome"] == "failed":
@@ -617,11 +627,11 @@ def update_session_coverage(client, catalog, dataset: str, ticker: str, session_
                           detail=w["reason"])
         if w["outcome"] == "exhausted":
             if c_through is None:
-                c_from, c_through = open_utc, end
+                c_from, c_through = open_utc, edge
             elif i_through is not None:
-                i_through = end                          # the island now reaches the live edge
+                i_through = max(edge, i_from)            # the island now reaches the live edge
             else:
-                c_through = end
+                c_through = max(edge, c_through)
         else:  # budget: newest island [resume_from, end] (rows stay cataloged; the gap below is filled later)
             resume = w["resume_from"]
             if resume is None:                           # defensive: no accepted page, nothing new proven
@@ -629,16 +639,17 @@ def update_session_coverage(client, catalog, dataset: str, ticker: str, session_
                     reconciliation("not_certified_left_unchanged", detail={"reason": w["reason"]})
                 return result(dataset, ticker, sd, COLLECTION_OK, cov or None, pages=pages, rows_fetched=rows,
                               detail=w["reason"])
+            top = max(edge, resume)
             if c_through is None:
-                c_from, c_through = resume, end          # nothing proven yet: the island is the interval
+                c_from, c_through = resume, top          # nothing proven yet: the island is the interval
             elif i_through is not None and resume <= i_through:
-                i_through = end                          # reaches the existing island: it grows upward
+                i_through = max(top, i_through)          # reaches the existing island: it grows upward
             elif i_through is None and resume <= c_through:
-                c_through = end                          # reaches the proven interval: contiguous
+                c_through = max(top, c_through)          # reaches the proven interval: contiguous
             else:
                 # C-F8: never discard the proven (from-open) interval; remember ONE island above it.
                 # An older island is dropped (its rows stay cataloged and are re-read by the gap fill).
-                i_from, i_through = resume, end
+                i_from, i_through = resume, top
             reason = w["reason"]
 
     # 1b) gap between the proven interval and the island: [c_through, i_from)
@@ -762,10 +773,16 @@ def backfill_baseline(client, catalog, dataset: str, ticker: str, evidence_sessi
         cov = catalog.get_session_coverage(dataset, ticker, evidence_session.isoformat()) or {}
         return tc.is_trading_day(evidence_session) and not policy.is_certified(cov) and not _is_cutoff(cov), cov
 
+    def backed_off(cov):
+        return (cov.get("status") == "unknown" and cov.get("last_error") in BACKOFF_REASONS
+                and not _rejection_expired(cov, now_utc))
+
     awaiting: list = []
     stopped = False                      # a provider failure ends all fetching (a history cutoff does not)
     walkable, ev = evidence_open_for_walk()
-    caught_up = walkable and budget > 0 and not _evidence_from_open(ev, evidence_session)
+    # R7-1: an evidence session whose walk was rejected (unknown, backoff not expired) gets no catch-up; it would
+    # take every step's pages and starve history. It only gets the leftover in (3).
+    caught_up = walkable and budget > 0 and not _evidence_from_open(ev, evidence_session) and not backed_off(ev)
     if caught_up:
         u, ev = touch(evidence_session, settle=False)          # (1) catch-up from the open
         stopped = not u.ok

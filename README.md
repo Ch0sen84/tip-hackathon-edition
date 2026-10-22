@@ -72,8 +72,9 @@ expected.
 5. **Market Discovery** (tab on My Watchlist): **Scan** runs the real UW screener; **Evaluate in TIP** analyzes a
    candidate.
 
-Every action that spends Unusual Whales or AI requests asks for confirmation first and states its budget; opening
-pages makes no provider request.
+Every action that can spend many requests (refreshes, baseline builds and resumes, reconciliation, Investigate
+with AI) asks for confirmation first and states its budget. Scan, Load Chart Data and the Settings connection
+tests make a few bounded requests when clicked. Opening pages makes no provider request.
 
 **Demo Mode notes:** every figure is synthetic (the sidebar badge says so); some chart captions say "real" because
 they describe Live Mode; Market Intelligence stays empty in Demo Mode by design (synthetic candidates are never
@@ -111,9 +112,9 @@ section 4.
    - an application restart leaves the job paused; it never auto-resumes;
    - already-verified sessions are never fetched again.
    - history comes first: a job walks the current session back to the open once (the comparison needs it),
-     then spends each step on prior sessions; while the market is open it extends the current session by at
-     most one page per dataset per step. A job whose remaining sessions all await gap confirmation pauses and
-     says from when they can be confirmed.
+     then spends each step on prior sessions and extends the current session only with the pages left in the
+     step; it stops when no prior session needs work. A job whose remaining sessions all await gap confirmation
+     pauses and says from when they can be confirmed.
 
    Opening the page makes no UW requests; only the button does.
 

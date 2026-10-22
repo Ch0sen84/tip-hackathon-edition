@@ -778,11 +778,12 @@ class IngestionCatalog:
                 ).fetchall()[::-1]
         return _current_prints(ticker, [(r[0], json.loads(r[1]), r[2]) for r in rows if r[1]])
 
-    def count_cached_observations(self, dataset: str, ticker: str) -> int:
+    def count_cached_observations(self, dataset: str, ticker: str, include_versions: bool = False) -> int:
         """Number of stored observations of `dataset` for `ticker` (dark-pool cancel/reinstate version rows
-        are not separate prints and are not counted). A cheap COUNT for honest chart disclosures."""
+        are not separate prints and are not counted unless `include_versions`: the stored-row count the
+        newest-N query is bounded by). A cheap COUNT for honest chart disclosures."""
         table = "darkpool_observations" if dataset == "darkpool" else "options_flow_observations"
-        extra = " AND source_id NOT LIKE '%#%'" if dataset == "darkpool" else ""
+        extra = " AND source_id NOT LIKE '%#%'" if dataset == "darkpool" and not include_versions else ""
         with self._conn() as conn:
             return int(conn.execute(f"SELECT COUNT(*) FROM {table} WHERE ticker = ?{extra}", (ticker,)).fetchone()[0])
 
