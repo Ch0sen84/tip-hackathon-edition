@@ -72,7 +72,7 @@ section 4.
    `eligible_sessions` ≥ 20 for both datasets, or a provider history cutoff:
 
    ```bash
-   curl -X POST "http://127.0.0.1:8000/api/ticker/SPY/baseline/backfill?max_pages=200" -H "Origin: http://127.0.0.1:8000" -H "Sec-Fetch-Site: same-origin"
+   curl -X POST "http://127.0.0.1:8000/api/ticker/SPY/baseline/backfill?max_pages=200&confirm=true" -H "Origin: http://127.0.0.1:8000" -H "Sec-Fetch-Site: same-origin"
    ```
 
    (Local Mode accepts these headers only on a loopback-bound install; adjust the port to your `BIND_PORT`.)
@@ -580,6 +580,8 @@ BUILD_COMMIT=$(git rev-parse HEAD) BUILD_VERSION=$(git describe --tags --always)
 
 If you build with a plain `docker compose build` (no version args), the
 app honestly shows "unknown installed version" rather than guessing.
+
+### What the update check reports
 
 **The four states** `POST /api/settings/update-check` (authenticated; and the Settings
 UI) can report:

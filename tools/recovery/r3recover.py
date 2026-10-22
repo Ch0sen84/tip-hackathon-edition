@@ -1084,8 +1084,12 @@ def _start_rollback(a, u4p):
         # recreate the service from it on the restored schema-9 volume. Point the tag back at the rollback image
         # (a tag move deletes nothing; the candidate keeps its ID). The runbook's R4 also returns the checkout.
         tag = f"{a.project}-{a.service}:latest"
-        run(["docker", "tag", expected_image, tag])
-        log(f"{tag} now points at the rollback image {expected_image[:19]}; return <COMPOSE_DIR> to 147e315 (R4)")
+        try:
+            run(["docker", "tag", expected_image, tag])
+            log(f"{tag} now points at the rollback image {expected_image[:19]}; return <COMPOSE_DIR> to 147e315 (R4)")
+        except Exception as exc:  # noqa: BLE001 -- the rollback itself is accepted; only the tag move failed
+            log(f"WARNING: the rollback is ACCEPTED and running, but moving {tag} failed ({exc}). Run exactly: "
+                f"docker tag {expected_image} {tag}  -- then verify it in R4 before anything else")
     return rc
 
 
@@ -1231,6 +1235,9 @@ def _accept_prechecks(a, cur):
 
 
 def cmd_accept(a):
+    if not re.fullmatch(r"[0-9a-f]{40}", a.expect_commit or ""):
+        raise Blocked(f"--expect-commit {a.expect_commit!r} must be the full 40-hex commit (nothing was checked "
+                      "or stopped)")
     require_local_image_id(a.expect_image, "expected image")
     cur = discover(a.project, a.service, a.expect_volume)
     schema = list(range(1, a.expect_schema + 1))

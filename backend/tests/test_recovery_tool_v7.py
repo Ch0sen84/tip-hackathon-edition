@@ -66,6 +66,10 @@ def env(tmp_path, monkeypatch, capsys):
         assert cli("test-restore", "--u4", u4(), "--helper-image", fd.HELPER) == 0, e.last_err
         c = fake.service_container()
         c["Image"] = fd.CANDIDATE
+        for tags in fake.image_tags.values():          # U6's build moved the Compose tag to the candidate
+            if "p-s:latest" in tags:
+                tags.remove("p-s:latest")
+        fake.image_tags.setdefault(fd.CANDIDATE, []).append("p-s:latest")
         c["State"] = {"Status": "running", "Running": True, "Restarting": False}
         fake.mutate()
         fake.volumes[fake.volume]["content"]["sqlite"]["tip_hackathon.db"]["schema_versions"].append([10, "collection_diagnostics"])
