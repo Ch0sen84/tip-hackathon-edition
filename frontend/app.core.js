@@ -4418,9 +4418,8 @@ function renderInvestigateResult(d, ticker, modeLabel) {
          ${esc(d.simulated_label || "Simulated agent walkthrough -- not live UW data, not a real AI call")}
        </div>`
     : `<div class="ai-live-banner">LIVE: this investigation made real calls using your configured AI provider and UW key.
-         Bounded, read-only tool selection and synthesis. An end-to-end AI-directed investigation over genuine MCP tool calls was run
-         once in earlier development (an NVDA run, mcp transport); no verification writeup is included in this
-         repository.
+         Bounded, read-only tool selection and synthesis, verified end to end before this release against the real Unusual Whales API and MCP server with a real AI provider
+         (both transports).
          <br><strong>Transport: ${esc(transportLabel(d.transport))}</strong></div>`;
   const headerHtml = ticker ? renderInvestigateHeader(ticker, modeLabel || "") : "";
   return `
@@ -4549,19 +4548,14 @@ function renderSettingsView(d) {
         <h3>AI / MCP (optional) <span class="muted">(real in the local edition)</span></h3>
         <p class="muted">Not available in the public demo build. The local edition supports a
           bounded, read-only "Investigate with AI" feature: tool-selection and synthesis via your
-          configured AI provider when live. An end-to-end AI-directed investigation over genuine
-          MCP tool calls was run once in earlier development (an NVDA run); no verification writeup is
-          included in this repository.</p>
+          configured AI provider when live, verified end to end before this release against the real Unusual Whales API and MCP server with a real AI provider.</p>
       </div>`
     : `<div class="settings-card">
         <h3>AI / MCP (optional)</h3>
         <p class="muted">Status: ${aiStatusLine}</p>
         <p class="muted">Bounded, read-only investigation: tool-selection and synthesis via your configured AI
-          provider when live. An end-to-end AI-directed investigation over genuine MCP tool calls was run once
-          in earlier development (an NVDA run, mcp transport); no verification writeup is included in this
-          repository. That run exercised the <code>mcp</code> transport specifically; the <code>rest</code> fallback transport
-          (see "Effective transport" below) uses plain REST calls and has not had a separate end-to-end
-          verification pass.</p>
+          provider when live, verified end to end before this release against the real Unusual Whales API and MCP server with a real AI provider, over both the <code>mcp</code> transport and the <code>rest</code>
+          fallback transport (see "Effective transport" below).</p>
         <!-- Priority 5 fix: "an AI key is configured" and "which transport actually
              executes tool calls" are two separate facts -- shown as its own distinct
              status line here, not folded into aiStatusLine above. Sourced from
@@ -4787,7 +4781,8 @@ function renderBaselinePanel(ov) {
     <h3>Historical baselines (Live)</h3>
     <p class="muted">Both Live gates need at least ${esc(ov.required_sessions)} fully collected prior trading sessions
       before they can pass or fail; until then they honestly read "insufficient". Building a baseline makes
-      <strong>real, bounded UW requests</strong> (a busy ticker needs roughly 2,800–4,200 pages) and only ever starts
+      <strong>real, bounded UW requests</strong> (in October 2026 SPY, QQQ and NVDA each needed about 1,200–1,700 pages for 20 sessions per dataset;
+      busier periods cost more) and only ever starts
       when you click. Each build spends at most 400 UW pages per ticker; click Build again to continue a ticker
       that used its budget. Pause and Cancel are cooperative: they take effect when the step in progress finishes,
       not instantly. A step covers at most 10 pages by default, but each page can be retried, can wait for a provider

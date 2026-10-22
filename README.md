@@ -32,6 +32,53 @@ This is a clean-room extraction/port for the hackathon -- it does not import
 or depend on the production TIP app, has no Postgres/TimescaleDB/Databento
 dependency, and makes no calls to the production TIP service.
 
+## For judges: start here
+
+**Demo video:** https://youtu.be/I-8EcvTfrSk · **Source:** https://github.com/Ch0sen84/tip-hackathon-edition
+
+TIP finds unusual options-flow and dark-pool activity with your own Unusual Whales key and explains, gate by gate,
+what the evidence does and does not support. A signal is reported only against at least 20 **certified** prior
+sessions of real data; until then a gate says "insufficient", never a guess. **Demo Mode** (synthetic data, no key)
+shows the interface without an account.
+
+**Requirements:** Docker Desktop with Compose v2 (or Python 3.11, see "Running locally"); for Live Mode an Unusual
+Whales API key (verified with a UW Basic API key); optionally an Anthropic or OpenAI key for "Investigate with AI".
+This section is a first install; an existing deployment follows only
+[docs/RELEASE3_RECOVERY_RUNBOOK.md](docs/RELEASE3_RECOVERY_RUNBOOK.md).
+
+```bash
+git clone https://github.com/Ch0sen84/tip-hackathon-edition && cd tip-hackathon-edition
+cp .env.example .env
+docker compose up --build
+```
+
+Open http://127.0.0.1:8000/ (if port 8000 is taken, set `BIND_PORT` in `.env`). It starts in Demo Mode. Settings
+shows the installed version as "unknown" unless the image is built with `tools/build_with_version.sh`; that is
+expected.
+
+**Live Mode in five steps** (measured on 2026-10-22 with a real key):
+1. **Settings → Unusual Whales API Key:** paste your key → **Save** → **Test Connection** → **Switch to Live Mode**
+   (the switch stays disabled until the connection test passes).
+2. **Settings → Historical baselines (Live) → Build baseline** for a ticker and confirm the page budget shown. Each
+   build spends at most 400 pages; click **Build** again until both columns show 20/20. SPY, QQQ and NVDA each
+   needed about 1,200–1,700 pages (three to five builds, a few minutes). A session counts only once it is
+   *certified*: walked in full at least 3 hours after its close with no implausible gap.
+3. **Ticker Analysis → the ticker → Refresh this ticker** (confirm). The dark-pool and options-flow gates now compare
+   this session with the same time of day in the certified sessions and show the ratio and percentile. "No"
+   means normal activity; a gate passes only at 3× the average and the 95th percentile, so most days show none.
+4. **Investigate with AI** (optional, after saving an AI key under Settings → AI / MCP): two billed AI calls plus
+   at most four read-only Unusual Whales tool calls; every observed fact names the tool it came from, and the
+   interpretation is labelled as the model's reasoning.
+5. **Market Discovery** (tab on My Watchlist): **Scan** runs the real UW screener; **Evaluate in TIP** analyzes a
+   candidate.
+
+Every action that spends Unusual Whales or AI requests asks for confirmation first and states its budget; opening
+pages makes no provider request.
+
+**Demo Mode notes:** every figure is synthetic (the sidebar badge says so); some chart captions say "real" because
+they describe Live Mode; Market Intelligence stays empty in Demo Mode by design (synthetic candidates are never
+written to Live history).
+
 ## Signal integrity (read before interpreting any label)
 
 Confidence and lifecycle labels are rule-based evidence-coverage descriptions, **not probabilities and not predictions**. In Live Mode both real gates (dark pool, options flow) need at least 20 fully collected prior trading sessions before they can pass or fail; until then they honestly report "insufficient". A provider failure is reported as unavailable data, never as a quiet market. See [docs/SIGNAL_INTEGRITY_RULES.md](docs/SIGNAL_INTEGRITY_RULES.md), [docs/GATE_PROOF.md](docs/GATE_PROOF.md) and [docs/TRADING_VALIDITY.md](docs/TRADING_VALIDITY.md).
@@ -89,8 +136,11 @@ section 4.
    prior session (at most 200 pages) to pick up prints reported after it was certified. Without
    `"confirm": true` it answers 428 with the budget and does nothing.
 
-Measured cost for one SPY-scale ticker (about 50,000 dark-pool prints and 15,000 flow alerts per session):
-- about 2,800–4,200 UW pages for 20 sessions, about 4,200–6,300 for the full 30-session lookback;
+Measured cost for one SPY-scale ticker:
+- on 2026-10-22 (about 15,000 dark-pool prints and 15,000 flow alerts per session), 1,700 UW pages and about
+  3.5 minutes certified 21 sessions per dataset for SPY (QQQ about 1,600 pages, NVDA about 1,200 plus
+  re-walks); busier periods (earlier measurements: about 50,000 prints per session) cost about 2,800–4,200
+  pages for 20 sessions and 4,200–6,300 for the full 30-session lookback;
 - a busy ticker prints roughly 3–5 dark-pool pages per 15 minutes, so the default 4-page budget per
   Refresh (`TIP_SCAN_COVERAGE_PAGES`) cannot walk the current session back to the open on its own; raise
   it (e.g. 25) or rely on backfill, otherwise the evidence session stays "not verified from the open";
@@ -829,17 +879,11 @@ mcp_isolated/                 isolated venv + subprocess script for the real MCP
 
 ## Status
 
-Phase 1 + Phase 2 scope (backend port + synthetic/live adapters + minimal
-frontend + tests) is implemented and passing locally. Phase 2.5 (Settings
-UI + local credential store, Demo/Live mode switching, PUBLIC_DEMO
-explanatory mode) is also implemented and passing locally. The optional
-"Investigate with AI" module (bounded tool-selection + synthesis rounds,
-REST-fallback transport -- see Design Decision #5 above for why not real
-MCP, demo-mode static simulated transcripts, Settings-gated graceful
-disable with zero AI key) is implemented and passing locally: **95 tests
-passing, 0 failing** (73 prior + 22 new). This README is a skeleton;
-polish (screenshots, architecture diagram, deployment notes) is planned
-for a later pass before submission.
+Hackathon release. Live Mode was verified end to end on 2026-10-22 with a real Unusual Whales key on a fresh
+install: real dark-pool, options-flow, screener and price data; 20+ certified sessions per dataset for SPY, QQQ
+and NVDA; gates evaluated against that history; MCP and AI investigation with real calls; crash and restart
+recovery. Demo Mode covers the interface without any credential. Tests: `cd backend && TIP_MODE=demo python -m
+pytest -q` (backend) and `frontend/test_*.mjs` (frontend, against a running demo backend).
 
 ## License
 
