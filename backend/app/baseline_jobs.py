@@ -264,13 +264,17 @@ class BaselineJobRunner:
             if ticker is None:
                 waiting = sorted(progress[t].get("confirmable_at") or "" for t in job["tickers"]
                                  if progress[t]["state"] == "awaiting_gap_confirmation")
+                # R6-4: a Cancel or Pause that landed after the last read is honoured, never orphaned
+                if self.store.transition(job_id, ("cancel_requested",), "cancelled") is not None:
+                    return
                 if waiting:
                     # R5-3: resumable -- Resume re-arms the waiting tickers once their sessions can be confirmed
-                    self.store.update(job_id, last_error=(
-                        f"paused: suspected provider gaps can be confirmed from {waiting[0]}; resume the job after that"))
-                    self.store.transition(job_id, ("running",), "paused")
-                else:
-                    self.store.transition(job_id, ("running",), "completed")
+                    if self.store.transition(job_id, ("running", "pause_requested"), "paused") is not None:
+                        self.store.update(job_id, last_error=(
+                            f"paused: suspected provider gaps can be confirmed from {waiting[0]}; "
+                            "resume the job after that"))
+                elif self.store.transition(job_id, ("running",), "completed") is None:
+                    self.store.transition(job_id, ("pause_requested",), "completed")
                 return
             entry = progress[ticker]
             counters = (job.get("pages_used"), entry.get("pages_used"), job.get("max_pages_per_ticker"))

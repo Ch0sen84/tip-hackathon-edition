@@ -51,24 +51,28 @@ TOPIC = re.compile(r"\brollback\b|\bU4\b|roll back", re.I)
 BANNER = "# HISTORICAL RECORD"
 REBUILD = re.compile(r"compose\b[^`\n|]*?\bbuild\b|build_with_version\.sh|\bdocker\s+(buildx\s+|image\s+)?build\b",
                      re.I)
-# R3D-5: a negation excuses a rebuild command only when it sits on the command's own line, before it
-# ("never run `docker compose up --build` to upgrade"), never because a negation word appears somewhere nearby
-CMD_NEGATED = re.compile(r"\b(never|do not|don't|must not)\b", re.I)
-# R5-8: ... and only within the command's own clause ("Never upgrade by hand; to update, run ..." is advice), and
-# "don't forget to" / "don't hesitate to" is no negation
-CLAUSE_SPLIT = re.compile(r"[;:,.!?]")
-NOT_A_NEGATION = re.compile(r"\b(forget|hesitate)\b", re.I)
-# a sentence whose upgrade wording is itself negated ("Upgrading ... is NOT an install", "never upgrade with")
-# is a warning, not upgrade advice: the negation must stand within a few words of the upgrade word (R4-9) -- a
-# negation elsewhere in the sentence ("you never need to stop the app") excuses nothing, nor does a weak "no"
-NEGATION_BEFORE = re.compile(r"(?:\b(?i:never|do not|don't|must not)\b(?!\s+(?i:forget|hesitate))|\bNOT\b)"
-                             r"(?:\W+\w+){0,2}?\W*$")
+# A negation excuses a rebuild command or an upgrade word only when it governs it (R3D-5 / R4-9 / R5-8 / R6-3):
+# the negation, an optional aside between commas ("Never, under any circumstances, run"), then at most a few
+# words from a small allow-list, then the command or the upgrade word. Any other word in between ("don't
+# FORGET to update", "don't WAIT to update") means it is no negation of the advice. A weak "no" excuses nothing.
+_NEGATION = r"(?:\b(?i:never|do not|don['’]t|must not|should not|cannot|can['’]t)\b|\bNOT\b)"
+_ASIDE = r"(?:\s*,[^,\n]{0,40},)?"
+_GOVERNED = (r"(?i:ever|be|been|try|to|attempt|a|an|the|this|that|it|any|use|run|for|as|with|by|on|in|of|your|"
+             r"upgrade|upgrades|upgrading|update|updates|updating|rebuild|rebuilding)")
+NEGATION_BEFORE = re.compile(_NEGATION + _ASIDE + r"(?:\W+" + _GOVERNED + r"){0,4}\W*$")
+# ... and, for a command, only within its own sentence ("Never upgrade by hand; to update, run ..." is advice)
+CMD_SENTENCE_SPLIT = re.compile(r"[.!?;]")
+CMD_LEAD = re.compile(r"(?:[`$\s]|\bdocker\b)*$", re.I)
 PARAGRAPH_SPLIT = re.compile(r"\n\s*\n")
 SENTENCE_SPLIT = re.compile(r"(?<=[.!?:])\s+|\n\s*\n")
 UPGRADE_WORDS = re.compile(r"\bupgrad\w*|\bupdat\w*|\brebuild\w*|\b(code|dependency|dependencies|source)\b[^.\n]{0,20}"
                            r"\bchang\w*|\bgit pull\b|\bnew (version|release|commit)\b|\bpick(ed)? up\b", re.I)
-# R5-8: wording about the app's own update check is not upgrade advice
-UPDATE_STATUS = re.compile(r"\s+(?:is|are)\s+available\b|\s+check\b|-check\b", re.I)
+# R5-8 / R6-1: wording that DESCRIBES the app's own update check ("the Settings page shows whether an update is
+# available", "the update check runs daily") is not upgrade advice -- but only in a paragraph without a rebuild
+# command; on the command's own line or paragraph any upgrade wording is advice ("When an update is available, run")
+UPDATE_STATUS_AFTER = re.compile(r"[- ]check(?:s|er)?\b(?!\s+out)|\s+is\s+available\b", re.I)
+UPDATE_STATUS_BEFORE = re.compile(r"(?:\b(?:shows?|reports?|tells?(?:\s+you)?|displays?|indicates?)\s+"
+                                  r"(?:whether|if)\s+an?|\b(?:the|its|an|daily|automatic))\s+$", re.I)
 FENCE = re.compile(r"^\s*(```|~~~)")
 HEADING = re.compile(r"^#{1,6}\s")
 
@@ -84,15 +88,24 @@ def _sections(lines):
     return [(a, b - 1) for a, b in zip(starts, starts[1:] + [len(lines)])]
 
 
-def _unnegated_upgrade(text):
-    """R4-9 / R5-8: True if ANY upgrade wording in `text` is not directly negated (a negation such as "never" or an
-    emphatic "NOT" within the three words before it; "don't forget to update" is not a negation)."""
+def _unnegated_upgrade(text, describes_app_ok=False):
+    """R4-9 / R5-8 / R6: True if ANY upgrade wording in `text` is not governed by a negation (see NEGATION_BEFORE).
+    With `describes_app_ok` (a paragraph without a rebuild command) the app's own update-check wording is skipped."""
     for m in UPGRADE_WORDS.finditer(text):
-        if UPDATE_STATUS.match(text, m.end()):
-            continue                    # "an update is available", "the update check": describes the app, no advice
-        if not NEGATION_BEFORE.search(text[max(0, m.start() - 60):m.start()]):
+        before = text[max(0, m.start() - 80):m.start()]
+        if (describes_app_ok and m.group(0).lower() == "update" and UPDATE_STATUS_AFTER.match(text, m.end())
+                and UPDATE_STATUS_BEFORE.search(before)):
+            continue
+        if not NEGATION_BEFORE.search(before):
             return True
     return False
+
+
+def _command_negated(prefix):
+    """R3D-5 / R6-2: the rebuild command is negated by its own sentence ("never run `docker compose ...`",
+    "Never, under any circumstances, run", "Do not use this to upgrade: `...`"), never by a negation elsewhere."""
+    sentence = CMD_SENTENCE_SPLIT.split(prefix)[-1]
+    return bool(NEGATION_BEFORE.search(CMD_LEAD.sub("", sentence)))
 
 
 def _joined(lines, i):
@@ -116,8 +129,7 @@ def lint_rebuild(rel, text):
             if not REBUILD.search(cmd_line):
                 continue
             m = REBUILD.search(cmd_line)
-            clause = CLAUSE_SPLIT.split(cmd_line[:m.start()])[-1]
-            negated = bool(CMD_NEGATED.search(clause)) and not NOT_A_NEGATION.search(clause)
+            negated = _command_negated(cmd_line[:m.start()])
             # R3D-5 / R4-9: upgrade wording ANYWHERE in the section counts (before, after and on the command's own
             # line), paragraph by paragraph outside code fences. A paragraph that points to the runbook, or whose
             # upgrade word is directly negated ("never upgrade", "is NOT an upgrade path"), is a warning. The
@@ -133,7 +145,8 @@ def lint_rebuild(rel, text):
             own = REBUILD.sub(" ", cmd_line)
             upgrade = [] if negated else (
                 [own] if _unnegated_upgrade(own) else
-                [x for x in paragraphs if RUNBOOK not in x and _unnegated_upgrade(x)])
+                [x for x in paragraphs if RUNBOOK not in x
+                 and _unnegated_upgrade(x, describes_app_ok=not REBUILD.search(x))])
             if not linked:
                 out.append(f"{rel}:{i + 1}: rebuild command in a section that does not point existing-deployment "
                            f"upgrades to {RUNBOOK}")
