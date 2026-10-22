@@ -1269,13 +1269,21 @@ class IngestionCatalog:
         # C-F3 / C2-3: the NEWEST stored version of a print decides whether it is currently canceled
         canceled = (_canceled_print_keys(ticker, [(i, d) for i, _t, d in parsed])
                     if dataset == "darkpool" else set())
+        newest: dict = {}                                    # R4-5: the newest version's data is served
+        if dataset == "darkpool":
+            for row_id, _t, d in parsed:
+                k = darkpool_print_key(ticker, d)
+                if k not in newest or row_id > newest[k][0]:
+                    newest[k] = (row_id, d)
         for _row_id, ts, data in parsed:
             if dataset == "darkpool":
-                if _is_canceled(data):
-                    continue
                 key = darkpool_print_key(ticker, data)
                 if key in canceled:
                     continue
+                if key not in seen:
+                    data = newest[key][1]                    # same print, the version reported last
+                elif _is_canceled(data):
+                    continue                                 # a canceled version is never a duplicate print
             else:
                 key = ("i", data.get("id")) if data.get("id") is not None else (
                     "f", data.get("created_at"), _num(data.get("total_premium")), data.get("type"))

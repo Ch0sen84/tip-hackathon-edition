@@ -91,10 +91,26 @@ No confidence value is calibrated or predictive (see [TRADING_VALIDITY.md](TRADI
     (`TIP_COVERAGE_SETTLE_MINUTES`, default 180, clamped 30..1440).
     - Before that, a finished walk is `partial / awaiting_settlement`. After it, a session that is unsettled,
       legacy (see below) or suspected of a gap is walked again **from scratch**, not extended.
-    - **Gap check.** If the largest gap between consecutive rows is at least `TIP_COVERAGE_GAP_MIN_MINUTES`
-      (default 20) *and* the session's own average rate predicts ≥ 50 rows in it, the session is withheld
-      once (`suspected_provider_gap`). A second settled walk certifies it if it finds the same data, so a
-      thin ticker is never stuck.
+    - **Gap check.** Every run of at least `TIP_COVERAGE_GAP_MIN_MINUTES` (default 5) empty minutes is judged
+      against the activity in the 30 minutes on each side of it (the quieter side where both exist, so a busy
+      opening followed by a quiet day is not an outage). It is suspicious when (a) the local rate of *events*
+      (a run of consecutive active minutes counts once, so a burst of prints is one event) or (b), for a ticker
+      active in ≥ 70% of those minutes, the local row rate (capped at 10 rows per minute) predicts more than
+      `ln(events or rows in the session) + 5.5` inside the gap -- under a Poisson model the chance that any
+      natural gap of a session reaches that is about 0.4% -- or (c) the gap spans more than half of the session
+      and the session has ≥ 50 rows. A suspicious session is withheld (`suspected_provider_gap`) and skipped by
+      backfills and jobs until `TIP_COVERAGE_GAP_CONFIRM_HOURS` (default 12) after the suspicion; a later
+      settled walk certifies it (`gap_flag = confirmed`) if it finds the same data, so nothing is stuck.
+    - **Measured operating characteristics** (synthetic sessions: Poisson prints with a U-shaped intraday
+      profile, optionally clustered, with a closing cross or a 4× lunch lull; 100–150 trials per cell):
+      - outages missed: liquid tickers (≥ 1,500 prints/day) ~0% for outages of ≥ 10 minutes anywhere in the
+        session (a 5-minute midday hole, ~0.7% of the rows, is not caught); 400 prints/day: hour-long outages
+        and outages near the open or close that lose ≥ 6–9% of the rows are caught, 10–30-minute midday
+        outages (1–4% of the rows) are not; ≤ 150 prints/day: only large losses are caught (an outage cannot
+        be told from a quiet day).
+      - genuine sessions withheld once: ~0–6% for ordinary profiles; up to ~15–22% for the harshest
+        synthetic profiles (strong clustering with a closing cross, or a 4× lunch lull). Each costs 12 hours
+        and one more settled walk, never a wrong certification.
     - **Provenance.** Each certified row records `certified_by` (`settled-v1`), `certified_at_utc`,
       `proof_started_utc`, `session_rows`, `max_gap_s` and, for a re-walk, what triggered it and how many
       rows were stored before. Every post-settlement re-walk is logged in `coverage_reconciliations` with the

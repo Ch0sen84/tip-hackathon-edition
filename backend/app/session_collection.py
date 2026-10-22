@@ -740,19 +740,23 @@ def backfill_baseline(client, catalog, dataset: str, ticker: str, evidence_sessi
                         "bounds_retries": u.bounds_retries, "bounds_recovered": u.bounds_recovered})
         return u, cov
 
+    awaiting: list = []
     if tc.is_trading_day(evidence_session):
         cov = catalog.get_session_coverage(dataset, ticker, evidence_session.isoformat()) or {}
         if budget > 0 and not policy.is_certified(cov) and not _is_cutoff(cov):
             u, cov = touch(evidence_session, settle=False)
             if not u.ok:
-                return _backfill_result(catalog, dataset, ticker, evidence_session, max_pages, budget, results)
+                return _backfill_result(catalog, dataset, ticker, evidence_session, max_pages, budget, results, awaiting)
     d = evidence_session
     for _ in range(lookback_sessions):
         d = tc.previous_trading_day(d)
         if budget <= 0:
             break
         cov = catalog.get_session_coverage(dataset, ticker, d.isoformat()) or {}
-        if policy.is_certified(cov) or _is_cutoff(cov) or _awaiting_gap_confirmation(catalog, cov, now_utc) or (
+        waiting = _awaiting_gap_confirmation(catalog, cov, now_utc)
+        if waiting is not None:          # R4-4: reported, so a job can say when it is worth resuming
+            awaiting.append({"session_date": d.isoformat(), "confirmable_at": waiting.isoformat()})
+        if policy.is_certified(cov) or _is_cutoff(cov) or waiting is not None or (
                 cov.get("status") == "unknown" and cov.get("last_error") in BACKOFF_REASONS
                 and not _rejection_expired(cov, now_utc)):
             if _is_cutoff(cov):
@@ -761,7 +765,7 @@ def backfill_baseline(client, catalog, dataset: str, ticker: str, evidence_sessi
         u, cov = touch(d)
         if not u.ok or _is_cutoff(cov):
             break
-    return _backfill_result(catalog, dataset, ticker, evidence_session, max_pages, budget, results)
+    return _backfill_result(catalog, dataset, ticker, evidence_session, max_pages, budget, results, awaiting)
 
 
 def _suspected_at(catalog, dataset, ticker, sd) -> Optional[datetime]:
@@ -776,13 +780,16 @@ def _suspected_at(catalog, dataset, ticker, sd) -> Optional[datetime]:
     return max(times) if times else None
 
 
-def _awaiting_gap_confirmation(catalog, cov: dict, now_utc: datetime) -> bool:
+def _awaiting_gap_confirmation(catalog, cov: dict, now_utc: datetime) -> Optional[datetime]:
     """R3B-3: a suspected-gap session cannot be confirmed before GAP_CONFIRM_AFTER, so re-walking it sooner
-    only spends pages; backfills and jobs pass over it (and spend their budget on other sessions)."""
+    only spends pages; backfills and jobs pass over it (and spend their budget on other sessions). Returns the
+    time from which it can be confirmed, or None when it is not waiting."""
     if cov.get("status") != "partial" or cov.get("last_error") != "suspected_provider_gap":
-        return False
+        return None
     at = _suspected_at(catalog, cov.get("dataset"), cov.get("ticker"), cov.get("session_date"))
-    return at is not None and now_utc - at < policy.GAP_CONFIRM_AFTER
+    if at is None or now_utc - at >= policy.GAP_CONFIRM_AFTER:
+        return None
+    return at + policy.GAP_CONFIRM_AFTER
 
 
 def _is_cutoff(cov: dict) -> bool:
@@ -798,8 +805,9 @@ def _rejection_expired(cov: dict, now_utc: datetime) -> bool:
     return at is None or now_utc - at >= REJECTED_RETRY_AFTER
 
 
-def _backfill_result(catalog, dataset, ticker, evidence_session, max_pages, budget, results):
+def _backfill_result(catalog, dataset, ticker, evidence_session, max_pages, budget, results, awaiting=None):
     covs = catalog.list_session_coverage(dataset, ticker)
     complete = policy.usable_prior_count(covs, evidence_session.isoformat())   # what the baseline will use
     return {"dataset": dataset, "ticker": ticker, "pages_used": max_pages - max(budget, 0),
-            "sessions_touched": results, "complete_prior_sessions": complete}
+            "sessions_touched": results, "complete_prior_sessions": complete,
+            "awaiting_gap_confirmation": list(awaiting or [])}

@@ -15,8 +15,9 @@ in ACCEPTED_CERTIFIERS), which means
 
 Every 'complete' row written by an earlier release has certified_by = NULL. It
 is reported as legacy/uncertified, is never counted towards the 20-session
-requirement, and is re-walked from scratch (never modified in place) the next
-time an approved baseline job or backfill reaches it.
+requirement, is never touched by evidence collection, and is re-walked from scratch
+the next time an approved baseline job or backfill reaches it (a settled re-walk
+records its progress in the row; no observation is ever deleted -- see below).
 """
 from __future__ import annotations
 
@@ -41,17 +42,31 @@ def _env_minutes(name: str, default: int, lo: int, hi: int) -> int:
 # explicit reconciliation walk.
 SETTLE_LAG = timedelta(minutes=_env_minutes("TIP_COVERAGE_SETTLE_MINUTES", 180, 30, 1440))
 
-# Gap check (C2-1, R3B-1/2): activity is measured in ACTIVE MINUTES (minutes with at least one row), so an
-# opening burst or a closing cross of hundreds of prints counts as one or two minutes and cannot make an
-# ordinary midday lull look like an outage. A gap of at least GAP_MIN is "implausible" when the share of
-# active minutes OUTSIDE the tested gap(s) predicts at least GAP_EXPECTED_ACTIVE_MINUTES active minutes
-# inside them (one gap, or the k largest together: several medium outages). A session silent for more than
-# half of its span after a clearly active stretch is implausible too, however short that stretch was.
+# Gap check (C2-1, R3B-1/2, R4-1/2/3). A false positive only delays certification (the session waits
+# GAP_CONFIRM_AFTER, then a second settled walk certifies it as "confirmed"); a false negative certifies
+# incomplete history. Every gap of at least GAP_MIN empty minutes is judged against the activity right AROUND it
+# (GAP_LOCAL_WINDOW minutes on each side; where both sides exist the QUIETER one, so a change of regime -- a busy
+# opening, then a quiet day -- is not an outage), never against a whole-session average that the U-shaped
+# intraday profile, a lunch lull or a closing cross would distort. Two independent-event models:
+#   (a) events: a run of consecutive active minutes is ONE event (a cluster of prints counts once); the local
+#       event rate predicts the events the gap should have held;
+#   (b) rows, for a ticker saturated around the gap (>= GAP_SATURATED_SHARE of those minutes active): the local
+#       row rate, capped per minute against bursts, predicts the rows the gap should have held.
+# A model flags the gap when its prediction is >= ln(the session's number of opportunities -- events, or capped
+# rows) + GAP_SIGNIFICANCE: under a Poisson model the chance that ANY natural gap of the session reaches that is
+# about exp(-GAP_SIGNIFICANCE) (~0.7%), however many gaps the session has. (c) A gap spanning more than half of
+# the session with >= GAP_MIN_ROWS rows is implausible outright. A gap whose quieter side holds fewer than
+# GAP_MIN_SIDE_EVENTS events is not judged by (a): so thin a context cannot tell an outage from a quiet day. Measured operating characteristics: docs/SIGNAL_INTEGRITY_RULES.md section 4.
 GAP_MIN = timedelta(minutes=_env_minutes("TIP_COVERAGE_GAP_MIN_MINUTES", 5, 2, 390))
-GAP_EXPECTED_ACTIVE_MINUTES = 15.0
-GAP_MIN_ACTIVE_MINUTES = 20           # fewer active minutes than this: a thin ticker, its outages undetectable
-GAP_MIN_OBSERVED_MINUTES = 60.0       # a rate is taken from at least an hour of trading outside the gaps
-GAP_EXPECTED_ROWS = GAP_EXPECTED_ACTIVE_MINUTES   # kept for tests that switch the check off (no_gap_policy)
+GAP_LOCAL_WINDOW_MINUTES = 30
+GAP_MIN_CONTEXT_MINUTES = 5           # a side with fewer observable minutes gives no local rate
+GAP_SATURATED_SHARE = 0.7
+GAP_ROW_CAP_PER_MINUTE = 10
+GAP_SIGNIFICANCE = 5.5
+GAP_MIN_ROWS = 50                     # rule (c)
+GAP_MIN_SIDE_EVENTS = 3               # a side with fewer events gives no reliable local rate (no judgement)
+GAP_EXPECTED_ROWS = GAP_SIGNIFICANCE  # the switch tests use to disable the check (no_gap_policy sets inf)
+
 # C2-2: a suspected gap is confirmed (certified as genuine) only by a walk at least this long after the
 # walk that suspected it, so a provider backfill has time to arrive -- never by an immediate re-click.
 GAP_CONFIRM_AFTER = timedelta(hours=_env_minutes("TIP_COVERAGE_GAP_CONFIRM_HOURS", 12, 1, 72))
@@ -83,33 +98,48 @@ def status_key(cov) -> str:
 
 
 def gap_assessment(event_times, open_utc, close_utc) -> tuple:
-    """(max_gap_seconds, implausible) for sorted UTC event times inside [open, close]."""
+    """(max_gap_seconds, implausible) for UTC event times inside [open, close] (see the gap check above)."""
+    import math
+
     span = (close_utc - open_utc).total_seconds()
     if span <= 0:
         return 0.0, False
     points = [open_utc] + sorted(event_times) + [close_utc]
     max_gap = max((b - a).total_seconds() for a, b in zip(points, points[1:]))
-    threshold = GAP_EXPECTED_ROWS          # == GAP_EXPECTED_ACTIVE_MINUTES unless a test disabled the check
-    # active minutes, as offsets from the open; gaps between consecutive active minutes (plus the edges)
-    mins = sorted({int((t - open_utc).total_seconds() // 60) for t in event_times})
-    span_min = span / 60.0
-    if len(mins) < GAP_MIN_ACTIVE_MINUTES or threshold == float("inf"):
+    if GAP_EXPECTED_ROWS == float("inf") or not event_times:
         return max_gap, False
-    marks = [0.0] + [float(m) for m in mins] + [span_min]
-    gaps = sorted((max(0.0, b - a - 1.0) for a, b in zip(marks, marks[1:])), reverse=True)   # empty minutes
+    n_min = max(1, int(-(-span // 60)))                      # session minutes 0 .. n_min-1
+    counts: dict = {}
+    for t in event_times:
+        m = min(n_min - 1, max(0, int((t - open_utc).total_seconds() // 60)))
+        counts[m] = counts.get(m, 0) + 1
+    active = sorted(counts)
+    starts = {m for m in active if (m - 1) not in counts}    # first minute of each run = one event
+    capped = {m: min(c, GAP_ROW_CAP_PER_MINUTE) for m, c in counts.items()}
+    t_events = math.log(max(2, len(starts))) + GAP_SIGNIFICANCE
+    t_rows = math.log(max(2, sum(capped.values()))) + GAP_SIGNIFICANCE
     gap_min = GAP_MIN.total_seconds() / 60.0
-    if gaps[0] >= gap_min and gaps[0] >= span_min / 2:
-        return max_gap, True               # silent for most of the session after clearly active trading
-    for k in range(1, min(5, len(gaps)) + 1):
-        top = gaps[:k]
-        if top[-1] < gap_min:
-            break
-        outside = span_min - sum(top)
-        if outside < GAP_MIN_OBSERVED_MINUTES:
-            break
-        expected = len(mins) / outside * sum(top)     # active minutes the outside rate predicts inside
-        if expected >= threshold * (1 if k == 1 else 2):
-            return max_gap, True
+    win = GAP_LOCAL_WINDOW_MINUTES
+    marks = [-1] + active + [n_min]
+    for a, b in zip(marks, marks[1:]):
+        g = b - a - 1                                        # empty minutes a+1 .. b-1
+        if g < gap_min:
+            continue
+        if g >= n_min / 2 and len(event_times) >= GAP_MIN_ROWS:
+            return max_gap, True                             # (c)
+        sides = [side for side in (list(range(max(0, a - win + 1), a + 1)), list(range(b, min(n_min, b + win))))
+                 if len(side) >= GAP_MIN_CONTEXT_MINUTES]
+        if not sides:
+            continue
+        side_events = min(sum(1 for m in side if m in starts) for side in sides)
+        ev_rate = min(sum(1 for m in side if m in starts) / len(side) for side in sides)
+        if side_events >= GAP_MIN_SIDE_EVENTS and ev_rate * g >= t_events:
+            return max_gap, True                             # (a)
+        share = min(sum(1 for m in side if m in counts) / len(side) for side in sides)
+        if share >= GAP_SATURATED_SHARE:
+            row_rate = min(sum(capped.get(m, 0) for m in side) / len(side) for side in sides)
+            if row_rate * g >= t_rows:
+                return max_gap, True                         # (b)
     return max_gap, False
 
 

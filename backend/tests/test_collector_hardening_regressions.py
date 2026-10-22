@@ -72,14 +72,14 @@ def test_d1_resumed_dark_pool_walk_never_skips_the_boundary_second(cat, budgets,
     assert keys(cat) == {darkpool_print_key("ABCD", r) for r in rows}
 
 
-def test_d1_flow_resume_rereads_the_oldest_instant(cat):
+def test_d1_flow_resume_rereads_the_oldest_instant(cat, no_gap_policy):   # partial-day fixture (9:35-15:55)
     alerts = []
     for a in session_alerts("ABCD", DAY, 1.0, every_minutes=1):
         alerts += [{**a, "id": f"{a['id']}-{j}"} for j in range(3)]        # 3 alerts share each instant
     uw = PaginatedUW(flow=alerts)
     first = walk(uw, cat, 1, "options_flow")
     assert first.coverage["status"] == "partial"
-    while True:
+    for _ in range(100):                      # bounded: a session that never leaves partial fails, never hangs
         u = walk(uw, cat, 50, "options_flow")
         if u.coverage["status"] != "partial":
             break

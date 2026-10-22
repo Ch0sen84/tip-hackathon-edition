@@ -2753,14 +2753,33 @@ def baseline_job_resume(job_id: int, body: Optional[ConfirmBody] = None):
         per = int(job.get("max_pages_per_ticker") or 0)
         progress = job.get("progress") or {}
         active = [t for t in (job.get("tickers") or [])
-                  if (progress.get(t) or {}).get("state", "pending") in ("pending", "running")]
+                  if (progress.get(t) or {}).get("state", "pending") in ("pending", "running",
+                                                                         "awaiting_gap_confirmation")]
         left = sum(max(0, per - int((progress.get(t) or {}).get("pages_used") or 0)) for t in active)
         raise _confirmation_required(
             "baseline_job_resume",
             f"Resumes the historical collection: up to {left} more Unusual Whales pages across "
             f"{len(active)} ticker(s), in the background until done, paused or cancelled.",
             remaining_pages=left, tickers=active)
+    _rearm_awaiting_tickers(job_id)
     return _baseline_job_transition(job_id, ("paused",), "running", start=True)
+
+
+def _rearm_awaiting_tickers(job_id: int) -> None:
+    """R4-4: tickers that stopped only because their sessions awaited gap confirmation are stepped again."""
+    store = get_baseline_job_store()
+    job = store.get(job_id)
+    if not job or job["status"] != "paused":
+        return
+    progress = job.get("progress") or {}
+    changed = False
+    for t, entry in progress.items():
+        if (entry or {}).get("state") == "awaiting_gap_confirmation":
+            entry["state"] = "pending"
+            entry.pop("confirmable_at", None)
+            changed = True
+    if changed:
+        store.update(job_id, progress=progress)
 
 
 @app.post("/api/baseline/jobs/{job_id}/cancel", dependencies=[Depends(require_auth)])

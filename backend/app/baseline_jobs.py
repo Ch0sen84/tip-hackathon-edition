@@ -316,11 +316,16 @@ class BaselineJobRunner:
                 ds_used = int(r.get("pages_used") or 0)
                 attempts += int(r.get("http_attempts") or 0)
                 starved = starved or allocated == 0
+                waiting = list(r.get("awaiting_gap_confirmation") or [])
                 ds_state[ds] = {"complete_prior_sessions": r.get("complete_prior_sessions"),
+                                "awaiting_gap_confirmation": waiting,
                                 "history_cutoff": bool(cutoff or prev.get("history_cutoff")),
                                 "last_pages_used": r.get("pages_used"),
                                 "last_pages_allocated": allocated,
-                                "no_more_work": bool(prev.get("no_more_work")) or (bool(allocated) and ds_used == 0),
+                                # R4-4: a dataset whose only remaining sessions await gap confirmation is
+                                # not finished: it is walked again when the job is resumed later
+                                "no_more_work": (bool(prev.get("no_more_work")) or (bool(allocated) and ds_used == 0))
+                                and not waiting,
                                 "pages_used": (prev.get("pages_used") or 0) + ds_used,
                                 "http_attempts": (prev.get("http_attempts") or 0) + int(r.get("http_attempts") or 0),
                                 "bounds_retries": (prev.get("bounds_retries") or 0)
@@ -346,7 +351,12 @@ class BaselineJobRunner:
             if done:
                 entry["state"] = done
             elif used == 0 and not starved:
-                entry["state"] = "no_more_work"      # nothing fetchable inside the lookback window
+                waiting = [w for d in ds_state.values() for w in (d.get("awaiting_gap_confirmation") or [])]
+                if waiting:                          # R4-4: nothing to do NOW; resume after confirmable_at
+                    entry["state"] = "awaiting_gap_confirmation"
+                    entry["confirmable_at"] = min(w["confirmable_at"] for w in waiting)
+                else:
+                    entry["state"] = "no_more_work"  # nothing fetchable inside the lookback window
             # used == 0 with a dataset allocated 0 pages (the last page went to a dataset that had
             # nothing to do): that dataset is now marked no_more_work, so the next step gives the
             # remaining page to the one that was starved.
