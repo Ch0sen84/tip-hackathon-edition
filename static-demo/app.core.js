@@ -927,7 +927,10 @@ function renderMarketWideRadar(data) {
 }
 
 function switchView(view) {
-  const previous = TIP_STATE.currentView;
+  // R4F-1: pushNav/replaceNav record the NEW view in TIP_STATE.currentView before calling this, so the view
+  // that was actually on screen is remembered here, by switchView itself
+  const previous = TIP_STATE.shownView || TIP_STATE.currentView;
+  TIP_STATE.shownView = view;
   document.querySelectorAll(".nav-item").forEach((b) => b.classList.toggle("active", b.dataset.view === view));
   document.querySelectorAll(".view").forEach((v) => v.classList.toggle("active", v.id === `view-${view}`));
   TIP_STATE.currentView = view;

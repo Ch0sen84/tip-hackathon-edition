@@ -927,7 +927,10 @@ function renderMarketWideRadar(data) {
 }
 
 function switchView(view) {
-  const previous = TIP_STATE.currentView;
+  // R4F-1: pushNav/replaceNav record the NEW view in TIP_STATE.currentView before calling this, so the view
+  // that was actually on screen is remembered here, by switchView itself
+  const previous = TIP_STATE.shownView || TIP_STATE.currentView;
+  TIP_STATE.shownView = view;
   document.querySelectorAll(".nav-item").forEach((b) => b.classList.toggle("active", b.dataset.view === view));
   document.querySelectorAll(".view").forEach((v) => v.classList.toggle("active", v.id === `view-${view}`));
   TIP_STATE.currentView = view;
@@ -4704,6 +4707,7 @@ const BASELINE_TICKER_STATES = {
   pending: "waiting", running: "in progress", complete: "target reached",
   history_cutoff: "provider history ends -- cannot reach target", budget_exhausted: "page budget used up",
   no_more_work: "nothing more to collect in the lookback window",
+  awaiting_gap_confirmation: "a suspected provider gap is waiting for its confirmation time -- resume or start a build after it",
 };
 const BASELINE_ACTIVE = ["running", "pause_requested", "paused", "cancel_requested"];
 
@@ -4731,7 +4735,8 @@ function renderBaselineJob(job, threadAlive) {
     const ds = p.datasets || {};
     const dp = ds.darkpool ? ds.darkpool.complete_prior_sessions : "--";
     const fl = ds.options_flow ? ds.options_flow.complete_prior_sessions : "--";
-    return `<tr><td>${esc(t)}</td><td>${esc(BASELINE_TICKER_STATES[p.state] || p.state || "")}</td>
+    const until = p.state === "awaiting_gap_confirmation" && p.confirmable_at ? ` (from ${p.confirmable_at})` : "";
+    return `<tr><td>${esc(t)}</td><td>${esc((BASELINE_TICKER_STATES[p.state] || p.state || "") + until)}</td>
       <td>${esc(p.pages_used || 0)} / ${esc(job.max_pages_per_ticker)}</td><td>${esc(dp)}</td><td>${esc(fl)}</td></tr>`;
   }).join("");
   const stale = job.status === "running" && threadAlive === false;

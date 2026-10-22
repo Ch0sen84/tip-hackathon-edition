@@ -202,6 +202,11 @@ async function onAuthRestored() {
   // R3F-1: in Network Mode the first settings read was refused (401) -- re-read it before anything else so the
   // mode, the Settings view and the watchlist editor are real, then restore whatever view the URL asks for.
   try { await loadSettings(); } catch (e) { /* the views below report their own errors */ }
+  // R4F-2/R4F-3: Market Radar (and with it the list of known tickers) is read whatever view is showing, and
+  // BEFORE the URL's view is restored, so a deep-linked ticker is validated against real data
+  if (document.getElementById("radarStatus")) {
+    try { await loadRadar(); } catch (e) { /* loadRadar reports its own error */ }
+  }
   try {
     if (typeof applyNavState === "function" && typeof parseNavHash === "function") {
       applyNavState(parseNavHash(location.hash), window.TIP_NAV_HANDLERS, { push: false });
@@ -210,9 +215,6 @@ async function onAuthRestored() {
   const tasks = [];
   if (document.getElementById("marketWideCandidateList")) {
     tasks.push(loadMarketWideRadar());
-  }
-  if (document.getElementById("radarStatus") && TIP_STATE.currentView === "radar") {
-    tasks.push(loadRadar());
   }
   await Promise.allSettled(tasks);
 }
@@ -398,6 +400,7 @@ let _radarSeq = 0;
 // applyNavState() can validate a URL-supplied ticker without this file
 // needing to know anything about history/popstate itself.
 let _knownTickers = [];
+let _knownTickersLoaded = false;
 
 async function loadRadar() {
   const mySeq = ++_radarSeq;
@@ -462,6 +465,7 @@ async function loadRadar() {
     const radarTickers = [...data.highest, ...data.other].map((e) => e.ticker);
     const allTickers = Array.from(new Set([...radarTickers, ...scenarioTickers])).sort();
     _knownTickers = allTickers;
+    _knownTickersLoaded = true;
     setTickerComboOptions(allTickers);
   } catch (err) {
     if (mySeq !== _radarSeq) return;
@@ -953,7 +957,9 @@ function wireInvestigateConfirm(ticker, navSeq, modeLabel, simulated) {
     if (_investigateInFlight) { runInvestigate(ticker, navSeq, modeLabel, simulated); return; }   // shows why (R3F-3)
     if (!armed) {
       armed = true;
-      btn.textContent = `Confirm: this makes a real call (click again to run)`;
+      btn.textContent = simulated === false
+        ? `Confirm: this makes a real call (click again to run)`
+        : `Confirm: click again to run (the server asks first if this would be a real, billed call)`;
       btn.classList.add("btn-confirm-armed");
       return;
     }
@@ -1831,7 +1837,7 @@ if (sidebarJumpInput) {
 // URL-supplied ticker) and the <select> options Ticker Analysis uses.
 window.TIP_NAV_HANDLERS = {
   loadTickerDetail,
-  getKnownTickers: () => _knownTickers,
+  getKnownTickers: () => (_knownTickersLoaded ? _knownTickers : null),   // R4F-3: null = not known yet
   // REAL BUG FIX (2026-10-14): lets applyNavState's refresh/deep-link
   // path accept a manually-typed, format-valid Live Mode ticker the same
   // way the Analyze button's click handler already does -- otherwise a
