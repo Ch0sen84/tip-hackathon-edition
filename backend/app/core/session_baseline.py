@@ -314,7 +314,10 @@ def compute(catalog, dataset: str, ticker: str, evidence_session: date,
     # not evidence of a quiet day: excluded, never averaged in as zero. Thin tickers keep genuine zeros.
     active_n = sorted(r["day_n"] for r in hist_rows if r["active"])
     if active_n and active_n[len(active_n) // 2] >= policy.EMPTY_SESSION_MIN_MEDIAN_ROWS:
-        keep = [r for r in hist_rows if r["active"]]
+        # R5-7: also a session with a tiny fraction of the median activity (a near-total loss)
+        floor = (max(1, policy.IMPLAUSIBLY_SMALL_SHARE * active_n[len(active_n) // 2])
+                 if len(active_n) >= policy.IMPLAUSIBLY_SMALL_MIN_SESSIONS else 1)
+        keep = [r for r in hist_rows if r["day_n"] >= floor]
         base.excluded_implausible_empty = len(hist_rows) - len(keep)
         hist_rows = keep
     base.history_sessions = [{k: r[k] for k in ("session_date", "value", "observations")} for r in hist_rows]

@@ -54,15 +54,21 @@ REBUILD = re.compile(r"compose\b[^`\n|]*?\bbuild\b|build_with_version\.sh|\bdock
 # R3D-5: a negation excuses a rebuild command only when it sits on the command's own line, before it
 # ("never run `docker compose up --build` to upgrade"), never because a negation word appears somewhere nearby
 CMD_NEGATED = re.compile(r"\b(never|do not|don't|must not)\b", re.I)
+# R5-8: ... and only within the command's own clause ("Never upgrade by hand; to update, run ..." is advice), and
+# "don't forget to" / "don't hesitate to" is no negation
+CLAUSE_SPLIT = re.compile(r"[;:,.!?]")
+NOT_A_NEGATION = re.compile(r"\b(forget|hesitate)\b", re.I)
 # a sentence whose upgrade wording is itself negated ("Upgrading ... is NOT an install", "never upgrade with")
 # is a warning, not upgrade advice: the negation must stand within a few words of the upgrade word (R4-9) -- a
 # negation elsewhere in the sentence ("you never need to stop the app") excuses nothing, nor does a weak "no"
-NEGATED_UPGRADE = re.compile(
-    r"(?:\b(?i:never|do not|don't|must not)\b|\bNOT\b)(?:\W+\w+){0,2}?\W+(?i:upgrad\w*|updat\w*|rebuild\w*)\b")
+NEGATION_BEFORE = re.compile(r"(?:\b(?i:never|do not|don't|must not)\b(?!\s+(?i:forget|hesitate))|\bNOT\b)"
+                             r"(?:\W+\w+){0,2}?\W*$")
 PARAGRAPH_SPLIT = re.compile(r"\n\s*\n")
 SENTENCE_SPLIT = re.compile(r"(?<=[.!?:])\s+|\n\s*\n")
 UPGRADE_WORDS = re.compile(r"\bupgrad\w*|\bupdat\w*|\brebuild\w*|\b(code|dependency|dependencies|source)\b[^.\n]{0,20}"
                            r"\bchang\w*|\bgit pull\b|\bnew (version|release|commit)\b|\bpick(ed)? up\b", re.I)
+# R5-8: wording about the app's own update check is not upgrade advice
+UPDATE_STATUS = re.compile(r"\s+(?:is|are)\s+available\b|\s+check\b|-check\b", re.I)
 FENCE = re.compile(r"^\s*(```|~~~)")
 HEADING = re.compile(r"^#{1,6}\s")
 
@@ -78,6 +84,26 @@ def _sections(lines):
     return [(a, b - 1) for a, b in zip(starts, starts[1:] + [len(lines)])]
 
 
+def _unnegated_upgrade(text):
+    """R4-9 / R5-8: True if ANY upgrade wording in `text` is not directly negated (a negation such as "never" or an
+    emphatic "NOT" within the three words before it; "don't forget to update" is not a negation)."""
+    for m in UPGRADE_WORDS.finditer(text):
+        if UPDATE_STATUS.match(text, m.end()):
+            continue                    # "an update is available", "the update check": describes the app, no advice
+        if not NEGATION_BEFORE.search(text[max(0, m.start() - 60):m.start()]):
+            return True
+    return False
+
+
+def _joined(lines, i):
+    """Line i plus any shell continuation lines (trailing backslash), so a split command is still seen (R5-8)."""
+    out, j = lines[i], i
+    while out.rstrip().endswith("\\") and j + 1 < len(lines):
+        j += 1
+        out = out.rstrip()[:-1] + " " + lines[j].strip()
+    return out
+
+
 def lint_rebuild(rel, text):
     """Check 6: rebuild commands only in fresh-install sections that point upgrades to the runbook."""
     if rel.endswith(RUNBOOK):
@@ -86,10 +112,12 @@ def lint_rebuild(rel, text):
     for a, b in _sections(lines):
         linked = any(RUNBOOK in lines[i] for i in range(a, b + 1))
         for i in range(a, b + 1):
-            if not REBUILD.search(lines[i]):
+            cmd_line = _joined(lines, i)
+            if not REBUILD.search(cmd_line):
                 continue
-            m = REBUILD.search(lines[i])
-            negated = bool(CMD_NEGATED.search(lines[i][:m.start()]))
+            m = REBUILD.search(cmd_line)
+            clause = CLAUSE_SPLIT.split(cmd_line[:m.start()])[-1]
+            negated = bool(CMD_NEGATED.search(clause)) and not NOT_A_NEGATION.search(clause)
             # R3D-5 / R4-9: upgrade wording ANYWHERE in the section counts (before, after and on the command's own
             # line), paragraph by paragraph outside code fences. A paragraph that points to the runbook, or whose
             # upgrade word is directly negated ("never upgrade", "is NOT an upgrade path"), is a warning. The
@@ -102,11 +130,10 @@ def lint_rebuild(rel, text):
                 elif not fenced:
                     prose.append(lines[j])
             paragraphs = PARAGRAPH_SPLIT.split("\n".join(prose))
-            own = REBUILD.sub(" ", lines[i])
+            own = REBUILD.sub(" ", cmd_line)
             upgrade = [] if negated else (
-                [own] if UPGRADE_WORDS.search(own) and not NEGATED_UPGRADE.search(own) else
-                [x for x in paragraphs if UPGRADE_WORDS.search(x) and RUNBOOK not in x
-                 and not NEGATED_UPGRADE.search(x)])
+                [own] if _unnegated_upgrade(own) else
+                [x for x in paragraphs if RUNBOOK not in x and _unnegated_upgrade(x)])
             if not linked:
                 out.append(f"{rel}:{i + 1}: rebuild command in a section that does not point existing-deployment "
                            f"upgrades to {RUNBOOK}")

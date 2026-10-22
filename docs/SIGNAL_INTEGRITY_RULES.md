@@ -92,25 +92,29 @@ No confidence value is calibrated or predictive (see [TRADING_VALIDITY.md](TRADI
     - Before that, a finished walk is `partial / awaiting_settlement`. After it, a session that is unsettled,
       legacy (see below) or suspected of a gap is walked again **from scratch**, not extended.
     - **Gap check.** Every run of at least `TIP_COVERAGE_GAP_MIN_MINUTES` (default 5) empty minutes is judged
-      against the activity in the 30 minutes on each side of it (the quieter side where both exist, so a busy
-      opening followed by a quiet day is not an outage). It is suspicious when (a) the local rate of *events*
-      (a run of consecutive active minutes counts once, so a burst of prints is one event) or (b), for a ticker
-      active in ≥ 70% of those minutes, the local row rate (capped at 10 rows per minute) predicts more than
-      `ln(events or rows in the session) + 5.5` inside the gap -- under a Poisson model the chance that any
-      natural gap of a session reaches that is about 0.4% -- or (c) the gap spans more than half of the session
-      and the session has ≥ 50 rows. A suspicious session is withheld (`suspected_provider_gap`) and skipped by
+      against the activity in the 30 minutes on each side of it. Each side is judged with the model that fits
+      it: (a) where it has at least 3 *events* (a run of consecutive active minutes counts once, so a burst of
+      prints is one event), the local event rate; (b) where it is active in ≥ 70% of its minutes (a busy
+      stretch is one long run), the local row rate, capped at 10 rows per minute. A side's judgement is how far
+      its rate predicts past `ln(events or rows in the session) + 5.5` inside the gap -- under a Poisson model
+      the chance that any natural gap of a session reaches that is about 0.4%. The gap is suspicious when even
+      the quieter side's judgement reaches the bound (so a busy opening followed by a quiet day is not an
+      outage), or (c) when it spans more than half of the session and the session has ≥ 50 rows. A suspicious session is withheld (`suspected_provider_gap`) and skipped by
       backfills and jobs until `TIP_COVERAGE_GAP_CONFIRM_HOURS` (default 12) after the suspicion; a later
       settled walk certifies it (`gap_flag = confirmed`) if it finds the same data, so nothing is stuck.
     - **Measured operating characteristics** (synthetic sessions: Poisson prints with a U-shaped intraday
       profile, optionally clustered, with a closing cross or a 4× lunch lull; 100–150 trials per cell):
-      - outages missed: liquid tickers (≥ 1,500 prints/day) ~0% for outages of ≥ 10 minutes anywhere in the
-        session (a 5-minute midday hole, ~0.7% of the rows, is not caught); 400 prints/day: hour-long outages
-        and outages near the open or close that lose ≥ 6–9% of the rows are caught, 10–30-minute midday
-        outages (1–4% of the rows) are not; ≤ 150 prints/day: only large losses are caught (an outage cannot
-        be told from a quiet day).
-      - genuine sessions withheld once: ~0–6% for ordinary profiles; up to ~15–22% for the harshest
-        synthetic profiles (strong clustering with a closing cross, or a 4× lunch lull). Each costs 12 hours
-        and one more settled walk, never a wrong certification.
+      - outages missed: liquid tickers (≥ 1,200 prints/day) ~0–5% for outages of ≥ 10 minutes anywhere in the
+        session, including long outages that leave only a short busy island at the open or close (up to ~11%
+        for strongly clustered prints); a 5-minute midday hole (~0.7% of the rows) is not caught. 400–800
+        prints/day: long outages are caught (~0–10% missed; ~10–45% for strongly clustered prints), losses of
+        the last 10–30 minutes or of a closing cross mostly are not at 400 (~20–100% missed) and are at 800.
+        ≤ 150 prints/day: only some large losses are caught (an outage cannot be told from a quiet day).
+        A near-total loss is excluded from baselines by the small-session rule above.
+      - genuine sessions withheld once: ~0–2% for unclustered prints (up to ~12% for thin tickers with a 4×
+        lunch lull); ~0–22% for strongly clustered prints, up to ~31% for clustered liquid tickers; a genuinely
+        quiet first or last 5+ minutes on a liquid ticker (≥ 800 prints/day) is always withheld once. Each costs 12 hours and one more settled walk, never a
+        wrong certification.
     - **Provenance.** Each certified row records `certified_by` (`settled-v1`), `certified_at_utc`,
       `proof_started_utc`, `session_rows`, `max_gap_s` and, for a re-walk, what triggered it and how many
       rows were stored before. Every post-settlement re-walk is logged in `coverage_reconciliations` with the
@@ -157,9 +161,11 @@ No confidence value is calibrated or predictive (see [TRADING_VALIDITY.md](TRADI
   - Sessions before a ticker's first observed activity (pre-listing) are excluded from the baseline.
   - **Only certified sessions count.** Legacy, partial and awaiting-settlement sessions are excluded, and the
     report says how many legacy sessions are waiting for re-verification.
-  - **Implausibly empty sessions.** A certified session with zero activity *after* the ticker's first activity
-    is excluded (`excluded_implausible_empty`) when the median active session has ≥ 20 rows; for thin tickers
-    a quiet day stays a genuine zero.
+  - **Implausibly empty or small sessions.** A certified session with zero activity *after* the ticker's first
+    activity is excluded (`excluded_implausible_empty`) when the median active session has ≥ 20 rows; for thin
+    tickers a quiet day stays a genuine zero. Once there are at least 5 active sessions, a session with fewer
+    rows than 10% of that median is excluded too (a near-total loss leaves no long gap for the gap check to
+    see); it is counted in the same field and only shortens the history.
   - **Market calendar.** Unscheduled closures (e.g. national days of mourning, 2012 storm days, 2025-01-09)
     are not trading sessions; more can be added with `TIP_EXTRA_MARKET_CLOSURES` (comma-separated dates).
 - **No look-ahead.** Only sessions strictly before the evidence session are eligible.

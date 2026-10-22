@@ -194,7 +194,8 @@ class BaselineJobRunner:
         ds = entry.get("datasets") or {}
         if not ds:
             return None
-        return [name for name, d in ds.items() if not cls._dataset_met(d, target) and not d.get("no_more_work")]
+        return [name for name, d in ds.items() if not cls._dataset_met(d, target) and not d.get("no_more_work")
+                and not d.get("waiting_now")]
 
     @staticmethod
     def _ticker_done(entry: dict, target: int) -> Optional[str]:
@@ -261,7 +262,15 @@ class BaselineJobRunner:
             progress = job["progress"]
             ticker = next((t for t in job["tickers"] if progress[t]["state"] in ("pending", "running")), None)
             if ticker is None:
-                self.store.transition(job_id, ("running",), "completed")
+                waiting = sorted(progress[t].get("confirmable_at") or "" for t in job["tickers"]
+                                 if progress[t]["state"] == "awaiting_gap_confirmation")
+                if waiting:
+                    # R5-3: resumable -- Resume re-arms the waiting tickers once their sessions can be confirmed
+                    self.store.update(job_id, last_error=(
+                        f"paused: suspected provider gaps can be confirmed from {waiting[0]}; resume the job after that"))
+                    self.store.transition(job_id, ("running",), "paused")
+                else:
+                    self.store.transition(job_id, ("running",), "completed")
                 return
             entry = progress[ticker]
             counters = (job.get("pages_used"), entry.get("pages_used"), job.get("max_pages_per_ticker"))
@@ -278,7 +287,15 @@ class BaselineJobRunner:
             pages = min(job["step_pages"], remaining)
             needed = self._datasets_needed(entry, job["target_sessions"])
             if needed == []:                         # nothing left to request for this ticker
-                entry["state"] = self._ticker_done(entry, job["target_sessions"]) or "no_more_work"
+                waiting = [w for d in (entry.get("datasets") or {}).values()
+                           if d.get("waiting_now") and not d.get("target_met")
+                           for w in (d.get("awaiting_gap_confirmation") or [])]
+                done = self._ticker_done(entry, job["target_sessions"])
+                if not done and waiting:
+                    entry["state"] = "awaiting_gap_confirmation"
+                    entry["confirmable_at"] = min(w["confirmable_at"] for w in waiting)
+                else:
+                    entry["state"] = done or "no_more_work"
                 self.store.update(job_id, progress=progress)
                 continue
             # Charge the step BEFORE any provider request: if the step raises or the process
@@ -326,6 +343,9 @@ class BaselineJobRunner:
                                 # not finished: it is walked again when the job is resumed later
                                 "no_more_work": (bool(prev.get("no_more_work")) or (bool(allocated) and ds_used == 0))
                                 and not waiting,
+                                # R5-2: allocated pages, used none, only waiting sessions left -> no work NOW (the
+                                # next step gives its pages to another dataset); cleared when the job is re-armed
+                                "waiting_now": bool(waiting) and bool(allocated) and ds_used == 0,
                                 "pages_used": (prev.get("pages_used") or 0) + ds_used,
                                 "http_attempts": (prev.get("http_attempts") or 0) + int(r.get("http_attempts") or 0),
                                 "bounds_retries": (prev.get("bounds_retries") or 0)
@@ -351,7 +371,8 @@ class BaselineJobRunner:
             if done:
                 entry["state"] = done
             elif used == 0 and not starved:
-                waiting = [w for d in ds_state.values() for w in (d.get("awaiting_gap_confirmation") or [])]
+                waiting = [w for d in ds_state.values() if not d.get("target_met")
+                           for w in (d.get("awaiting_gap_confirmation") or [])]
                 if waiting:                          # R4-4: nothing to do NOW; resume after confirmable_at
                     entry["state"] = "awaiting_gap_confirmation"
                     entry["confirmable_at"] = min(w["confirmable_at"] for w in waiting)

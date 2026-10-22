@@ -54,7 +54,7 @@ SETTLE_LAG = timedelta(minutes=_env_minutes("TIP_COVERAGE_SETTLE_MINUTES", 180, 
 #       row rate, capped per minute against bursts, predicts the rows the gap should have held.
 # A model flags the gap when its prediction is >= ln(the session's number of opportunities -- events, or capped
 # rows) + GAP_SIGNIFICANCE: under a Poisson model the chance that ANY natural gap of the session reaches that is
-# about exp(-GAP_SIGNIFICANCE) (~0.7%), however many gaps the session has. (c) A gap spanning more than half of
+# about exp(-GAP_SIGNIFICANCE) (~0.4%), however many gaps the session has. (c) A gap spanning more than half of
 # the session with >= GAP_MIN_ROWS rows is implausible outright. A gap whose quieter side holds fewer than
 # GAP_MIN_SIDE_EVENTS events is not judged by (a): so thin a context cannot tell an outage from a quiet day. Measured operating characteristics: docs/SIGNAL_INTEGRITY_RULES.md section 4.
 GAP_MIN = timedelta(minutes=_env_minutes("TIP_COVERAGE_GAP_MIN_MINUTES", 5, 2, 390))
@@ -75,6 +75,11 @@ GAP_CONFIRM_AFTER = timedelta(hours=_env_minutes("TIP_COVERAGE_GAP_CONFIRM_HOURS
 # the baseline (a provider-side outage or an unscheduled closure), never averaged in as zero. Below the
 # threshold (thinly traded tickers) a zero day is a genuine zero.
 EMPTY_SESSION_MIN_MEDIAN_ROWS = 20
+# R5-7: for such an active ticker, a session with fewer rows than this share of its median active session (an
+# outage the gap check cannot see, e.g. a near-total loss) is excluded too -- a genuine day that quiet is rare,
+# and skipping it only shortens the history; averaging it in as real activity would distort the baseline.
+IMPLAUSIBLY_SMALL_SHARE = 0.10
+IMPLAUSIBLY_SMALL_MIN_SESSIONS = 5   # a median needs a real history behind it
 
 
 def is_certified(cov) -> bool:
@@ -131,15 +136,22 @@ def gap_assessment(event_times, open_utc, close_utc) -> tuple:
                  if len(side) >= GAP_MIN_CONTEXT_MINUTES]
         if not sides:
             continue
-        side_events = min(sum(1 for m in side if m in starts) for side in sides)
-        ev_rate = min(sum(1 for m in side if m in starts) / len(side) for side in sides)
-        if side_events >= GAP_MIN_SIDE_EVENTS and ev_rate * g >= t_events:
-            return max_gap, True                             # (a)
-        share = min(sum(1 for m in side if m in counts) / len(side) for side in sides)
-        if share >= GAP_SATURATED_SHARE:
-            row_rate = min(sum(capped.get(m, 0) for m in side) / len(side) for side in sides)
-            if row_rate * g >= t_rows:
-                return max_gap, True                         # (b)
+        # R5-1: each side is judged with the model that fits IT -- events where it has enough of them, capped rows
+        # where it is saturated (a busy opening or closing stretch is one long run: few events, many rows) --
+        # as the ratio of its prediction to the significance bound. A side with neither (too thin to judge) counts
+        # as quiet (0). The gap is implausible when even the QUIETER side's judgement reaches the bound.
+        judgements = []
+        for side in sides:
+            n_ev = sum(1 for m in side if m in starts)
+            share = sum(1 for m in side if m in counts) / len(side)
+            ratio = 0.0
+            if n_ev >= GAP_MIN_SIDE_EVENTS:
+                ratio = max(ratio, n_ev / len(side) * g / t_events)                                # (a)
+            if share >= GAP_SATURATED_SHARE:
+                ratio = max(ratio, sum(capped.get(m, 0) for m in side) / len(side) * g / t_rows)    # (b)
+            judgements.append(ratio)
+        if min(judgements) >= 1.0:
+            return max_gap, True
     return max_gap, False
 
 
@@ -158,5 +170,7 @@ def usable_prior_count(covs, before_iso: str, max_history: int = 60) -> int:
     rows = rows[first:]
     active = sorted(n for n in rows if n > 0)
     if active and active[len(active) // 2] >= EMPTY_SESSION_MIN_MEDIAN_ROWS:
-        rows = [n for n in rows if n > 0]
+        floor = (max(1, IMPLAUSIBLY_SMALL_SHARE * active[len(active) // 2])
+                 if len(active) >= IMPLAUSIBLY_SMALL_MIN_SESSIONS else 1)
+        rows = [n for n in rows if n >= floor]
     return len(rows)

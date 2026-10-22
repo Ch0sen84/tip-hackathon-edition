@@ -134,6 +134,9 @@ async function main() {
     replaceState(s, t, url) { hist.push(["replace", url]); location.hash = url; },
   };
   const x = load();
+  await check("R5-10: TIP_STATE.shownView starts as the initial view", async () => {
+    assert.equal(x.tipState().shownView, "radar");
+  });
   const H = () => x.handlers();
   const radarReads = () => requests.filter((r) => r.method === "GET" && r.path === "/api/radar").length;
   const R401 = { status: 401, json: { detail: "Missing or invalid X-TIP-Auth header." } };
@@ -216,6 +219,17 @@ async function main() {
     store.tip_auth_token = token; rules = []; x.setAuthMode("local");
   });
 
+  console.log("\n=== R5-10: a format-invalid deep-linked ticker while Market Radar is not loaded ===");
+  await check("refused even though the known tickers are unknown (null)", async () => {
+    reset();
+    const handlers = { ...H(), getKnownTickers: () => null, isArbitraryTickerAllowed: () => false };
+    globalThis.applyNavState({ view: "ticker", ticker: "bad$1", mode: null }, handlers, { push: false });
+    await sleep(200);
+    const hit = requests.filter((r) => r.path.includes("bad"));
+    console.log(`   URL: ${location.hash} | requests naming the ticker: ${hit.length}`);
+    assert.equal(hit.length, 0, "a format-invalid ticker reached loadTickerDetail");
+    assert.doesNotMatch(location.hash, /bad/);
+  });
   await r4f1();
   console.log(`\n${passed} check(s) passed.`);
 }

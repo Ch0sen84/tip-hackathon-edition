@@ -27,7 +27,7 @@
 // state instead of the ticker the user had actually been analyzing.
 // Only an explicit mode-invalidation (clearTickerView, when the old
 // ticker may not even exist under the new adapter) clears this.
-const TIP_STATE = { currentTicker: null, lastTicker: null, currentView: "radar" };
+const TIP_STATE = { currentTicker: null, lastTicker: null, currentView: "radar", shownView: "radar" };
 
 // --- Phase A: auth setup banner (pure render, no fetch) --------------------
 //
@@ -295,7 +295,8 @@ function applyNavState(state, handlers, opts = {}) {
   // app.live.js) lets a format-valid ticker through here the same way.
   const allowArbitrary = handlers && handlers.isArbitraryTickerAllowed && handlers.isArbitraryTickerAllowed();
   const formatValid = /^[A-Z]{1,5}(\.[A-Z])?$/.test(state.ticker || "");
-  if (known && !known.includes(state.ticker) && !(allowArbitrary && formatValid)) {
+  // R5-10: while the known tickers are not loaded yet (null), a format-invalid ticker is still refused
+  if ((known && !known.includes(state.ticker) && !(allowArbitrary && formatValid)) || (!known && !formatValid)) {
     setHistory("ticker", null);
     switchView("ticker");
     const el = document.getElementById("tickerDetail");
@@ -4707,7 +4708,7 @@ const BASELINE_TICKER_STATES = {
   pending: "waiting", running: "in progress", complete: "target reached",
   history_cutoff: "provider history ends -- cannot reach target", budget_exhausted: "page budget used up",
   no_more_work: "nothing more to collect in the lookback window",
-  awaiting_gap_confirmation: "a suspected provider gap is waiting for its confirmation time -- resume or start a build after it",
+  awaiting_gap_confirmation: "a suspected provider gap is waiting for its confirmation time -- resume this job after it",
 };
 const BASELINE_ACTIVE = ["running", "pause_requested", "paused", "cancel_requested"];
 

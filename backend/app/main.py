@@ -2778,6 +2778,10 @@ def _rearm_awaiting_tickers(job_id: int) -> None:
             entry["state"] = "pending"
             entry.pop("confirmable_at", None)
             changed = True
+        for d in ((entry or {}).get("datasets") or {}).values():     # R5-2: waiting datasets get pages again
+            if d.get("waiting_now"):
+                d["waiting_now"] = False
+                changed = True
     if changed:
         store.update(job_id, progress=progress)
 
