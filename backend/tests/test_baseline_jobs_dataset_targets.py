@@ -132,8 +132,12 @@ def test_bounds_retries_are_reported_in_job_progress_and_the_read_only_route(liv
         if "/api/darkpool/" in url:
             n["i"] += 1
             if n["i"] == 3:                                    # one out-of-window print, once
+                from datetime import timedelta
                 from tests.uw_fakes import FakeResponse
-                bad = {"ticker": "ABCD", "tracking_id": "x", "executed_at": params["older_than"],
+                from tests.uw_paginated import _ts, iso
+                # 30 s beyond the exclusive bound (a whole-second row AT the bound is dropped, not rejected)
+                bad = {"ticker": "ABCD", "tracking_id": "x",
+                       "executed_at": iso(_ts(params["older_than"]) + timedelta(seconds=30)),
                        "price": "1", "size": 1, "premium": "1", "canceled": False}
                 return FakeResponse(200, {"data": [bad] + resp.json()["data"]})
         return resp
@@ -144,7 +148,7 @@ def test_bounds_retries_are_reported_in_job_progress_and_the_read_only_route(liv
     assert ds["bounds_retries"] == 1 and ds["bounds_recovered"] == 1
     calls = len(uw.calls)
     body = client.get("/api/diagnostics/collection-bounds?ticker=abcd&dataset=darkpool").json()
-    assert body["count"] == 1 and body["diagnostics"][0]["classification"] == "cursor_boundary_inclusive"
+    assert body["count"] == 1 and body["diagnostics"][0]["classification"] == "upper_bound_violated"
     assert body["retries_per_window"] == session_collection.BOUNDS_RETRIES_PER_WINDOW
     assert len(uw.calls) == calls                                   # read-only: no provider request
     assert client.get("/api/diagnostics/collection-bounds?dataset=nope").status_code == 400

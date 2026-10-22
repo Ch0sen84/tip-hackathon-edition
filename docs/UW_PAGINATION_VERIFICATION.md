@@ -46,7 +46,11 @@ captures and to the adapters' expectations; every field the collector reads was 
   proves its window exhausted. A record at the open is no longer required, so quiet or thin sessions can be
   complete. The flow-alerts 7-day default never applies.
 - **Per-endpoint cursor steps.** Dark pool uses the oldest row + 1 s (exclusive, second resolution; the
-  boundary second is re-read and deduplicated). Flow alerts use the oldest row (inclusive; boundary rows
+  boundary second is re-read and deduplicated). **Observed 2026-10-22 (real NVDA walks):** on some pages the
+  dark-pool endpoint also returns rows stamped exactly AT the exclusive `older_than` second (whole seconds,
+  reproducible on retry, including a first page bounded at close + 1 s). The collector drops those rows (they
+  are outside the window by their own timestamp, and that second is the previous page's) instead of rejecting
+  the page; before this, 3 of ~26 NVDA sessions were left `unknown: bounds_not_honored`. Flow alerts use the oldest row (inclusive; boundary rows
   deduplicated by `id`).
 - **Dark-pool identity** is the composite key above. 05c47ca's value fingerprint
   (ticker, executed_at, price, size, premium) silently dropped **437** distinct prints in the captured DB, and

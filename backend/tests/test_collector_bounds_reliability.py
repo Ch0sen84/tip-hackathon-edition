@@ -54,6 +54,8 @@ class FaultyUW(PaginatedUW):
             data = [bad(hi + timedelta(seconds=30))] + data[:-1]
         elif mode == "at_cursor":
             data = [bad(hi)] + data[:-1]
+        elif mode == "at_cursor_fractional":    # exactly at the bound, but with sub-second precision
+            data = [{**bad(hi), "executed_at": iso(hi).replace("Z", ".000000Z")}] + data[:-1]
         elif mode == "below_lower":
             data = data[:-1] + [bad(lo - timedelta(minutes=10))]
         elif mode == "hour_offset":
@@ -200,16 +202,19 @@ def test_retries_zero_restores_the_previous_behaviour(cat, monkeypatch):
     assert u.coverage["status"] == "unknown" and uw.dp_calls == 3
 
 
-def test_dense_same_second_boundaries_with_a_recovered_retry_skip_nothing(cat, no_gap_policy):
+def test_dense_same_second_boundaries_with_a_row_at_the_exclusive_cursor_skip_nothing(cat, no_gap_policy):
+    """Real-provider qualification: a whole-second row stamped exactly at the exclusive older_than bound is
+    outside the window by its own timestamp. It is dropped (never stored) and the page is accepted -- no
+    retry, no diagnostic -- and the walk still stores exactly the provider's in-window prints."""
     rows = dense_day(per_second=31, every_minutes=1 / 60)               # 31 prints in every second
     uw = FaultyUW(darkpool=rows, faults={2: "at_cursor"})
     u = cover(uw, cat)
-    assert u.coverage["status"] == "complete" and u.bounds_recovered == 1
-    assert stored_keys(cat) == expected_keys(rows)
+    assert u.coverage["status"] == "complete" and u.bounds_recovered == 0 and u.bounds_retries == 0
+    assert stored_keys(cat) == expected_keys(rows)                     # the injected row is not stored
     with cat._conn() as conn:
         dup = conn.execute("SELECT COUNT(*) - COUNT(DISTINCT source_id) FROM darkpool_observations").fetchone()[0]
     assert dup == 0
-    assert diags(cat)[0]["classification"] == "cursor_boundary_inclusive"
+    assert diags(cat) == []
 
 
 def test_failure_then_restart_resumes_from_the_checkpoint_and_dedups(cat):
@@ -248,7 +253,7 @@ def test_persistent_failure_in_a_resumed_window_drops_to_unknown_never_complete(
 # --- diagnostics: content, classification, sanitization -------------------------
 
 @pytest.mark.parametrize("mode,expected", [
-    ("at_cursor", "cursor_boundary_inclusive"),
+    ("at_cursor_fractional", "timestamp_precision"),
     ("hour_offset", "timezone_offset_suspected"),
     ("below_lower", "lower_bound_ignored"),
     ("above_cursor", "upper_bound_violated"),
@@ -281,8 +286,8 @@ def test_diagnostics_are_sanitized_and_bounded(cat, monkeypatch):
 
 def test_diagnostic_table_cap_and_a_diagnostic_failure_never_changes_the_outcome(cat, monkeypatch):
     monkeypatch.setattr(cat, "DIAGNOSTICS_MAX_ROWS", 1)
-    cover(FaultyUW(darkpool=dense_day(), faults={2: "at_cursor"}), cat)         # 1 stored
-    u = cover(FaultyUW(darkpool=dense_day(), faults={1: "at_cursor"}), cat, d=prior_sessions(EVIDENCE, 2)[1])
+    cover(FaultyUW(darkpool=dense_day(), faults={2: "above_cursor"}), cat)      # 1 stored
+    u = cover(FaultyUW(darkpool=dense_day(), faults={1: "above_cursor"}), cat, d=prior_sessions(EVIDENCE, 2)[1])
     with cat._conn() as conn:
         assert conn.execute("SELECT COUNT(*) FROM collection_diagnostics").fetchone()[0] == 1
     assert u.coverage["status"] == "complete"
@@ -290,7 +295,7 @@ def test_diagnostic_table_cap_and_a_diagnostic_failure_never_changes_the_outcome
     def boom(*a, **k):
         raise RuntimeError("disk full")
     monkeypatch.setattr(cat, "record_collection_diagnostic", boom)
-    u2 = cover(FaultyUW(darkpool=dense_day(), faults={1: "at_cursor"}), cat, d=prior_sessions(EVIDENCE, 3)[2])
+    u2 = cover(FaultyUW(darkpool=dense_day(), faults={1: "above_cursor"}), cat, d=prior_sessions(EVIDENCE, 3)[2])
     assert u2.coverage["status"] == "complete"
 
 
@@ -330,3 +335,44 @@ def test_migration_10_is_additive(cat):
     # migration 10 did not touch session_coverage; migration 11 only APPENDS provenance columns
     assert cov_cols[:11] == ["id", "dataset", "ticker", "session_date", "status", "covered_from_utc",
                              "covered_through_utc", "pages_walked", "rows_seen", "last_error", "retrieved_at"]
+
+
+class WholeSecondInclusiveUW(PaginatedUW):
+    """Observed on the real dark-pool endpoint (NVDA, 2026-10-22): rows stamped exactly at the exclusive
+    older_than bound (whole seconds) come back on some pages. Here EVERY page does that."""
+
+    @staticmethod
+    def _page(rows, field, params, upper_inclusive=False):
+        return PaginatedUW._page(rows, field, params, upper_inclusive=True)
+
+
+def test_a_provider_returning_rows_at_the_exclusive_bound_still_certifies_the_exact_session(cat, no_gap_policy):
+    rows = dense_day(per_second=31, every_minutes=1 / 60)
+    u = cover(WholeSecondInclusiveUW(darkpool=rows), cat)
+    assert u.coverage["status"] == "complete", u.coverage
+    assert stored_keys(cat) == expected_keys(rows)
+    assert diags(cat) == []
+
+
+def test_inspect_page_drops_only_whole_second_rows_at_an_exclusive_bound():
+    spec = sc.DATASETS["darkpool"]
+    lo = datetime(2026, 10, 15, 13, 30, tzinfo=timezone.utc)
+    cursor = lo + timedelta(minutes=10)
+
+    def row(ts_text):
+        return {"ticker": "ABCD", "tracking_id": ts_text, "executed_at": ts_text, "price": "1", "size": 1,
+                "premium": "1", "canceled": False}
+
+    at = cursor.strftime("%Y-%m-%dT%H:%M:%SZ")
+    inside = (cursor - timedelta(seconds=5)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    page = sc._inspect_page(spec, [row(at), row(at), row(inside)], "ABCD", lo.date(), lo, cursor)
+    assert page["reason"] is None and len(page["rows"]) == 1 and page["violations"]["boundary_dropped"] == 2
+    frac = sc._inspect_page(spec, [row(at.replace("Z", ".000000Z")), row(inside)], "ABCD", lo.date(), lo, cursor)
+    assert frac["reason"] == "bounds_not_honored" and frac["rows"] == []
+    beyond = (cursor + timedelta(seconds=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    assert sc._inspect_page(spec, [row(beyond), row(inside)], "ABCD", lo.date(), lo, cursor)["reason"] == \
+        "bounds_not_honored"
+    flow = sc.DATASETS["options_flow"]                      # inclusive endpoint: a row at the bound is in-window
+    fr = {"id": "a1", "ticker": "ABCD", "created_at": at, "type": "call", "total_premium": 1}
+    assert sc._inspect_page(flow, [fr], "ABCD", lo.date(), lo, cursor)["rows"]
+

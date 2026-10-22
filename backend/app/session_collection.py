@@ -268,7 +268,7 @@ def _inspect_page(spec, data: list, ticker: str, session_date: date, lo: datetim
     bounds_not_honored, then wrong_session_date, then rows_out_of_order)."""
     rows, times, all_times, samples = [], [], [], []
     v = {"below_lower": 0, "at_upper": 0, "above_upper": 0, "wrong_date": 0, "unparseable": 0,
-         "other_ticker": 0, "non_object": 0, "out_of_order": 0}
+         "other_ticker": 0, "non_object": 0, "out_of_order": 0, "boundary_dropped": 0}
     prev_ts = None
 
     def invalid(idx, kind, value_type):
@@ -297,6 +297,15 @@ def _inspect_page(spec, data: list, ticker: str, session_date: date, lo: datetim
         if ts < lo:
             bad = "below_lower"
         elif not spec.in_bounds(ts, lo, cursor):
+            if ts == cursor and not spec.upper_inclusive and "." not in str(raw_ts):
+                # Real-provider qualification: the dark-pool endpoint sometimes returns rows stamped
+                # (whole seconds) exactly at the EXCLUSIVE older_than bound. They are outside the window
+                # by their own timestamp and never stored. Dropping them loses nothing: on a continuation
+                # page that second is the previous page's (cursor = its oldest + 1 s, and a full
+                # newest-first page holds every row above its oldest second); on a first page it is
+                # past the window. Rejecting the whole page for them left real sessions unknown.
+                v["boundary_dropped"] += 1
+                continue
             bad = "at_upper" if ts == cursor else "above_upper"
         if not bad and spec.date_scoped and ts.astimezone(tc.NY_TZ).date() != session_date:
             bad = "wrong_date"

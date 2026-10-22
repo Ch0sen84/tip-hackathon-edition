@@ -71,7 +71,11 @@ No confidence value is calibrated or predictive (see [TRADING_VALIDITY.md](TRADI
     whole page: nothing from it is stored, and an invalid short page never proves a window exhausted.
     - `invalid_rows`: a row that is not an object, carries another ticker, or has a missing or unparseable
       timestamp.
-    - `bounds_not_honored`: a row outside the requested bounds. `wrong_session_date`: a dark-pool row off the
+    - `bounds_not_honored`: a row outside the requested bounds. A dark-pool row stamped (in whole seconds)
+      exactly at the exclusive upper bound is the exception: it is outside the window by its own timestamp,
+      so it is dropped (never stored) and the page is accepted. The real endpoint returns such rows on some
+      pages; that second always belongs to the previous page (cursor = its oldest row + 1 s) or lies past
+      the window. `wrong_session_date`: a dark-pool row off the
       session date.
     - `rows_out_of_order`: rows that are not newest-first. Equal timestamps in any order are fine. The cursor
       relies on a full page being the *newest* rows of its window.
