@@ -335,6 +335,10 @@ class BaselineJobRunner:
                 prev = (entry["datasets"].get(ds) or {})
                 allocated = r.get("pages_allocated")
                 ds_used = int(r.get("pages_used") or 0)
+                # F-1: whether history work remains is judged on the PRIOR-session loop only, and only when
+                # that loop had pages (the in-progress evidence session always has a little more to fetch)
+                prior_used = int(r.get("prior_pages_used", ds_used) or 0)
+                prior_had_pages = int(r.get("prior_budget", allocated or 0) or 0) > 0
                 attempts += int(r.get("http_attempts") or 0)
                 starved = starved or allocated == 0
                 waiting = list(r.get("awaiting_gap_confirmation") or [])
@@ -345,11 +349,11 @@ class BaselineJobRunner:
                                 "last_pages_allocated": allocated,
                                 # R4-4: a dataset whose only remaining sessions await gap confirmation is
                                 # not finished: it is walked again when the job is resumed later
-                                "no_more_work": (bool(prev.get("no_more_work")) or (bool(allocated) and ds_used == 0))
+                                "no_more_work": (bool(prev.get("no_more_work")) or (prior_had_pages and prior_used == 0))
                                 and not waiting,
                                 # R5-2: allocated pages, used none, only waiting sessions left -> no work NOW (the
                                 # next step gives its pages to another dataset); cleared when the job is re-armed
-                                "waiting_now": bool(waiting) and bool(allocated) and ds_used == 0,
+                                "waiting_now": bool(waiting) and prior_had_pages and prior_used == 0,
                                 "pages_used": (prev.get("pages_used") or 0) + ds_used,
                                 "http_attempts": (prev.get("http_attempts") or 0) + int(r.get("http_attempts") or 0),
                                 "bounds_retries": (prev.get("bounds_retries") or 0)

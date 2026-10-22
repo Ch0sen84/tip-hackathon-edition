@@ -722,10 +722,19 @@ def backfill_baseline(client, catalog, dataset: str, ticker: str, evidence_sessi
                       max_pages: int = DEFAULT_BACKFILL_PAGES,
                       lookback_sessions: int = BACKFILL_LOOKBACK_SESSIONS,
                       kind: str = "background", now_utc: Optional[datetime] = None) -> dict:
-    """Bounded backfill, spending at most `max_pages` UW requests: first
-    extends the EVIDENCE session (the comparison needs it covered from the
-    open), then completes prior sessions newest-first. Never fabricates
-    coverage; stops on a provider failure or history cutoff."""
+    """Bounded backfill, spending at most `max_pages` UW requests. Never
+    fabricates coverage; stops fetching on a provider failure or history cutoff.
+
+    Order (F-1): (1) while the EVIDENCE session is not yet covered from its
+    open, walk it first (the comparison needs it, and that catch-up is finite);
+    (2) complete PRIOR sessions newest-first; (3) only then extend an evidence
+    session that is already covered from the open, with the budget left. While
+    the market is open the evidence session always has a little more to fetch:
+    polling it first spent every step's pages on it and starved history.
+
+    `prior_budget` (pages available when the prior-session loop started) and
+    `prior_pages_used` tell a job whether history work remains; sessions
+    awaiting gap confirmation are reported even when the budget is spent."""
     now_utc = now_utc or datetime.now(timezone.utc)
     budget, results = max_pages, []
 
@@ -740,32 +749,51 @@ def backfill_baseline(client, catalog, dataset: str, ticker: str, evidence_sessi
                         "bounds_retries": u.bounds_retries, "bounds_recovered": u.bounds_recovered})
         return u, cov
 
-    awaiting: list = []
-    if tc.is_trading_day(evidence_session):
+    def evidence_open_for_walk():
         cov = catalog.get_session_coverage(dataset, ticker, evidence_session.isoformat()) or {}
-        if budget > 0 and not policy.is_certified(cov) and not _is_cutoff(cov):
-            u, cov = touch(evidence_session, settle=False)
-            if not u.ok:
-                return _backfill_result(catalog, dataset, ticker, evidence_session, max_pages, budget, results, awaiting)
+        return tc.is_trading_day(evidence_session) and not policy.is_certified(cov) and not _is_cutoff(cov), cov
+
+    awaiting: list = []
+    stopped = False                      # a provider failure ends all fetching (a history cutoff does not)
+    walkable, ev = evidence_open_for_walk()
+    caught_up = walkable and budget > 0 and not _evidence_from_open(ev, evidence_session)
+    if caught_up:
+        u, ev = touch(evidence_session, settle=False)          # (1) catch-up from the open
+        stopped = not u.ok
+    prior_budget = 0 if stopped else max(budget, 0)
     d = evidence_session
     for _ in range(lookback_sessions):
         d = tc.previous_trading_day(d)
-        if budget <= 0:
-            break
         cov = catalog.get_session_coverage(dataset, ticker, d.isoformat()) or {}
         waiting = _awaiting_gap_confirmation(catalog, cov, now_utc)
         if waiting is not None:          # R4-4: reported, so a job can say when it is worth resuming
             awaiting.append({"session_date": d.isoformat(), "confirmable_at": waiting.isoformat()})
-        if policy.is_certified(cov) or _is_cutoff(cov) or waiting is not None or (
+        if _is_cutoff(cov):
+            break                        # history cutoff: older sessions are unavailable too
+        if stopped or budget <= 0:
+            continue                     # F-1: keep scanning (no request) so every waiting session is reported
+        if policy.is_certified(cov) or waiting is not None or (
                 cov.get("status") == "unknown" and cov.get("last_error") in BACKOFF_REASONS
                 and not _rejection_expired(cov, now_utc)):
-            if _is_cutoff(cov):
-                break  # history cutoff: older sessions are unavailable too
             continue
-        u, cov = touch(d)
-        if not u.ok or _is_cutoff(cov):
+        u, cov = touch(d)                                      # (2) prior sessions
+        if _is_cutoff(cov):
             break
-    return _backfill_result(catalog, dataset, ticker, evidence_session, max_pages, budget, results, awaiting)
+        stopped = not u.ok
+    prior_pages = prior_budget - max(budget, 0)
+    walkable, ev = evidence_open_for_walk()
+    if walkable and not caught_up and not stopped and budget > 0:
+        touch(evidence_session, settle=False)                  # (3) extend with what is left (once per call)
+    out = _backfill_result(catalog, dataset, ticker, evidence_session, max_pages, budget, results, awaiting)
+    out["prior_budget"], out["prior_pages_used"] = prior_budget, prior_pages
+    return out
+
+
+def _evidence_from_open(cov: dict, evidence_session: date) -> bool:
+    """F-1: True when the evidence session's coverage already starts at its open."""
+    frm = _parse(cov.get("covered_from_utc"))
+    open_utc = tc.session_info(evidence_session).session_open_et.astimezone(timezone.utc)
+    return frm is not None and frm <= open_utc
 
 
 def _suspected_at(catalog, dataset, ticker, sd) -> Optional[datetime]:

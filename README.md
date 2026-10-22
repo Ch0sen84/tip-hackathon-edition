@@ -63,6 +63,10 @@ section 4.
    - a provider error pauses the job and shows the error;
    - an application restart leaves the job paused; it never auto-resumes;
    - already-verified sessions are never fetched again.
+   - history comes first: a job walks the current session back to the open once (the comparison needs it),
+     then spends each step on prior sessions; while the market is open it extends the current session by at
+     most one page per dataset per step. A job whose remaining sessions all await gap confirmation pauses and
+     says from when they can be confirmed.
 
    Opening the page makes no UW requests; only the button does.
 
