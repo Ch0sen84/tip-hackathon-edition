@@ -521,6 +521,10 @@ def update_session_coverage(client, catalog, dataset: str, ticker: str, session_
         # C2-6: a legacy row is never rewritten in place; only a settled re-walk replaces it
         return CoverageUpdate(dataset, ticker, sd, COLLECTION_OK, cov, detail="legacy_uncertified")
     usable = cov.get("status") in ("complete", "partial")
+    # v10: a session left unknown for rejected content whose backoff has not expired keeps that state unless
+    # this walk proves it from the open (see the final store below)
+    backed_off = (cov.get("status") == "unknown" and cov.get("last_error") in BACKOFF_REASONS
+                  and not _rejection_expired(cov, now_utc))
     c_from = _parse(cov.get("covered_from_utc")) if usable else None
     c_through = _parse(cov.get("covered_through_utc")) if usable else None
     proof = _parse(cov.get("proof_started_utc")) if usable else None
@@ -734,6 +738,13 @@ def update_session_coverage(client, catalog, dataset: str, ticker: str, session_
         cov_status = "partial"
         why = reason or ("session_in_progress" if c_through is not None and c_through < close_utc
                          else "page_budget_exhausted")
+    if backed_off and not (c_from is not None and c_from <= open_utc):
+        # v10 (F-1 / R7-1 residual): an incomplete walk of a backed-off session -- budget spent before a proven
+        # edge from the open -- must not replace `unknown` (and its backoff clock) with `partial`; otherwise the
+        # next call sees a fresh partial session, walks it again, hits the rejection again, and the session
+        # oscillates between unknown and partial, spending pages each time. Rows fetched stay cataloged.
+        return result(dataset, ticker, sd, status, cov, pages=pages, rows_fetched=rows,
+                      detail=f"backed_off: {cov.get('last_error')}")
     store(cov_status, c_from, c_through, why, certification)
     return result(dataset, ticker, sd, status, current(), pages=pages, rows_fetched=rows, detail=why)
 
@@ -808,7 +819,10 @@ def backfill_baseline(client, catalog, dataset: str, ticker: str, evidence_sessi
         stopped = not u.ok
     prior_pages = prior_budget - max(budget, 0)
     walkable, ev = evidence_open_for_walk()
-    if walkable and not caught_up and not stopped and budget > 0:
+    # v10: (3) extends only an evidence session already proven from the open and not under backoff; an unknown
+    # (backed-off) or not-yet-proven session gets no leftover walk (the catch-up in (1) is its only path)
+    if (walkable and not caught_up and not stopped and budget > 0 and _evidence_from_open(ev, evidence_session)
+            and not backed_off(ev)):
         touch(evidence_session, settle=False)                  # (3) extend with what is left (once per call)
     out = _backfill_result(catalog, dataset, ticker, evidence_session, max_pages, budget, results, awaiting)
     out["prior_budget"], out["prior_pages_used"] = prior_budget, prior_pages
