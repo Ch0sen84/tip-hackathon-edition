@@ -1,24 +1,14 @@
 # TIP Hackathon Edition
 
-> ⚠️ **EARLY DEVELOPMENT — NOT PRODUCTION READY**
+> **WORKING HACKATHON / RESEARCH APPLICATION — NOT A TRADING OR FINANCIAL EXECUTION SYSTEM**
 >
-> TIP Hackathon Edition is an experimental, actively developed trading
-> intelligence application built for the Unusual Whales hackathon.
+> Public release v10 (`70c5d90790b300cc1bc7ecee6aba24c3d038692a`) is a working local application built for the
+> Unusual Whales hackathon. A fresh public-GitHub installation was verified with real Unusual Whales data, real
+> MCP tool calls, and Anthropic investigations. Demo Mode runs without credentials.
 >
-> This software is being released for evaluation, demonstration, feedback,
-> and development testing.
->
-> Features, interfaces, configuration, and installation procedures may
-> change. Bugs, incomplete functionality, inaccurate analysis, and
-> installation problems may occur.
->
-> **Not recommended for production use or making live trading decisions.**
-> Financial analysis is informational and should be independently
-> verified.
->
-> Users should run the application locally, protect their API
-> credentials, and avoid exposing the application or its Settings API to
-> untrusted networks.
+> TIP provides research-oriented, informational analysis. It does not place trades or provide financial advice;
+> independently verify its output before making decisions. Run it locally, protect your API credentials, and do
+> not expose the application or its Settings API to untrusted networks.
 
 Standalone hackathon build of TIP (Trading Intelligence Platform) for the
 Unusual Whales Hackathon. A FastAPI backend ports the production app's
@@ -47,7 +37,8 @@ This section is a first install; an existing deployment follows only
 [docs/RELEASE3_RECOVERY_RUNBOOK.md](docs/RELEASE3_RECOVERY_RUNBOOK.md).
 
 ```bash
-git clone https://github.com/Ch0sen84/tip-hackathon-edition && cd tip-hackathon-edition
+git clone https://github.com/Ch0sen84/tip-hackathon-edition
+cd tip-hackathon-edition
 cp .env.example .env
 docker compose up --build
 ```
@@ -823,14 +814,10 @@ calls (all via `monkeypatch`, no real network), demo/`PUBLIC_DEMO` always
 returning the static transcript and asserting the mocked real-call
 functions are never invoked, and schema enforcement rejecting a
 synthesis response missing `ai_interpretation` or smuggling a prediction
-into `observed_facts`. **95 passed, 0 failed** (73 prior + 22 new) as of
-this feature's addition; **108 passed, 0 failed** (95 prior + 13 new,
-`test_mcp_tool_client.py`) after adding the real MCP transport -- argument
-reconciliation per tool against the live schema, credential-in-env-not-argv,
-one-bad-call/connection-failure/timeout/unparseable-output/missing-venv all
-degrading or raising the documented way, all via `monkeypatch` on
-`subprocess.run`, no network or real `mcp` SDK/venv required for the suite
-to pass.
+into `observed_facts`. At public release v10, independent Linux review ran the full backend suite with **1,714
+passed, 0 failed, and 16 environment-dependent skips**. Development qualification also passed **41/41 frontend
+scripts**. The real MCP transport and Anthropic investigation path were verified end to end during the fresh-install
+Live qualification; ordinary automated tests remain network-isolated and use mocks or synthetic fixtures.
 
 ### Signal-integrity, replay and network safety
 
@@ -880,11 +867,13 @@ mcp_isolated/                 isolated venv + subprocess script for the real MCP
 
 ## Status
 
-Hackathon release. Live Mode was verified end to end on 2026-10-22 with a real Unusual Whales key on a fresh
-install: real dark-pool, options-flow, screener and price data; 20+ certified sessions per dataset for SPY, QQQ
-and NVDA; gates evaluated against that history; MCP and AI investigation with real calls; crash and restart
-recovery. Demo Mode covers the interface without any credential. Tests: `cd backend && TIP_MODE=demo python -m
-pytest -q` (backend) and `frontend/test_*.mjs` (frontend, against a running demo backend).
+Public hackathon release v10 (`70c5d90790b300cc1bc7ecee6aba24c3d038692a`). A fresh installation from
+public GitHub was verified end to end with a user-supplied Unusual Whales key: real dark-pool, options-flow,
+screener and price data; 20+ certified sessions per dataset across SPY, QQQ, NVDA, AMD and TSLA; gates evaluated
+against that history; real MCP tool calls and Anthropic investigations; and crash/restart recovery. Demo Mode
+covers the interface without credentials. Independent Linux review recorded 1,714 backend tests passed with 16
+environment-dependent skips; development qualification passed all 41 frontend scripts. Run them with `cd backend
+&& TIP_MODE=demo python -m pytest -q` and `frontend/test_*.mjs` (frontend, against a running demo backend).
 
 ## License
 
